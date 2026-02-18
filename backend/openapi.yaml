@@ -1,0 +1,1219 @@
+openapi: 3.0.3
+info:
+  title: 网络运维监控平台 API
+  description: |
+    网络运维监控平台后端API规范，基于RESTful设计风格。
+
+    ## 认证方式
+    - 所有API需要通过Header传递API Key：`Authorization: Bearer <token>`
+    - 登录接口返回token
+
+    ## 响应格式
+    所有接口统一响应格式：
+    ```json
+    {
+      "code": 0,
+      "message": "success",
+      "data": {}
+    }
+    ```
+  version: 1.0.0
+  contact:
+    name: IT Manager Team
+
+servers:
+  - url: http://localhost:8080/api
+    description: 本地开发环境
+  - url: http://localhost/api
+    description: 生产环境
+
+tags:
+  - name: 认证
+    description: 登录、登出相关接口
+  - name: 仪表盘
+    description: 统计和趋势数据
+  - name: 资产管理
+    description: 资产CRUD操作
+  - name: 告警中心
+    description: 告警列表、确认、解决
+  - name: 机房机柜
+    description: 机房、机柜管理
+  - name: 工单管理
+    description: 工单相关接口
+  - name: 用户管理
+    description: 用户列表、详情
+  - name: 通知设置
+    description: 通知渠道管理
+
+paths:
+  # ==================== 认证 ====================
+  /auth/login:
+    post:
+      tags:
+        - 认证
+      summary: 用户登录
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  description: 用户名
+                password:
+                  type: string
+                  description: 密码
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+
+  /auth/logout:
+    post:
+      tags:
+        - 认证
+      summary: 用户登出
+      operationId: logout
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: 登出成功
+
+  # ==================== 仪表盘 ====================
+  /dashboard/stats:
+    get:
+      tags:
+        - 仪表盘
+      summary: 获取仪表盘统计
+      operationId: getDashboardStats
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardStats'
+
+  /dashboard/trends:
+    get:
+      tags:
+        - 仪表盘
+      summary: 获取告警趋势
+      operationId: getDashboardTrends
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardTrends'
+
+  # ==================== 资产管理 ====================
+  /assets:
+    get:
+      tags:
+        - 资产管理
+      summary: 获取资产列表
+      operationId: listAssets
+      parameters:
+        - name: site_id
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetList'
+
+    post:
+      tags:
+        - 资产管理
+      summary: 创建资产
+      operationId: createAsset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetInput'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+
+  /assets/{id}:
+    get:
+      tags:
+        - 资产管理
+      summary: 获取资产详情
+      operationId: getAsset
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+
+    put:
+      tags:
+        - 资产管理
+      summary: 更新资产
+      operationId: updateAsset
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetInput'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+
+    delete:
+      tags:
+        - 资产管理
+      summary: 删除资产
+      operationId: deleteAsset
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 删除成功
+
+  # ==================== 告警中心 ====================
+  /alerts:
+    get:
+      tags:
+        - 告警中心
+      summary: 获取告警列表
+      operationId: listAlerts
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [problem, acknowledged, resolved]
+        - name: severity
+          in: query
+          schema:
+            type: integer
+        - name: host_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertList'
+
+  /alerts/{id}:
+    get:
+      tags:
+        - 告警中心
+      summary: 获取告警详情
+      operationId: getAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+
+  /alerts/{id}/acknowledge:
+    put:
+      tags:
+        - 告警中心
+      summary: 确认告警
+      operationId: acknowledgeAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 确认成功
+
+  /alerts/{id}/resolve:
+    put:
+      tags:
+        - 告警中心
+      summary: 解决告警
+      operationId: resolveAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 解决成功
+
+  /alerts/stats:
+    get:
+      tags:
+        - 告警中心
+      summary: 获取告警统计
+      operationId: getAlertStats
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertStats'
+
+  # ==================== 告警规则 ====================
+  /alert-rules:
+    get:
+      tags:
+        - 告警中心
+      summary: 获取告警规则列表
+      operationId: listAlertRules
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRuleList'
+
+    post:
+      tags:
+        - 告警中心
+      summary: 创建告警规则
+      operationId: createAlertRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleInput'
+      responses:
+        '201':
+          description: 创建成功
+
+  /alert-rules/{id}:
+    put:
+      tags:
+        - 告警中心
+      summary: 更新告警规则
+      operationId: updateAlertRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleInput'
+      responses:
+        '200':
+          description: 更新成功
+
+    delete:
+      tags:
+        - 告警中心
+      summary: 删除告警规则
+      operationId: deleteAlertRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 删除成功
+
+  # ==================== 机房 ====================
+  /sites:
+    get:
+      tags:
+        - 机房机柜
+      summary: 获取机房列表
+      operationId: listSites
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteList'
+
+  /sites/{id}:
+    get:
+      tags:
+        - 机房机柜
+      summary: 获取机房详情
+      operationId: getSite
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteDetail'
+
+  # ==================== 机柜 ====================
+  /racks:
+    get:
+      tags:
+        - 机房机柜
+      summary: 获取机柜列表
+      operationId: listRacks
+      parameters:
+        - name: site_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackList'
+
+  /racks/{id}:
+    get:
+      tags:
+        - 机房机柜
+      summary: 获取机柜详情
+      operationId: getRack
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rack'
+
+  /racks/{id}/devices:
+    get:
+      tags:
+        - 机房机柜
+      summary: 获取机柜内设备
+      operationId: getRackDevices
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackDeviceList'
+
+  # ==================== 工单 ====================
+  /tickets:
+    get:
+      tags:
+        - 工单管理
+      summary: 获取工单列表
+      operationId: listTickets
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: priority
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketList'
+
+    post:
+      tags:
+        - 工单管理
+      summary: 创建工单
+      operationId: createTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketInput'
+      responses:
+        '201':
+          description: 创建成功
+
+  /tickets/{id}:
+    get:
+      tags:
+        - 工单管理
+      summary: 获取工单详情
+      operationId: getTicket
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+
+    put:
+      tags:
+        - 工单管理
+      summary: 更新工单
+      operationId: updateTicket
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketInput'
+      responses:
+        '200':
+          description: 更新成功
+
+  # ==================== 用户 ====================
+  /users:
+    get:
+      tags:
+        - 用户管理
+      summary: 获取用户列表
+      operationId: listUsers
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+
+  /users/{id}:
+    get:
+      tags:
+        - 用户管理
+      summary: 获取用户详情
+      operationId: getUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  # ==================== 通知渠道 ====================
+  /notification/channels:
+    get:
+      tags:
+        - 通知设置
+      summary: 获取通知渠道列表
+      operationId: listChannels
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelList'
+
+    post:
+      tags:
+        - 通知设置
+      summary: 创建通知渠道
+      operationId: createChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelInput'
+      responses:
+        '201':
+          description: 创建成功
+
+  /notification/channels/{id}:
+    put:
+      tags:
+        - 通知设置
+      summary: 更新通知渠道
+      operationId: updateChannel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelInput'
+      responses:
+        '200':
+          description: 更新成功
+
+    delete:
+      tags:
+        - 通知设置
+      summary: 删除通知渠道
+      operationId: deleteChannel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 删除成功
+
+  /notification/channels/{id}/test:
+    post:
+      tags:
+        - 通知设置
+      summary: 测试通知渠道
+      operationId: testChannel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 测试消息已发送
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ==================== 通用 ====================
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+
+    # ==================== 认证 ====================
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 0
+        data:
+          type: object
+          properties:
+            token:
+              type: string
+            user:
+              $ref: '#/components/schemas/User'
+
+    # ==================== 仪表盘 ====================
+    DashboardStats:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            assets:
+              type: integer
+            alerts:
+              type: integer
+            tickets:
+              type: integer
+            sites:
+              type: integer
+            machines:
+              type: integer
+            networks:
+              type: integer
+
+    DashboardTrends:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            alert_trends:
+              type: array
+              items:
+                type: object
+                properties:
+                  date:
+                    type: string
+                  count:
+                    type: integer
+
+    # ==================== 资产 ====================
+    Asset:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        asset_type:
+          type: string
+          enum: [server, switch, router, firewall, storage, other]
+        ip_address:
+          type: string
+        mac_address:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, maintenance]
+        site_id:
+          type: string
+          format: uuid
+        site_name:
+          type: string
+        rack_id:
+          type: string
+          format: uuid
+        rack_name:
+          type: string
+        rack_position:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AssetInput:
+      type: object
+      required:
+        - name
+        - asset_type
+        - ip_address
+      properties:
+        name:
+          type: string
+        asset_type:
+          type: string
+        ip_address:
+          type: string
+        mac_address:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+        rack_id:
+          type: string
+          format: uuid
+        rack_position:
+          type: integer
+
+    AssetList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Asset'
+            total:
+              type: integer
+            page:
+              type: integer
+            page_size:
+              type: integer
+
+    # ==================== 告警 ====================
+    Alert:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        host:
+          type: string
+        message:
+          type: string
+        severity:
+          type: integer
+          minimum: 1
+          maximum: 5
+        severity_name:
+          type: string
+        status:
+          type: string
+          enum: [problem, acknowledged, resolved]
+        asset_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        ack_time:
+          type: string
+          format: date-time
+        ack_user:
+          type: string
+        resolve_time:
+          type: string
+          format: date-time
+        resolve_user:
+          type: string
+        duration:
+          type: integer
+
+    AlertList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Alert'
+            stats:
+              type: object
+              properties:
+                total:
+                  type: integer
+                problem:
+                  type: integer
+                acknowledged:
+                  type: integer
+                resolved:
+                  type: integer
+
+    AlertStats:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            by_severity:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity:
+                    type: integer
+                  severity_name:
+                    type: string
+                  count:
+                    type: integer
+            by_hour:
+              type: array
+              items:
+                type: object
+                properties:
+                  hour:
+                    type: string
+                    format: date-time
+                  count:
+                    type: integer
+
+    AlertRule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        condition:
+          type: string
+        threshold:
+          type: number
+        severity:
+          type: integer
+        is_enabled:
+          type: boolean
+        notification_channels:
+          type: array
+          items:
+            type: string
+
+    AlertRuleInput:
+      type: object
+      required:
+        - name
+        - condition
+        - threshold
+        - severity
+      properties:
+        name:
+          type: string
+        condition:
+          type: string
+        threshold:
+          type: number
+        severity:
+          type: integer
+        is_enabled:
+          type: boolean
+
+    AlertRuleList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertRule'
+
+    # ==================== 机房机柜 ====================
+    Site:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        location:
+          type: string
+        is_active:
+          type: boolean
+
+    SiteList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Site'
+
+    SiteDetail:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            site:
+              $ref: '#/components/schemas/Site'
+            rack_count:
+              type: integer
+            asset_count:
+              type: integer
+
+    Rack:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+        total_units:
+          type: integer
+        used_units:
+          type: integer
+
+    RackList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Rack'
+
+    RackDevice:
+      allOf:
+        - $ref: '#/components/schemas/Asset'
+        - type: object
+          properties:
+            status:
+              type: string
+              enum: [green, yellow, red]
+            alert_count:
+              type: integer
+
+    RackDeviceList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RackDevice'
+
+    # ==================== 工单 ====================
+    Ticket:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [critical, high, normal, low]
+        status:
+          type: string
+          enum: [open, in_progress, pending, resolved, closed]
+        requester:
+          type: string
+        assignee:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TicketInput:
+      type: object
+      required:
+        - title
+        - priority
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+
+    TicketList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ticket'
+
+    # ==================== 用户 ====================
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        nickname:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator, viewer]
+        created_at:
+          type: string
+          format: date-time
+
+    UserList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+
+    # ==================== 通知渠道 ====================
+    NotificationChannel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [email, dingtalk, wechat, webhook]
+        config:
+          type: object
+        is_enabled:
+          type: boolean
+
+    ChannelInput:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        config:
+          type: object
+
+    ChannelList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationChannel'

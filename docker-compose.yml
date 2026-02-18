@@ -1,0 +1,164 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库 (主数据库)
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: nmp-postgres
+    environment:
+      POSTGRES_USER: nmp
+      POSTGRES_PASSWORD: nmp123
+      POSTGRES_DB: network_monitor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nmp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: nmp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # 后端 API
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nmp-api
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://nmp:nmp123@postgres:5432/network_monitor
+      - REDIS_URL=redis://redis:6379/0
+      - NETBOX_URL=http://netbox:8000
+      - ZABBIX_URL=http://zabbix:8080
+      - GLPI_URL=http://glpi:80
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # 前端
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nmp-web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  # NetBox (资产管理)
+  netbox:
+    image: netboxcommunity/netbox:v4.0
+    container_name: nmp-netbox
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=postgres
+      - DB_NAME=netbox
+      - DB_USER=nmp
+      - DB_PASSWORD=nmp123
+      - REDIS_HOST=redis
+      - SECRET_KEY=your-secret-key-here-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # Zabbix (监控)
+  zabbix:
+    image: zabbix/zabbix-server-pgsql:latest
+    container_name: nmp-zabbix
+    ports:
+      - "8081:8080"
+    environment:
+      - DB_SERVER_HOST=postgres
+      - POSTGRES_USER=nmp
+      - POSTGRES_PASSWORD=nmp123
+      - POSTGRES_DB=zabbix
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # GLPI (工单)
+  glpi:
+    image: linuxserver/glpi:latest
+    container_name: nmp-glpi
+    ports:
+      - "8001:80"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Shanghai
+    volumes:
+      - glpi_config:/config
+    depends_on:
+      - postgres
+
+  # Graylog (日志)
+  graylog:
+    image: graylog/graylog:6.0
+    container_name: nmp-graylog
+    ports:
+      - "9000:9000"
+      - "5044:5044"
+      - "5140:5140"
+      - "5555:5555"
+    environment:
+      - GRAYLOG_PASSWORD_SECRET=your-password-secret-here
+      - GRAYLOG_ROOT_PASSWORD_SHA2=your-hashed-password
+      - GRAYLOG_HTTP_EXTERNAL_URI=http://localhost:9000
+      - GRAYLOG_ELASTICSEARCH_HOSTS=elasticsearch:9200
+    depends_on:
+      - elasticsearch
+      - mongoDB
+
+  # Elasticsearch (Graylog 依赖)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: nmp-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  # MongoDB (Graylog 依赖)
+  mongoDB:
+    image: mongo:7
+    container_name: nmp-mongodb
+    volumes:
+      - mongodb_data:/data/db
+
+  # Nginx 反向代理 (可选)
+  # nginx:
+  #   image: nginx:latest
+  #   container_name: nmp-nginx
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ./nginx/docker-compose.yml:/etc/nginx/conf.d/default.conf
+  #   depends_on:
+  #     - web
+  #     - api
+
+volumes:
+  postgres_data:
+  redis_data:
+  glpi_config:
+  elasticsearch_data:
+  mongodb_data:
