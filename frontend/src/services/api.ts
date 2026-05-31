@@ -134,9 +134,9 @@ export const userApi = {
 
 // ==================== 通知渠道 ====================
 export const notificationApi = {
-  listChannels: () => api.get('/notification/channels'),
-  createChannel: (data: any) => api.post('/notification/channels', data),
-  updateChannel: (id: string, data: any) => api.put(`/notification/channels/${id}`, data),
-  deleteChannel: (id: string) => api.delete(`/notification/channels/${id}`),
-  testChannel: (id: string) => api.post(`/notification/channels/${id}/test`),
+  listChannels: () => api.get('/notification-channels'),
+  createChannel: (data: any) => api.post('/notification-channels', data),
+  updateChannel: (id: string, data: any) => api.put(`/notification-channels/${id}`, data),
+  deleteChannel: (id: string) => api.delete(`/notification-channels/${id}`),
+  testChannel: (id: string) => api.put(`/notification-channels/${id}/test`),
 }

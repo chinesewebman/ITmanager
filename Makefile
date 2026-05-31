@@ -18,9 +18,15 @@ help:
 	@echo "  make dev-backend     - 后端开发模式"
 	@echo "  make dev-frontend    - 前端开发模式"
 	@echo ""
+	@echo "=== 数据库命令 ==="
+	@echo "  make db-seed          - 初始化数据库数据"
+	@echo "  make db-migrate       - 运行数据库迁移"
+	@echo "  make db-reset         - 重置数据库（慎用）"
+	@echo ""
 	@echo "=== 测试命令 ==="
 	@echo "  make test            - 运行后端测试"
 	@echo "  make test-frontend   - 运行前端测试"
+	@echo "  make test-coverage   - 运行测试并生成覆盖率报告"
 	@echo ""
 	@echo "=== Docker 命令 ==="
 	@echo "  make docker-build    - 构建 Docker 镜像"
@@ -31,6 +37,10 @@ help:
 	@echo "=== 代码质量 ==="
 	@echo "  make lint            - 代码检查"
 	@echo "  make format          - 代码格式化"
+	@echo ""
+	@echo "=== 服务管理 ==="
+	@echo "  make server          - 启动后端服务器"
+	@echo "  make migrate-create  - 创建新的数据库迁移"
 
 # 安装依赖
 install:
@@ -62,6 +72,27 @@ dev-frontend:
 
 dev: dev-backend dev-frontend
 
+# 服务器
+server:
+	@echo "=== 启动后端服务器 ==="
+	cd backend && go run ./cmd/server/main.go
+
+# 数据库
+db-seed:
+	@echo "=== 初始化数据库数据 ==="
+	cd backend && go run ./cmd/seed/main.go
+
+db-migrate:
+	@echo "=== 运行数据库迁移 ==="
+	cd backend && go run ./cmd/migrate/main.go
+
+db-reset:
+	@echo "⚠️  警告: 将重置数据库，所有数据将丢失！"
+	@read -p "确认执行? (yes/no): " confirm; \
+	if [ "$$confirm" = "yes" ]; then \
+		cd backend && go run ./cmd/seed/main.go --reset; \
+	fi
+
 # 测试
 test:
 	@echo "=== 运行后端测试 ==="
@@ -70,6 +101,11 @@ test:
 test-frontend:
 	@echo "=== 运行前端测试 ==="
 	cd frontend && npm run test
+
+test-coverage:
+	@echo "=== 运行测试并生成覆盖率报告 ==="
+	cd backend && go test -coverprofile=coverage.out ./...
+	cd backend && go tool cover -html=coverage.out -o coverage.html
 
 # 代码质量
 lint:
@@ -87,13 +123,8 @@ clean:
 	@echo "=== 清理构建产物 ==="
 	rm -rf backend/bin/
 	rm -rf frontend/dist/
-	rm -f coverage.out coverage.html
+	rm -f backend/coverage.out backend/coverage.html
 	cd frontend && rm -rf node_modules/
-
-# 数据库
-db-seed:
-	@echo "=== 初始化数据库数据 ==="
-	cd backend && go run ./cmd/seed/main.go
 
 # Docker
 docker-build:
@@ -115,3 +146,9 @@ docker-down:
 
 docker-logs:
 	docker-compose logs -f
+
+# 迁移
+migrate-create:
+	@echo "=== 创建数据库迁移 ==="
+	@read -p "输入迁移名称: " name; \
+	cd backend && go run ./cmd/migrate/main.go create $$name

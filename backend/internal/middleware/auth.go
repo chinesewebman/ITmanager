@@ -1,11 +1,15 @@
 package middleware
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
 
 	"network-monitor-platform/internal/config"
+	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -59,7 +63,18 @@ func VerifyToken(tokenString string) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// AuthMiddleware JWT 认证中间件
+// hashAPIKey Hash API key for storage
+func hashAPIKey(key string) string {
+	hash := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(hash[:])
+}
+
+// verifyAPIKey Verify API key
+func verifyAPIKey(key, keyHash string) bool {
+	return hashAPIKey(key) == keyHash
+}
+
+// AuthMiddleware JWT or API Key authentication middleware
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -72,12 +87,21 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Bearer token
+		// Check for API Key format: X-API-Key: <key>
+		if strings.HasPrefix(authHeader, "X-API-Key ") {
+			apiKey := strings.TrimPrefix(authHeader, "X-API-Key ")
+			if apiKey != "" {
+				handleAPIKeyAuth(c, apiKey)
+				return
+			}
+		}
+
+		// Check for Bearer token format
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"code":    401,
-				"message": "Authorization 格式错误",
+				"message": "Authorization 格式错误，支持 Bearer token 或 X-API-Key",
 			})
 			c.Abort()
 			return
@@ -101,6 +125,74 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// handleAPIKeyAuth Handle API Key authentication
+func handleAPIKeyAuth(c *gin.Context, apiKey string) {
+	// Find API key in database
+	var key models.APIKey
+	keyHash := hashAPIKey(apiKey)
+
+	if err := database.DB.Where("key_hash = ? AND status = ?", keyHash, "active").First(&key).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "API Key 无效或已禁用",
+		})
+		c.Abort()
+		return
+	}
+
+	// Check expiration
+	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "API Key 已过期",
+		})
+		c.Abort()
+		return
+	}
+
+	// Check IP whitelist if configured
+	if len(key.IPWhitelist) > 0 {
+		clientIP := c.ClientIP()
+		ipAllowed := false
+		for _, ip := range key.IPWhitelist {
+			if ip == clientIP {
+				ipAllowed = true
+				break
+			}
+		}
+		if !ipAllowed {
+			c.JSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "IP地址不在允许列表中",
+			})
+			c.Abort()
+			return
+		}
+	}
+
+	// Update last used time
+	database.DB.Model(&key).Update("last_used_at", time.Now())
+
+	// Get user info
+	var user models.User
+	if err := database.DB.First(&user, "id = ?", key.UserID).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    401,
+			"message": "API Key 关联的用户不存在",
+		})
+		c.Abort()
+		return
+	}
+
+	// Set context values
+	c.Set("user_id", key.UserID.String())
+	c.Set("username", user.Username)
+	c.Set("role", user.Role)
+	c.Set("api_key_id", key.ID.String())
+
+	c.Next()
 }
 
 // RequireRole 角色权限中间件

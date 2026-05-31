@@ -22,7 +22,7 @@
 - [x] 实现 JWT Token 生成和验证中间件
 - [x] 完善 Login/Logout 接口
 - [x] 添加默认管理员用户 (admin/admin123)
-- [ ] 添加 API Key 认证支持
+- [x] 添加 API Key 认证支持
 
 ## 3. 完善后端 API (优先级: 高)
 - [x] 资产 CRUD - 完整实现

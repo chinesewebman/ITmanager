@@ -36,6 +36,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			auth.POST("/logout", handlers.Logout)
 			auth.GET("/me", middleware.AuthMiddleware(), handlers.GetCurrentUser)
 			auth.PUT("/password", middleware.AuthMiddleware(), handlers.ChangePassword)
+
+			// API Key 管理（需要登录）
+			auth.POST("/api-keys", middleware.AuthMiddleware(), handlers.CreateAPIKey)
+			auth.GET("/api-keys", middleware.AuthMiddleware(), handlers.ListAPIKeys)
+			auth.DELETE("/api-keys/:id", middleware.AuthMiddleware(), handlers.DeleteAPIKey)
+			auth.PUT("/api-keys/:id/revoke", middleware.AuthMiddleware(), handlers.RevokeAPIKey)
 		}
 
 		// 需要认证的 API
