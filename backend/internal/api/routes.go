@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/api/handlers"
+	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/middleware"
 
 	"github.com/gin-gonic/gin"

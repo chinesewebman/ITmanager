@@ -43,11 +43,11 @@ func seedData(db *gorm.DB) {
 		admin := models.User{
 			Username:     "admin",
 			PasswordHash: string(hash),
-			Nickname:    "系统管理员",
-			Email:       "admin@company.com",
-			Phone:       "13800138000",
-			Role:        "admin",
-			Status:      "active",
+			Nickname:     "系统管理员",
+			Email:        "admin@company.com",
+			Phone:        "13800138000",
+			Role:         "admin",
+			Status:       "active",
 		}
 		if err := db.Create(&admin).Error; err != nil {
 			log.Printf("创建管理员用户失败: %v", err)
@@ -60,11 +60,11 @@ func seedData(db *gorm.DB) {
 		operator := models.User{
 			Username:     "operator",
 			PasswordHash: string(userHash),
-			Nickname:    "运维工程师",
-			Email:       "operator@company.com",
-			Phone:       "13800138001",
-			Role:        "operator",
-			Status:      "active",
+			Nickname:     "运维工程师",
+			Email:        "operator@company.com",
+			Phone:        "13800138001",
+			Role:         "operator",
+			Status:       "active",
 		}
 		db.Create(&operator)
 		log.Printf("创建普通用户: operator (密码: user123)")
@@ -72,10 +72,10 @@ func seedData(db *gorm.DB) {
 		readonly := models.User{
 			Username:     "viewer",
 			PasswordHash: string(userHash),
-			Nickname:    "访客",
-			Email:       "viewer@company.com",
-			Role:        "readonly",
-			Status:      "active",
+			Nickname:     "访客",
+			Email:        "viewer@company.com",
+			Role:         "readonly",
+			Status:       "active",
 		}
 		db.Create(&readonly)
 		log.Printf("创建只读用户: viewer (密码: user123)")
@@ -227,8 +227,8 @@ func seedData(db *gorm.DB) {
 	tickets := []models.Ticket{
 		{TicketNumber: "TICKET-20260215-A", Title: "Web服务器CPU使用率异常", Description: "web-server-01 CPU使用率持续在95%以上，需要检查处理", TicketType: "incident", Priority: "high", Status: "open", RequesterName: "张三", RequesterEmail: "zhangsan@company.com", Category: "服务器故障", Source: "manual"},
 		{TicketNumber: "TICKET-20260215-B", Title: "数据库存储扩容申请", Description: "数据库存储空间不足，申请扩容500GB", TicketType: "request", Priority: "medium", Status: "in_progress", RequesterName: "李四", RequesterEmail: "lisi@company.com", Category: "资源申请", Source: "manual"},
-		{TicketNumber: "TICKET-20260214-A", Title: "网络交换机端口故障", Description: "Cisco交换机端口23进入err-disable状态", TicketType: "incident", Priority: "high", Status: "resolved", RequesterName: "王五", RequesterEmail: "wangwu@company.com", Category: "网络故障", Source: "zabbix", Resolution: "已重启端口，恢复正常", ResolvedAt: timePtr(time.Now().Add(-24*time.Hour))},
-		{TicketNumber: "TICKET-20260213-A", Title: "新服务器上线部署", Description: "新采购的Dell R740服务器需要安装部署", TicketType: "request", Priority: "low", Status: "closed", RequesterName: "赵六", RequesterEmail: "zhaoliu@company.com", Category: "新业务部署", Source: "manual", Resolution: "已完成部署并交付使用", ResolvedAt: timePtr(time.Now().Add(-48*time.Hour)), ClosedAt: timePtr(time.Now().Add(-47*time.Hour))},
+		{TicketNumber: "TICKET-20260214-A", Title: "网络交换机端口故障", Description: "Cisco交换机端口23进入err-disable状态", TicketType: "incident", Priority: "high", Status: "resolved", RequesterName: "王五", RequesterEmail: "wangwu@company.com", Category: "网络故障", Source: "zabbix", Resolution: "已重启端口，恢复正常", ResolvedAt: timePtr(time.Now().Add(-24 * time.Hour))},
+		{TicketNumber: "TICKET-20260213-A", Title: "新服务器上线部署", Description: "新采购的Dell R740服务器需要安装部署", TicketType: "request", Priority: "low", Status: "closed", RequesterName: "赵六", RequesterEmail: "zhaoliu@company.com", Category: "新业务部署", Source: "manual", Resolution: "已完成部署并交付使用", ResolvedAt: timePtr(time.Now().Add(-48 * time.Hour)), ClosedAt: timePtr(time.Now().Add(-47 * time.Hour))},
 	}
 	for _, ticket := range tickets {
 		ticket.Tags = `["` + ticket.TicketType + `"]`

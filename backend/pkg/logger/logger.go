@@ -45,10 +45,10 @@ func getWriter(cfg *config.LogConfig) io.Writer {
 	if cfg.Output == "file" {
 		return &lumberjack.Logger{
 			Filename:   cfg.File.Path,
-			MaxSize:   cfg.File.MaxSize,
+			MaxSize:    cfg.File.MaxSize,
 			MaxBackups: cfg.File.MaxBackups,
-			MaxAge:    30,
-			Compress:  true,
+			MaxAge:     30,
+			Compress:   true,
 		}
 	}
 	return os.Stdout
@@ -82,8 +82,8 @@ func (l *Logger) log(level, format string, args ...interface{}) {
 		// JSON 格式
 		logEntry := map[string]interface{}{
 			"timestamp": timestamp,
-			"level":    level,
-			"message":  message,
+			"level":     level,
+			"message":   message,
 		}
 		jsonBytes, _ := yaml.Marshal(logEntry)
 		fmt.Println(string(jsonBytes))

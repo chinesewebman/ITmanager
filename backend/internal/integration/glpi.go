@@ -185,31 +185,31 @@ func (t *GLPITicket) ConvertToTicket() *LocalTicket {
 	}
 
 	return &LocalTicket{
-		ExternalID:   fmt.Sprintf("%d", t.ID),
-		Title:        t.Name,
-		Description:  t.Content,
-		Status:       statusMap[t.Status],
-		Priority:     priorityMap[t.Priority],
-		TicketType:   "incident",
-		Source:       "glpi",
-		CreatedAt:    t.Date,
-		ResolvedAt:   t.SolvedDate,
-		ClosedAt:     t.ClosedDate,
+		ExternalID:  fmt.Sprintf("%d", t.ID),
+		Title:       t.Name,
+		Description: t.Content,
+		Status:      statusMap[t.Status],
+		Priority:    priorityMap[t.Priority],
+		TicketType:  "incident",
+		Source:      "glpi",
+		CreatedAt:   t.Date,
+		ResolvedAt:  t.SolvedDate,
+		ClosedAt:    t.ClosedDate,
 	}
 }
 
 // LocalTicket 本地工单
 type LocalTicket struct {
-	ExternalID   string `json:"external_id"`
-	Title        string `json:"title"`
-	Description  string `json:"description"`
-	Status       string `json:"status"`
-	Priority     string `json:"priority"`
-	TicketType   string `json:"ticket_type"`
-	Source       string `json:"source"`
-	CreatedAt    string `json:"created_at"`
-	ResolvedAt   string `json:"resolved_at"`
-	ClosedAt     string `json:"closed_at"`
+	ExternalID  string `json:"external_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority"`
+	TicketType  string `json:"ticket_type"`
+	Source      string `json:"source"`
+	CreatedAt   string `json:"created_at"`
+	ResolvedAt  string `json:"resolved_at"`
+	ClosedAt    string `json:"closed_at"`
 }
 
 // KillSession 终止会话

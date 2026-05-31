@@ -10,12 +10,12 @@ import (
 
 // Config 全局配置
 type Config struct {
-	Server      ServerConfig      `mapstructure:"server"`
-	Database    DatabaseConfig    `mapstructure:"database"`
-	Redis       RedisConfig       `mapstructure:"redis"`
-	Integrations IntegrationsConfig `mapstructure:"integrations"`
-	Auth        AuthConfig        `mapstructure:"auth"`
-	Log         LogConfig         `mapstructure:"log"`
+	Server        ServerConfig        `mapstructure:"server"`
+	Database      DatabaseConfig      `mapstructure:"database"`
+	Redis         RedisConfig         `mapstructure:"redis"`
+	Integrations  IntegrationsConfig  `mapstructure:"integrations"`
+	Auth          AuthConfig          `mapstructure:"auth"`
+	Log           LogConfig           `mapstructure:"log"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
 }
 
@@ -74,7 +74,7 @@ type GLPIConfig struct {
 }
 
 type AuthConfig struct {
-	JWT JWTConfig `mapstructure:"jwt"`
+	JWT  JWTConfig  `mapstructure:"jwt"`
 	LDAP LDAPConfig `mapstructure:"ldap"`
 }
 
@@ -85,17 +85,17 @@ type JWTConfig struct {
 
 type LDAPConfig struct {
 	Enabled      bool   `mapstructure:"enabled"`
-	Host        string `mapstructure:"host"`
-	Port        int    `mapstructure:"port"`
-	BaseDN      string `mapstructure:"base_dn"`
-	BindDN      string `mapstructure:"bind_dn"`
+	Host         string `mapstructure:"host"`
+	Port         int    `mapstructure:"port"`
+	BaseDN       string `mapstructure:"base_dn"`
+	BindDN       string `mapstructure:"bind_dn"`
 	BindPassword string `mapstructure:"bind_password"`
 }
 
 type LogConfig struct {
-	Level  string `mapstructure:"level"`
-	Format string `mapstructure:"format"`
-	Output string `mapstructure:"output"`
+	Level  string        `mapstructure:"level"`
+	Format string        `mapstructure:"format"`
+	Output string        `mapstructure:"output"`
 	File   LogFileConfig `mapstructure:"file"`
 }
 
@@ -113,16 +113,16 @@ type NotificationsConfig struct {
 type DingtalkConfig struct {
 	Enabled    bool   `mapstructure:"enabled"`
 	WebhookURL string `mapstructure:"webhook_url"`
-	Secret    string `mapstructure:"secret"`
+	Secret     string `mapstructure:"secret"`
 }
 
 type EmailConfig struct {
-	Enabled    bool   `mapstructure:"enabled"`
-	SMTPHost  string `mapstructure:"smtp_host"`
-	SMTPPort  int    `mapstructure:"smtp_port"`
-	SMTPUser  string `mapstructure:"smtp_user"`
+	Enabled      bool   `mapstructure:"enabled"`
+	SMTPHost     string `mapstructure:"smtp_host"`
+	SMTPPort     int    `mapstructure:"smtp_port"`
+	SMTPUser     string `mapstructure:"smtp_user"`
 	SMTPPassword string `mapstructure:"smtp_password"`
-	From      string `mapstructure:"from"`
+	From         string `mapstructure:"from"`
 }
 
 var cfg *Config

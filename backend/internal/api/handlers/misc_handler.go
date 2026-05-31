@@ -187,7 +187,6 @@ func GetUser(c *gin.Context) {
 	})
 }
 
-
 // GetDashboardStats 获取仪表盘统计
 func GetDashboardStats(c *gin.Context) {
 	var assetCount, alertCount, ticketCount, siteCount int64
@@ -199,12 +198,12 @@ func GetDashboardStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"assets":    assetCount,
-			"alerts":    alertCount,
-			"tickets":   ticketCount,
-			"sites":     siteCount,
-			"machines":  assetCount, // 服务器数量
-			"networks":  assetCount, // 网络设备数量
+			"assets":   assetCount,
+			"alerts":   alertCount,
+			"tickets":  ticketCount,
+			"sites":    siteCount,
+			"machines": assetCount, // 服务器数量
+			"networks": assetCount, // 网络设备数量
 		},
 	})
 }
@@ -298,7 +297,7 @@ func DeleteChannel(c *gin.Context) {
 	database.DB.Delete(&models.NotificationChannel{}, "id = ?", id)
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "删除成功",
 	})
 }
@@ -306,7 +305,7 @@ func DeleteChannel(c *gin.Context) {
 // TestChannel 测试通知渠道
 func TestChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "测试消息已发送",
 	})
 }

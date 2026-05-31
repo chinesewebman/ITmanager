@@ -53,7 +53,7 @@ func ListAlerts(c *gin.Context) {
 			"stats": gin.H{
 				"total":        total,
 				"problem":      problem,
-				"acknowledged":  acknowledged,
+				"acknowledged": acknowledged,
 				"resolved":     resolved,
 			},
 		},
@@ -94,9 +94,9 @@ func AcknowledgeAlert(c *gin.Context) {
 
 	now := time.Now()
 	updates := map[string]interface{}{
-		"status":     "acknowledged",
-		"ack_time":   now,
-		"ack_user":   "admin", // TODO: 从上下文获取
+		"status":   "acknowledged",
+		"ack_time": now,
+		"ack_user": "admin", // TODO: 从上下文获取
 	}
 
 	if err := database.DB.Model(&alert).Updates(updates).Error; err != nil {
@@ -108,7 +108,7 @@ func AcknowledgeAlert(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "告警已确认",
 	})
 }
@@ -130,11 +130,11 @@ func ResolveAlert(c *gin.Context) {
 	duration := int(now.Sub(alert.ProblemStart).Seconds())
 
 	updates := map[string]interface{}{
-		"status":        "resolved",
-		"resolve_time":   now,
-		"resolve_user":  "admin",
-		"problem_end":   now,
-		"duration":      duration,
+		"status":       "resolved",
+		"resolve_time": now,
+		"resolve_user": "admin",
+		"problem_end":  now,
+		"duration":     duration,
 	}
 
 	if err := database.DB.Model(&alert).Updates(updates).Error; err != nil {
@@ -146,7 +146,7 @@ func ResolveAlert(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "告警已解决",
 	})
 }
@@ -155,9 +155,9 @@ func ResolveAlert(c *gin.Context) {
 func GetAlertStats(c *gin.Context) {
 	// 按严重级别统计
 	type SeverityStat struct {
-		Severity    int   `json:"severity"`
+		Severity     int    `json:"severity"`
 		SeverityName string `json:"severity_name"`
-		Count       int64 `json:"count"`
+		Count        int64  `json:"count"`
 	}
 
 	var severityStats []SeverityStat
@@ -279,7 +279,7 @@ func DeleteAlertRule(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "删除成功",
 	})
 }

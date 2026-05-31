@@ -44,7 +44,7 @@ type ZabbixAPIRequest struct {
 // ZabbixAPIResponse Zabbix API 响应
 type ZabbixAPIResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	Error   *ZabbixError   `json:"error,omitempty"`
+	Error   *ZabbixError    `json:"error,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	ID      int             `json:"id"`
 }
@@ -102,12 +102,12 @@ func (z *ZabbixClient) GetTriggers() ([]Trigger, error) {
 			"filter": map[string]interface{}{
 				"value": 1, // PROBLEM
 			},
-			"selectHosts":       "extend",
-			"selectItems":       "extend",
-			"selectLastEvent":   "extend",
-			"sortfield":         "lastchange",
-			"sortorder":         "DESC",
-			"limit":             100,
+			"selectHosts":     "extend",
+			"selectItems":     "extend",
+			"selectLastEvent": "extend",
+			"sortfield":       "lastchange",
+			"sortorder":       "DESC",
+			"limit":           100,
 		},
 		Auth: z.auth,
 		ID:   2,
@@ -131,22 +131,22 @@ func (z *ZabbixClient) GetTriggers() ([]Trigger, error) {
 
 // Trigger Zabbix 触发器
 type Trigger struct {
-	TriggerID   string   `json:"triggerid"`
-	Description string   `json:"description"`
-	Status      string   `json:"status"`
-	Value       string   `json:"value"`
-	Priority    int      `json:"priority"`
-	LastChange  string   `json:"lastchange"`
-	Hosts       []Host  `json:"hosts"`
-	Items       []Item  `json:"items"`
-	LastEvent   Event   `json:"last_event"`
+	TriggerID   string `json:"triggerid"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Value       string `json:"value"`
+	Priority    int    `json:"priority"`
+	LastChange  string `json:"lastchange"`
+	Hosts       []Host `json:"hosts"`
+	Items       []Item `json:"items"`
+	LastEvent   Event  `json:"last_event"`
 }
 
 // Host 主机
 type Host struct {
-	HostID   string `json:"hostid"`
-	Host     string `json:"host"`
-	Name     string `json:"name"`
+	HostID string `json:"hostid"`
+	Host   string `json:"host"`
+	Name   string `json:"name"`
 }
 
 // Item 监控项

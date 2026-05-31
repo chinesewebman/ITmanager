@@ -151,16 +151,16 @@ func ListAPIKeys(c *gin.Context) {
 	result := make([]gin.H, len(keys))
 	for i, key := range keys {
 		result[i] = gin.H{
-			"id":          key.ID,
-			"name":        key.Name,
-			"prefix":      key.Prefix,
-			"permissions": key.Permissions,
+			"id":           key.ID,
+			"name":         key.Name,
+			"prefix":       key.Prefix,
+			"permissions":  key.Permissions,
 			"ip_whitelist": key.IPWhitelist,
-			"rate_limit":  key.RateLimit,
-			"status":      key.Status,
-			"expires_at":  key.ExpiresAt,
+			"rate_limit":   key.RateLimit,
+			"status":       key.Status,
+			"expires_at":   key.ExpiresAt,
 			"last_used_at": key.LastUsedAt,
-			"created_at":  key.CreatedAt,
+			"created_at":   key.CreatedAt,
 		}
 	}
 

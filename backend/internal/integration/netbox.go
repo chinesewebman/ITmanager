@@ -35,9 +35,9 @@ type NetBoxDevice struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name"`
-	DeviceType struct {
-		ID   int    `json:"id"`
-		Slug string `json:"slug"`
+	DeviceType  struct {
+		ID    int    `json:"id"`
+		Slug  string `json:"slug"`
 		Model string `json:"model"`
 	} `json:"device_type"`
 	DeviceRole struct {
@@ -99,27 +99,27 @@ func (c *NetBoxClient) SyncDevices() ([]NetBoxDevice, error) {
 
 // NetBoxAsset 将 NetBox 设备转换为资产
 type NetBoxAsset struct {
-	Name         string  `json:"name"`
-	AssetType    string  `json:"asset_type"`
-	Status       string  `json:"status"`
-	SiteID       *uuid.UUID `json:"site_id"`
-	SiteName     string  `json:"site_name"`
-	RackID       *uuid.UUID `json:"rack_id"`
-	RackName     string  `json:"rack_name"`
-	Brand        string  `json:"brand"`
-	Model        string  `json:"model"`
-	SN           string  `json:"sn"`
-	NetboxID     *int    `json:"netbox_id"`
-	Source       string  `json:"source"`
+	Name      string     `json:"name"`
+	AssetType string     `json:"asset_type"`
+	Status    string     `json:"status"`
+	SiteID    *uuid.UUID `json:"site_id"`
+	SiteName  string     `json:"site_name"`
+	RackID    *uuid.UUID `json:"rack_id"`
+	RackName  string     `json:"rack_name"`
+	Brand     string     `json:"brand"`
+	Model     string     `json:"model"`
+	SN        string     `json:"sn"`
+	NetboxID  *int       `json:"netbox_id"`
+	Source    string     `json:"source"`
 }
 
 // ConvertToAsset 转换为资产格式
 func (d *NetBoxDevice) ConvertToAsset() *NetBoxAsset {
 	asset := &NetBoxAsset{
-		Name:      d.Name,
-		Source:    "netbox",
-		NetboxID:  &d.ID,
-		Status:    "active",
+		Name:     d.Name,
+		Source:   "netbox",
+		NetboxID: &d.ID,
+		Status:   "active",
 	}
 
 	// 根据设备角色判断类型

@@ -168,7 +168,7 @@ func DeleteAsset(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
+		"code":    0,
 		"message": "删除成功",
 	})
 }

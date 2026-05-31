@@ -69,7 +69,7 @@ func GetRackDevices(c *gin.Context) {
 	// 为每个设备获取告警状态
 	type RackDevice struct {
 		models.Asset
-		Status    string `json:"status"` // green, yellow, red
+		Status     string `json:"status"` // green, yellow, red
 		AlertCount int    `json:"alert_count"`
 	}
 
@@ -84,8 +84,8 @@ func GetRackDevices(c *gin.Context) {
 		}
 
 		devices[i] = RackDevice{
-			Asset:     asset,
-			Status:    status,
+			Asset:      asset,
+			Status:     status,
 			AlertCount: int(alertCount),
 		}
 	}
@@ -138,8 +138,8 @@ func GetSite(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"site":       site,
-			"rack_count": rackCount,
+			"site":        site,
+			"rack_count":  rackCount,
 			"asset_count": assetCount,
 		},
 	})

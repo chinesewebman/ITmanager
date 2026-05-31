@@ -98,7 +98,7 @@ func (s *IntegrationService) SyncFromZabbix() (int, error) {
 			// 创建新告警
 			newAlert := models.Alert{
 				TriggerID:    t.TriggerID,
-				HostName:    t.Hosts[0].Host,
+				HostName:     t.Hosts[0].Host,
 				TriggerName:  t.Description,
 				Problem:      t.Description,
 				Severity:     t.Priority,
@@ -133,13 +133,13 @@ func (s *IntegrationService) SyncFromGLPI() (int, error) {
 		if result.RowsAffected == 0 {
 			// 创建新工单
 			newTicket := models.Ticket{
-				ExternalID: localTicket.ExternalID,
-				Title:      localTicket.Title,
+				ExternalID:  localTicket.ExternalID,
+				Title:       localTicket.Title,
 				Description: localTicket.Description,
-				Status:     localTicket.Status,
-				Priority:   localTicket.Priority,
-				TicketType: localTicket.TicketType,
-				Source:     "glpi",
+				Status:      localTicket.Status,
+				Priority:    localTicket.Priority,
+				TicketType:  localTicket.TicketType,
+				Source:      "glpi",
 			}
 			database.DB.Create(&newTicket)
 			count++

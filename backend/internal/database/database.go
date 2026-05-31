@@ -27,7 +27,7 @@ func Init(cfg *config.DatabaseConfig) (*gorm.DB, error) {
 			SlowThreshold:             time.Second, // 慢查询阈值
 			LogLevel:                  logger.Info, // 日志级别
 			IgnoreRecordNotFoundError: true,        // 忽略记录未找到错误
-			Colorful:                  true,         // 彩色输出
+			Colorful:                  true,        // 彩色输出
 		},
 	)
 
