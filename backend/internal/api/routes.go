@@ -84,6 +84,27 @@ func UpdateDBPoolMetrics(gormDB *gorm.DB) {
 	platformMetrics.SetGauge("db_pool_wait_count", float64(stats.WaitCount))
 }
 
+// integrationMetricsAdapter 把 metrics.Registry 适配成 httpx.MetricsRecorder 接口。
+// 集成层 httpx 调用时把事件桥接到全局 platformMetrics。
+func integrationMetricsAdapter() *integrationHTTPMetrics {
+	return &integrationHTTPMetrics{}
+}
+
+type integrationHTTPMetrics struct{}
+
+func (i *integrationHTTPMetrics) IncRequest(system, status string) {
+	if platformMetrics == nil {
+		return
+	}
+	platformMetrics.IncCounter("integration_requests_total", system, status)
+}
+func (i *integrationHTTPMetrics) ObserveDuration(system string, seconds float64) {
+	if platformMetrics == nil {
+		return
+	}
+	platformMetrics.ObserveHistogram("integration_request_duration_seconds", seconds, system)
+}
+
 // SetupRouter 设置路由
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	if cfg.Server.Mode == "release" {
@@ -112,6 +133,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		})
 	}
 
+	// C-P5: 集成 metric 记录器
+	integMetrics := integrationMetricsAdapter()
+
 	assetSvc := service.NewAssetService(db)
 	alertSvc := service.NewAlertService(db)
 	rackSvc := service.NewRackService(db)
@@ -119,7 +143,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	userSvc := service.NewUserService(db)
 	dashboardSvc := service.NewDashboardService(db)
 	channelSvc := service.NewChannelService(db)
-	integrationSvc := integration.NewIntegrationService(cfg)
+	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
 	alertH := handlers.NewAlertHandler(alertSvc)

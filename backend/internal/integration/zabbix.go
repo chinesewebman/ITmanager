@@ -2,33 +2,34 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"sync"
 	"time"
 
 	"network-monitor-platform/internal/config"
+	"network-monitor-platform/internal/httpx"
 )
 
-// ZabbixClient Zabbix 客户端
+// ZabbixClient Zabbix 客户端（C-P7：走 httpx）。
 type ZabbixClient struct {
-	baseURL  string
-	user     string
+	c       *httpx.Client
+	user    string
 	password string
-	client   *http.Client
-	auth     string
+
+	mu   sync.Mutex
+	auth string
 }
 
-// NewZabbixClient 创建 Zabbix 客户端
-func NewZabbixClient(cfg *config.ZabbixConfig) *ZabbixClient {
+// NewZabbixClient 创建 Zabbix 客户端。
+func NewZabbixClient(cfg *config.ZabbixConfig, m httpx.MetricsRecorder) *ZabbixClient {
+	hcfg := httpx.DefaultConfig(cfg.URL)
+	hcfg.Timeout = 30 * time.Second
 	return &ZabbixClient{
-		baseURL:  cfg.URL,
-		user:     cfg.User,
+		c:       httpx.New(hcfg, "zabbix", m),
+		user:    cfg.User,
 		password: cfg.Password,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
 	}
 }
 
@@ -56,8 +57,8 @@ type ZabbixError struct {
 	Data    string `json:"data"`
 }
 
-// Login 登录 Zabbix
-func (z *ZabbixClient) Login() error {
+// Login 登录 Zabbix（C-P7：ctx 透传）。
+func (z *ZabbixClient) Login(ctx context.Context) error {
 	req := ZabbixAPIRequest{
 		JSONRPC: "2.0",
 		Method:  "user.login",
@@ -67,28 +68,29 @@ func (z *ZabbixClient) Login() error {
 		},
 		ID: 1,
 	}
-
-	resp, err := z.doRequest(req)
+	resp, err := z.doRequest(ctx, req)
 	if err != nil {
 		return fmt.Errorf("Zabbix 登录失败: %w", err)
 	}
-
 	var result struct {
 		Result string `json:"result"`
 	}
-
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
-
+	z.mu.Lock()
 	z.auth = result.Result
+	z.mu.Unlock()
 	return nil
 }
 
-// GetTriggers 获取告警列表
-func (z *ZabbixClient) GetTriggers() ([]Trigger, error) {
-	if z.auth == "" {
-		if err := z.Login(); err != nil {
+// GetTriggers 获取告警列表（C-P7：ctx 透传）。
+func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
+	z.mu.Lock()
+	needLogin := z.auth == ""
+	z.mu.Unlock()
+	if needLogin {
+		if err := z.Login(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -99,37 +101,48 @@ func (z *ZabbixClient) GetTriggers() ([]Trigger, error) {
 		Params: map[string]interface{}{
 			"only_true":     true,
 			"skipDependent": true,
-			"filter": map[string]interface{}{
-				"value": 1, // PROBLEM
-			},
-			"selectHosts":     "extend",
-			"selectItems":     "extend",
-			"selectLastEvent": "extend",
-			"sortfield":       "lastchange",
-			"sortorder":       "DESC",
-			"limit":           100,
+			"filter":        map[string]interface{}{"value": 1},
+			"selectHosts":   "extend",
+			"selectItems":   "extend",
+			"sortfield":     "lastchange",
+			"sortorder":     "DESC",
+			"limit":         100,
 		},
 		Auth: z.auth,
 		ID:   2,
 	}
-
-	resp, err := z.doRequest(req)
+	resp, err := z.doRequest(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("获取告警失败: %w", err)
 	}
-
 	var result struct {
 		Result []Trigger `json:"result"`
 	}
-
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
-
 	return result.Result, nil
 }
 
-// Trigger Zabbix 触发器
+// doRequest 走 httpx：自动 retry/熔断/metrics。
+func (z *ZabbixClient) doRequest(ctx context.Context, req ZabbixAPIRequest) ([]byte, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	respBody, _, err := z.c.Do(ctx, "POST", "/api_jsonrpc.php", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	// 业务错误（HTTP 200 但 result.error）
+	var apiResp ZabbixAPIResponse
+	if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
+		return nil, fmt.Errorf("Zabbix API 错 %d: %s", apiResp.Error.Code, apiResp.Error.Message)
+	}
+	return respBody, nil
+}
+
+// Trigger / Host / Item / Event 类型保持不变
 type Trigger struct {
 	TriggerID   string `json:"triggerid"`
 	Description string `json:"description"`
@@ -141,23 +154,17 @@ type Trigger struct {
 	Items       []Item `json:"items"`
 	LastEvent   Event  `json:"last_event"`
 }
-
-// Host 主机
 type Host struct {
 	HostID string `json:"hostid"`
 	Host   string `json:"host"`
 	Name   string `json:"name"`
 }
-
-// Item 监控项
 type Item struct {
 	ItemID    string `json:"itemid"`
 	Name      string `json:"name"`
 	Key       string `json:"key_"`
 	LastValue string `json:"lastvalue"`
 }
-
-// Event 事件
 type Event struct {
 	EventID   string `json:"eventid"`
 	Clock     string `json:"clock"`
@@ -175,8 +182,6 @@ func (t *Trigger) ConvertToAlert() *ZabbixAlert {
 		Status:      "problem",
 		Severity:    t.Priority,
 	}
-
-	// 转换严重级别
 	switch t.Priority {
 	case 0:
 		alert.SeverityName = "未分类"
@@ -193,45 +198,18 @@ func (t *Trigger) ConvertToAlert() *ZabbixAlert {
 	default:
 		alert.SeverityName = "未知"
 	}
-
 	return alert
 }
 
 // ZabbixAlert Zabbix 告警
 type ZabbixAlert struct {
-	HostName     string `json:"host_name"`
-	HostIP       string `json:"host_ip"`
-	TriggerName  string `json:"trigger_name"`
-	TriggerID    string `json:"trigger_id"`
-	Problem      string `json:"problem"`
-	Severity     int    `json:"severity"`
-	SeverityName string `json:"severity_name"`
-	Status       string `json:"status"`
-	Source       string `json:"source"`
-}
-
-func (z *ZabbixClient) doRequest(req ZabbixAPIRequest) ([]byte, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq, err := http.NewRequest("POST", z.baseURL+"/api_jsonrpc.php", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := z.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Zabbix 返回错误状态码: %d", resp.StatusCode)
-	}
-
-	return io.ReadAll(resp.Body)
+	HostName     string
+	HostIP       string
+	TriggerName  string
+	TriggerID    string
+	Problem      string
+	Severity     int
+	SeverityName string
+	Status       string
+	Source       string
 }

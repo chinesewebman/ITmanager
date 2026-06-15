@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
@@ -26,6 +28,9 @@ type SyncRequest struct {
 	Type string `json:"type"` // netbox, zabbix, glpi, all
 }
 
+// syncTimeout C-P7: 同步 API 总超时 5min（集成调用链 + 批量写 DB）。
+const syncTimeout = 5 * time.Minute
+
 // Sync 同步数据
 func (h *IntegrationHandler) Sync(c *gin.Context) {
 	var req SyncRequest
@@ -33,24 +38,28 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 		req.Type = "all" // 默认同步所有
 	}
 
+	// C-P7: ctx 透传到下游 httpx 与 gorm
+	ctx, cancel := context.WithTimeout(c.Request.Context(), syncTimeout)
+	defer cancel()
+
 	var results map[string]int
 	var err error
 
 	switch req.Type {
 	case "netbox":
-		count, e := h.svc.SyncFromNetBox()
+		count, e := h.svc.SyncFromNetBox(ctx)
 		results = map[string]int{"netbox": count}
 		err = e
 	case "zabbix":
-		count, e := h.svc.SyncFromZabbix()
+		count, e := h.svc.SyncFromZabbix(ctx)
 		results = map[string]int{"zabbix": count}
 		err = e
 	case "glpi":
-		count, e := h.svc.SyncFromGLPI()
+		count, e := h.svc.SyncFromGLPI(ctx)
 		results = map[string]int{"glpi": count}
 		err = e
 	default:
-		results, err = h.svc.SyncAll()
+		results, err = h.svc.SyncAll(ctx)
 	}
 
 	if err != nil {
