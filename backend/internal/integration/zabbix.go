@@ -130,7 +130,8 @@ func (z *ZabbixClient) doRequest(ctx context.Context, req ZabbixAPIRequest) ([]b
 	if err != nil {
 		return nil, err
 	}
-	respBody, _, err := z.c.Do(ctx, "POST", "/api_jsonrpc.php", bytes.NewReader(body))
+	respBody, _, err := z.c.DoWithHeaders(ctx, "POST", "/api_jsonrpc.php", bytes.NewReader(body),
+		map[string]string{"Content-Type": "application/json"})
 	if err != nil {
 		return nil, err
 	}
