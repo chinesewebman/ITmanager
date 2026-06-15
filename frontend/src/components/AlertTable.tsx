@@ -18,6 +18,9 @@ export interface AlertTableProps {
   loading: boolean
   onAck: (id: string) => Promise<void> | void
   onResolve: (id: string) => Promise<void> | void
+  // C-P6: 批量勾选（undefined 时不开启）
+  selectedIds?: string[]
+  onSelectionChange?: (ids: string[]) => void
 }
 
 const SEVERITY_COLOR: Record<number, string> = {
@@ -28,7 +31,7 @@ const SEVERITY_COLOR: Record<number, string> = {
   1: 'default',
 }
 
-export function AlertTable({ data, loading, onAck, onResolve }: AlertTableProps) {
+export function AlertTable({ data, loading, onAck, onResolve, selectedIds, onSelectionChange }: AlertTableProps) {
   const columns: ColumnsType<Alert> = [
     { title: '主机', dataIndex: 'host', key: 'host', width: 150 },
     { title: '告警信息', dataIndex: 'message', key: 'message' },
@@ -84,6 +87,14 @@ export function AlertTable({ data, loading, onAck, onResolve }: AlertTableProps)
       loading={loading}
       scroll={{ x: 1000 }}
       pagination={{ showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+      rowSelection={
+        onSelectionChange
+          ? {
+              selectedRowKeys: selectedIds ?? [],
+              onChange: (keys) => onSelectionChange(keys as string[]),
+            }
+          : undefined
+      }
     />
   )
 }

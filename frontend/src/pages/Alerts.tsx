@@ -1,5 +1,5 @@
 import { Button, Select, Space, message } from 'antd'
-import { SyncOutlined } from '@ant-design/icons'
+import { SyncOutlined, CheckOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { alertApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { AlertTable, type Alert } from '../components/AlertTable'
@@ -24,6 +24,7 @@ interface AlertsResp {
 function Alerts() {
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [severityFilter, setSeverityFilter] = useState<string>('')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
 
   // C-P9: 列表 + stats 合并到 React Query，filter 变化走 queryKey 隔离缓存
   const filters = { status: statusFilter, severity: severityFilter }
@@ -57,18 +58,64 @@ function Alerts() {
     onError: () => message.error('解决失败'),
   })
 
+  // C-P6: 批量写操作
+  const bulkAckMut = useApiMutation(
+    (ids: string[]) => alertApi.bulkAcknowledge(ids).then((r) => ({ r, count: ids.length })),
+    {
+      onSuccess: ({ count }) => {
+        message.success(`已批量确认 ${count} 条告警`)
+        setSelectedIds([])
+        refetch()
+      },
+      onError: () => message.error('批量确认失败'),
+    },
+  )
+  const bulkResolveMut = useApiMutation(
+    (ids: string[]) => alertApi.bulkResolve(ids).then((r) => ({ r, count: ids.length })),
+    {
+      onSuccess: ({ count }) => {
+        message.success(`已批量解决 ${count} 条告警`)
+        setSelectedIds([])
+        refetch()
+      },
+      onError: () => message.error('批量解决失败'),
+    },
+  )
+
   const list = data?.items ?? MOCK_ALERTS
   const stats = data?.stats ?? DEFAULT_STATS
+  const hasSelection = selectedIds.length > 0
 
   return (
     <div>
       <PageHeader
         title="告警中心"
-        subtitle={`当前 ${stats.problem} 个未处理告警`}
+        subtitle={`当前 ${stats.problem} 个未处理告警${hasSelection ? `，已选 ${selectedIds.length} 条` : ''}`}
         extra={
-          <Button icon={<SyncOutlined />} onClick={() => refetch()}>
-            刷新
-          </Button>
+          <Space>
+            {hasSelection && (
+              <>
+                <Button
+                  icon={<CheckOutlined />}
+                  onClick={() => bulkAckMut.mutate(selectedIds)}
+                  loading={bulkAckMut.isPending}
+                >
+                  批量确认
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  onClick={() => bulkResolveMut.mutate(selectedIds)}
+                  loading={bulkResolveMut.isPending}
+                >
+                  批量解决
+                </Button>
+              </>
+            )}
+            <Button icon={<SyncOutlined />} onClick={() => refetch()}>
+              刷新
+            </Button>
+          </Space>
         }
       />
 
@@ -108,6 +155,8 @@ function Alerts() {
         loading={isLoading}
         onAck={(id) => ackMut.mutate(id)}
         onResolve={(id) => resolveMut.mutate(id)}
+        selectedIds={selectedIds}
+        onSelectionChange={setSelectedIds}
       />
     </div>
   )

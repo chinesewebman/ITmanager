@@ -91,6 +91,10 @@ export const alertApi = {
   acknowledge: (id: string) => api.put(`/alerts/${id}/ack`),
   resolve: (id: string) => api.put(`/alerts/${id}/resolve`),
   getStats: () => api.get('/alerts/rules/stats'),
+  // C-P6: 批量操作（单次 SQL，避免 N 次循环）
+  bulkAcknowledge: (ids: string[]) => api.post('/alerts/bulk-ack', { ids }),
+  bulkResolve: (ids: string[]) => api.post('/alerts/bulk-resolve', { ids }),
+  bulkDelete: (ids: string[]) => api.post('/alerts/bulk-delete', { ids }),
 }
 
 // ==================== 告警规则 ====================

@@ -205,6 +205,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			{
 				alerts.GET("", alertH.ListAlerts)
 				alerts.GET("/stats", alertH.GetAlertStats) // 静态段必须早于 /:id，否则 /stats 被当成 :id
+				// C-P6: 批量端点（静态段，挂在 :id 之前）
+				alerts.POST("/bulk-ack", alertH.BulkAcknowledge)
+				alerts.POST("/bulk-resolve", alertH.BulkResolve)
+				alerts.POST("/bulk-delete", alertH.BulkDelete)
 				alerts.GET("/:id", alertH.GetAlert)
 				alerts.PUT("/:id/ack", alertH.AcknowledgeAlert)
 				alerts.PUT("/:id/resolve", alertH.ResolveAlert)
