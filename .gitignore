@@ -34,10 +34,12 @@ coverage/
 .DS_Store
 Thumbs.db
 *.bak
+*.bak.*
 *.tmp
 
-# Database
-*.sql
+# Database (only exclude dump outputs, not schema.sql which is tracked)
+dumps/
+*.dump.sql
 *.db
 
 # Docker

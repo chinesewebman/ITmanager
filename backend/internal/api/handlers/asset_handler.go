@@ -1,88 +1,65 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
-	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
-// ListAssets 获取资产列表
-func ListAssets(c *gin.Context) {
-	var assets []models.Asset
-	var total int64
+// AssetHandler 资产相关 HTTP handler
+type AssetHandler struct {
+	svc service.AssetService
+}
 
-	page := c.DefaultQuery("page", "1")
-	pageSize := c.DefaultQuery("page_size", "20")
-	keyword := c.Query("keyword")
-	status := c.Query("status")
-	assetType := c.Query("type")
+// NewAssetHandler 构造函数（依赖注入，便于测试时 mock service）
+func NewAssetHandler(svc service.AssetService) *AssetHandler {
+	return &AssetHandler{svc: svc}
+}
 
-	pageNum, _ := strconv.Atoi(page)
-	pageSizeNum, _ := strconv.Atoi(pageSize)
+// ListAssets 资产列表（分页+筛选）
+func (h *AssetHandler) ListAssets(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 
-	// 构建查询
-	query := database.DB.Model(&models.Asset{})
-
-	// 筛选条件
-	if keyword != "" {
-		query = query.Where("name ILIKE ? OR asset_tag ILIKE ? OR sn ILIKE ?",
-			"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
-	}
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
-	if assetType != "" {
-		query = query.Where("asset_type = ?", assetType)
-	}
-
-	// 统计总数
-	query.Count(&total)
-
-	// 分页查询
-	offset := (pageNum - 1) * pageSizeNum
-	query = query.Offset(offset).Limit(pageSizeNum).Order("created_at DESC")
-
-	if err := query.Find(&assets).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "获取资产列表失败",
-			"error":   err.Error(),
-		})
+	items, total, err := h.svc.List(c.Request.Context(), service.AssetFilter{
+		Keyword:   c.Query("keyword"),
+		Status:    c.Query("status"),
+		AssetType: c.Query("type"),
+		Page:      page,
+		PageSize:  pageSize,
+	})
+	if err != nil {
+		RespondInternal(c, "获取资产列表失败", err)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"items": assets,
+			"items": items,
 			"total": total,
-			"page":  pageNum,
-			"size":  pageSizeNum,
+			"page":  page,
+			"size":  pageSize,
 		},
 	})
 }
 
-// GetAsset 获取资产详情
-func GetAsset(c *gin.Context) {
-	id := c.Param("id")
-	var asset models.Asset
-
-	if err := database.DB.First(&asset, "id = ?", id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "资产不存在",
-		})
+// GetAsset 资产详情（含网络接口）
+func (h *AssetHandler) GetAsset(c *gin.Context) {
+	asset, networks, err := h.svc.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			RespondNotFound(c, "资产不存在")
+			return
+		}
+		RespondInternal(c, "获取资产失败", err)
 		return
 	}
-
-	// 获取网络接口
-	var networks []models.AssetNetwork
-	database.DB.Where("asset_id = ?", asset.ID).Find(&networks)
-
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
@@ -93,104 +70,83 @@ func GetAsset(c *gin.Context) {
 }
 
 // CreateAsset 创建资产
-func CreateAsset(c *gin.Context) {
+func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	var asset models.Asset
 	if err := c.ShouldBindJSON(&asset); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "请求参数错误",
-			"error":   err.Error(),
-		})
+		RespondBadRequest(c, "请求参数错误")
 		return
 	}
-
-	if err := database.DB.Create(&asset).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "创建资产失败",
-			"error":   err.Error(),
-		})
+	if err := h.svc.Create(c.Request.Context(), &asset); err != nil {
+		if errors.Is(err, service.ErrInvalidInput) {
+			RespondBadRequest(c, "资产名称不能为空")
+			return
+		}
+		RespondInternal(c, "创建资产失败", err)
 		return
 	}
-
 	c.JSON(http.StatusCreated, gin.H{
 		"code": 0,
 		"data": asset,
 	})
 }
 
-// UpdateAsset 更新资产
-func UpdateAsset(c *gin.Context) {
-	id := c.Param("id")
-	var asset models.Asset
-
-	if err := database.DB.First(&asset, "id = ?", id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"code":    404,
-			"message": "资产不存在",
-		})
-		return
-	}
-
+// UpdateAsset 部分更新
+func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "请求参数错误",
-		})
+		RespondBadRequest(c, "请求参数错误")
 		return
 	}
-
-	if err := database.DB.Model(&asset).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "更新资产失败",
-		})
+	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			RespondNotFound(c, "资产不存在")
+			return
+		}
+		RespondInternal(c, "更新资产失败", err)
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": asset,
 	})
 }
 
-// DeleteAsset 删除资产
-func DeleteAsset(c *gin.Context) {
-	id := c.Param("id")
-
-	if err := database.DB.Delete(&models.Asset{}, "id = ?", id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "删除资产失败",
-		})
+// DeleteAsset 删除
+func (h *AssetHandler) DeleteAsset(c *gin.Context) {
+	if err := h.svc.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		RespondInternal(c, "删除资产失败", err)
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "删除成功",
 	})
 }
 
-// ExportAssets 导出资产
-func ExportAssets(c *gin.Context) {
+// ExportAssets 导出 CSV/JSON
+func (h *AssetHandler) ExportAssets(c *gin.Context) {
 	format := c.DefaultQuery("format", "csv")
 
-	var assets []models.Asset
-	database.DB.Find(&assets)
+	// 导出走全量查询（不分页）
+	items, _, err := h.svc.List(c.Request.Context(), service.AssetFilter{Page: 1, PageSize: 500})
+	if err != nil {
+		RespondInternal(c, "导出资产失败", err)
+		return
+	}
 
 	if format == "csv" {
-		c.Header("Content-Type", "text/csv")
-		c.Header("Content-Disposition", "attachment; filename=assets.csv")
-		c.String(http.StatusOK, "ID,Name,Type,Status,IP\n")
-		for _, a := range assets {
-			c.String(http.StatusOK, "%s,%s,%s,%s,\n", a.ID, a.Name, a.AssetType, a.Status)
+		c.Header("Content-Type", "text/csv; charset=utf-8")
+		c.Header("Content-Disposition", `attachment; filename=assets.csv`)
+		c.String(http.StatusOK, "ID,Name,Type,Status\n")
+		for _, a := range items {
+			c.String(http.StatusOK, "%s,%s,%s,%s\n", a.ID, a.Name, a.AssetType, a.Status)
 		}
-	} else {
-		c.JSON(http.StatusOK, gin.H{
-			"code": 0,
-			"data": assets,
-		})
+		return
 	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": items,
+	})
 }

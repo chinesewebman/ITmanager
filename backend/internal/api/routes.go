@@ -5,7 +5,9 @@ import (
 
 	"network-monitor-platform/internal/api/handlers"
 	"network-monitor-platform/internal/config"
+	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/middleware"
+	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +27,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	// 健康检查
 	r.GET("/health", healthCheck)
+
+	// service 构造（共享 db 句柄）
+	db := database.GetDB()
+	assetSvc := service.NewAssetService(db)
+	alertSvc := service.NewAlertService(db)
+	assetH := handlers.NewAssetHandler(assetSvc)
+	alertH := handlers.NewAlertHandler(alertSvc)
 
 	// API 路由
 	api := r.Group("/api")
@@ -56,12 +65,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			// 资产
 			assets := protected.Group("/assets")
 			{
-				assets.GET("", handlers.ListAssets)
-				assets.GET("/:id", handlers.GetAsset)
-				assets.POST("", handlers.CreateAsset)
-				assets.PUT("/:id", handlers.UpdateAsset)
-				assets.DELETE("/:id", handlers.DeleteAsset)
-				assets.GET("/export", handlers.ExportAssets)
+				assets.GET("", assetH.ListAssets)
+				assets.GET("/:id", assetH.GetAsset)
+				assets.POST("", assetH.CreateAsset)
+				assets.PUT("/:id", assetH.UpdateAsset)
+				assets.DELETE("/:id", assetH.DeleteAsset)
+				assets.GET("/export", assetH.ExportAssets)
 			}
 
 			// 机柜
@@ -82,20 +91,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			// 告警
 			alerts := protected.Group("/alerts")
 			{
-				alerts.GET("", handlers.ListAlerts)
-				alerts.GET("/:id", handlers.GetAlert)
-				alerts.PUT("/:id/ack", handlers.AcknowledgeAlert)
-				alerts.PUT("/:id/resolve", handlers.ResolveAlert)
-				alerts.GET("/stats", handlers.GetAlertStats)
+				alerts.GET("", alertH.ListAlerts)
+				alerts.GET("/:id", alertH.GetAlert)
+				alerts.PUT("/:id/ack", alertH.AcknowledgeAlert)
+				alerts.PUT("/:id/resolve", alertH.ResolveAlert)
+				alerts.GET("/stats", alertH.GetAlertStats)
 			}
 
 			// 告警规则
 			rules := protected.Group("/alert-rules")
 			{
-				rules.GET("", handlers.ListAlertRules)
-				rules.POST("", handlers.CreateAlertRule)
-				rules.PUT("/:id", handlers.UpdateAlertRule)
-				rules.DELETE("/:id", handlers.DeleteAlertRule)
+				rules.GET("", alertH.ListAlertRules)
+				rules.POST("", alertH.CreateAlertRule)
+				rules.PUT("/:id", alertH.UpdateAlertRule)
+				rules.DELETE("/:id", alertH.DeleteAlertRule)
 			}
 
 			// 工单

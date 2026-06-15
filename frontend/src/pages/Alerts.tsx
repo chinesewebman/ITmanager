@@ -49,6 +49,7 @@ function Alerts() {
 
   useEffect(() => {
     fetchData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, severityFilter])
 
   const getSeverityColor = (severity: number) => {

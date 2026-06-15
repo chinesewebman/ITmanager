@@ -1,12 +1,9 @@
 import { useState } from 'react'
 import { Form, Input, Button, Card, message } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
 import { authApi } from '../services/api'
-
 function Login() {
-  const [loading, setLoading] = useState(false)
-  const navigate = useNavigate()
+    const [loading, setLoading] = useState(false)
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true)

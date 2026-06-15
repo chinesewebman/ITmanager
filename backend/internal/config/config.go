@@ -138,7 +138,7 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("server.mode", "debug")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("redis.port", 6379)
-	viper.SetDefault("auth.jwt_secret.expire", 86400)
+	viper.SetDefault("auth.jwt.expire", 86400)
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
