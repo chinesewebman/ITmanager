@@ -67,7 +67,7 @@ function AppLayout() {
     } catch (e) {
       // 忽略登出错误
     }
-    localStorage.removeItem('token')
+    // C-F5: token 已在后端 cookie 中清掉；只清前端 user 缓存
     localStorage.removeItem('user')
     navigate('/login')
   }
@@ -157,8 +157,10 @@ function App() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    setIsLoggedIn(!!token)
+    // C-F5: 不再读 localStorage token（token 在 httpOnly cookie 中）
+    // 仅靠 user 缓存判断（user 无敏感信息，可放 localStorage）
+    const userStr = localStorage.getItem('user')
+    setIsLoggedIn(!!userStr)
     setLoading(false)
   }, [])
 

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -10,13 +12,14 @@ import (
 
 // Config 全局配置
 type Config struct {
-	Server        ServerConfig        `mapstructure:"server"`
-	Database      DatabaseConfig      `mapstructure:"database"`
-	Redis         RedisConfig         `mapstructure:"redis"`
-	Integrations  IntegrationsConfig  `mapstructure:"integrations"`
-	Auth          AuthConfig          `mapstructure:"auth"`
-	Log           LogConfig           `mapstructure:"log"`
-	Notifications NotificationsConfig `mapstructure:"notifications"`
+	Server         ServerConfig        `mapstructure:"server"`
+	Database       DatabaseConfig      `mapstructure:"database"`
+	Redis          RedisConfig         `mapstructure:"redis"`
+	Integrations   IntegrationsConfig  `mapstructure:"integrations"`
+	Auth           AuthConfig          `mapstructure:"auth"`
+	Log            LogConfig           `mapstructure:"log"`
+	Notifications  NotificationsConfig `mapstructure:"notifications"`
+	AllowedOrigins []string            `mapstructure:"allowed_origins"`
 }
 
 type ServerConfig struct {
@@ -74,8 +77,9 @@ type GLPIConfig struct {
 }
 
 type AuthConfig struct {
-	JWT  JWTConfig  `mapstructure:"jwt"`
-	LDAP LDAPConfig `mapstructure:"ldap"`
+	JWT          JWTConfig  `mapstructure:"jwt"`
+	LDAP         LDAPConfig `mapstructure:"ldap"`
+	APIKeyPepper string     `mapstructure:"api_key_pepper"`
 }
 
 type JWTConfig struct {
@@ -127,10 +131,16 @@ type EmailConfig struct {
 
 var cfg *Config
 
-// Load 加载配置
+// Load 加载配置（env var 优先覆盖 yaml）
 func Load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 	viper.SetConfigType("yaml")
+
+	// F1: 允许 NMP_DATABASE_PASSWORD / NMP_AUTH_JWT_SECRET / NMP_INTEGRATIONS_* 等
+	// 环境变量覆盖 yaml 配置，避免硬编码 secret 落进仓库
+	viper.SetEnvPrefix("NMP")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.AutomaticEnv()
 
 	// 设置默认值
 	viper.SetDefault("server.host", "0.0.0.0")
@@ -149,8 +159,61 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	// F3: 启动 fail-fast 校验弱 secret
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+
 	log.Printf("✅ 配置加载成功 (env: %s)", cfg.Server.Mode)
 	return cfg, nil
+}
+
+// Validate 启动 fail-fast 校验（C-F3 弱 secret 检测）
+func (c *Config) Validate() error {
+	var errs []string
+
+	// JWT secret
+	secret := c.Auth.JWT.Secret
+	if secret == "" {
+		errs = append(errs, "auth.jwt.secret 不能为空（通过 NMP_AUTH_JWT_SECRET 环境变量注入）")
+	} else if len(secret) < 32 {
+		errs = append(errs, fmt.Sprintf("auth.jwt.secret 长度 %d < 32 位最低要求", len(secret)))
+	} else {
+		low := strings.ToLower(secret)
+		if strings.Contains(low, "change-in-production") ||
+			strings.Contains(low, "your-jwt") {
+			errs = append(errs, "auth.jwt.secret 仍为占位值")
+		}
+	}
+
+	// DB password
+	if c.Database.Password == "" {
+		errs = append(errs, "database.password 不能为空（通过 NMP_DATABASE_PASSWORD 注入）")
+	} else if c.Database.Password == "nmp123" {
+		errs = append(errs, "database.password 仍为默认占位 'nmp123'")
+	}
+
+	// API Key pepper（C-F6 防离线彩虹表）
+	if c.Auth.APIKeyPepper == "" {
+		errs = append(errs, "auth.api_key_pepper 不能为空（通过 NMP_API_KEY_PEPPER 注入）")
+	} else if len(c.Auth.APIKeyPepper) < 32 {
+		errs = append(errs, fmt.Sprintf("auth.api_key_pepper 长度 %d < 32 位最低要求", len(c.Auth.APIKeyPepper)))
+	}
+
+	// 生产模式额外校验集成 token
+	if c.Server.Mode == "release" {
+		if c.Integrations.Netbox.Token == "" {
+			errs = append(errs, "integrations.netbox.token 在 release 模式下不能为空")
+		}
+		if c.Integrations.GLPI.AppToken == "" || c.Integrations.GLPI.UserToken == "" {
+			errs = append(errs, "integrations.glpi.*_token 在 release 模式下不能为空")
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // Get 获取配置

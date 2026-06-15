@@ -1,22 +1,19 @@
 import axios, { AxiosInstance } from 'axios'
 import { message } from 'antd'
 
-// 创建 axios 实例
+// 创建 axios 实例（C-F5：用 httpOnly cookie 替代 localStorage 存 token）
 const api: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: true, // C-F5: 浏览器自动带上 auth_token cookie
 })
 
-// 请求拦截器 - 添加 token
+// 请求拦截器（C-F5：删除 localStorage token 读取，全部走 cookie）
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
-    }
     return config
   },
   (error) => {
@@ -39,7 +36,7 @@ api.interceptors.response.use(
       switch (error.response.status) {
         case 401:
           message.error('登录已过期，请重新登录')
-          localStorage.removeItem('token')
+          // C-F5: cookie 由后端 /api/auth/logout 清；前端仅跳转
           window.location.href = '/login'
           break
         case 403:

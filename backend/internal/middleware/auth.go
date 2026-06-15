@@ -1,12 +1,11 @@
 package middleware
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 	"time"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/apikey"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
@@ -63,45 +62,52 @@ func VerifyToken(tokenString string) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// hashAPIKey Hash API key for storage
-func hashAPIKey(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(hash[:])
+// verifyAPIKey Verify API key（C-F6：常量时间比较防时序侧信道）
+func verifyAPIKey(key, keyHash string) bool {
+	return apikey.Verify(key, config.Get().Auth.APIKeyPepper, keyHash)
 }
 
-// verifyAPIKey Verify API key
-func verifyAPIKey(key, keyHash string) bool {
-	return hashAPIKey(key) == keyHash
+// hashAPIKeyForMiddleware middleware 内调用的 HMAC 包装
+func hashAPIKeyForMiddleware(key string) string {
+	return apikey.Hash(key, config.Get().Auth.APIKeyPepper)
 }
 
 // AuthMiddleware JWT or API Key authentication middleware
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// C-F5: 优先从 Authorization header 读 Bearer token（CLI / API client），
+		// 否则从 cookie 读（浏览器场景）
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			apierr.Unauthorized(c, "请求头缺少 Authorization")
-			c.Abort()
-			return
-		}
-
-		// Check for API Key format: X-API-Key: <key>
-		if strings.HasPrefix(authHeader, "X-API-Key ") {
-			apiKey := strings.TrimPrefix(authHeader, "X-API-Key ")
-			if apiKey != "" {
-				handleAPIKeyAuth(c, apiKey)
+		var tokenString string
+		if authHeader != "" {
+			if strings.HasPrefix(authHeader, "X-API-Key ") {
+				apiKey := strings.TrimPrefix(authHeader, "X-API-Key ")
+				if apiKey != "" {
+					handleAPIKeyAuth(c, apiKey)
+					return
+				}
+			}
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				tokenString = parts[1]
+			} else {
+				apierr.Unauthorized(c, "Authorization 格式错误，支持 Bearer token 或 X-API-Key")
+				c.Abort()
 				return
+			}
+		} else {
+			// fallback: 读 cookie（C-F5 httpOnly cookie 场景）
+			if cookie, err := c.Cookie("auth_token"); err == nil && cookie != "" {
+				tokenString = cookie
 			}
 		}
 
-		// Check for Bearer token format
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			apierr.Unauthorized(c, "Authorization 格式错误，支持 Bearer token 或 X-API-Key")
+		if tokenString == "" {
+			apierr.Unauthorized(c, "请求头缺少 Authorization 或 auth_token cookie")
 			c.Abort()
 			return
 		}
 
-		tokenString := parts[1]
 		claims, err := VerifyToken(tokenString)
 		if err != nil {
 			apierr.Unauthorized(c, "Token 无效或已过期")
@@ -122,7 +128,7 @@ func AuthMiddleware() gin.HandlerFunc {
 func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	// Find API key in database
 	var key models.APIKey
-	keyHash := hashAPIKey(apiKey)
+	keyHash := hashAPIKeyForMiddleware(apiKey)
 
 	if err := database.DB.Where("key_hash = ? AND status = ?", keyHash, "active").First(&key).Error; err != nil {
 		apierr.Unauthorized(c, "API Key 无效或已禁用")

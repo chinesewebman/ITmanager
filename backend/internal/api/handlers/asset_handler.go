@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/csv"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,6 +12,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// safeCSV 防 Excel 公式注入（C-F7）：对 = + - @ 	 \r 开头字段加前导单引号
+func safeCSV(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '	', '\r':
+		return "'" + s
+	}
+	return s
+}
 
 // AssetHandler 资产相关 HTTP handler
 type AssetHandler struct {
@@ -137,11 +150,23 @@ func (h *AssetHandler) ExportAssets(c *gin.Context) {
 	}
 
 	if format == "csv" {
+		// C-F7: 用 encoding/csv 正确转义（含逗号/换行/双引号）
+		// 并对 = + - @ 	 \r 开头字段加前导单引号防止 Excel 公式注入（DDE）
 		c.Header("Content-Type", "text/csv; charset=utf-8")
 		c.Header("Content-Disposition", `attachment; filename=assets.csv`)
-		c.String(http.StatusOK, "ID,Name,Type,Status\n")
+		c.Header("X-Content-Type-Options", "nosniff")
+
+		w := csv.NewWriter(c.Writer)
+		defer w.Flush()
+		_ = w.Write([]string{"ID", "Name", "Type", "Status"})
 		for _, a := range items {
-			c.String(http.StatusOK, "%s,%s,%s,%s\n", a.ID, a.Name, a.AssetType, a.Status)
+			row := []string{
+				a.ID.String(),
+				safeCSV(a.Name),
+				safeCSV(a.AssetType),
+				safeCSV(a.Status),
+			}
+			_ = w.Write(row)
 		}
 		return
 	}

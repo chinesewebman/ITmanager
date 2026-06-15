@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"net/http"
 	"time"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/models"
@@ -83,9 +85,26 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	// C-F5: 设置 httpOnly + SameSite cookie（替代 localStorage 防止 XSS 窃 token）
+	// Secure flag 在 release 模式启用（需要 HTTPS）
+	secure := config.Get().Server.Mode == "release"
+	maxAge := config.Get().Auth.JWT.Expire // 跟 JWT 过期一致
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(
+		"auth_token", // cookie 名
+		token,
+		maxAge,
+		"/",
+		"",
+		secure,
+		true, // httpOnly
+	)
+
 	c.JSON(200, gin.H{
 		"code": 0,
 		"data": gin.H{
+			// C-F5: token 仍返回 body 以便非浏览器 client（如 API key 流）使用，
+			// 但浏览器场景下应只走 cookie 鉴权（前端已切到 withCredentials）
 			"token": token,
 			"user": gin.H{
 				"id":       user.ID,
@@ -101,6 +120,9 @@ func Login(c *gin.Context) {
 
 // Logout 登出 (JWT 无状态；如需黑名单可在此加 Redis 写入)
 func Logout(c *gin.Context) {
+	// C-F5: 清 cookie
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie("auth_token", "", -1, "/", "", false, true)
 	c.JSON(200, gin.H{
 		"code":    0,
 		"message": "登出成功",

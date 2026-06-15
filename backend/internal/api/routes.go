@@ -20,6 +20,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	}
 
 	r := gin.Default()
+	r.Use(middleware.CORS(cfg))
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 

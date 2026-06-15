@@ -2,11 +2,12 @@ package handlers
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"time"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/apikey"
+	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
 
@@ -36,10 +37,9 @@ func generateAPIKey() (string, string) {
 	return prefix + "-" + key, prefix
 }
 
-// hashAPIKey 对 key 做 SHA-256 哈希（用于存储）
+// hashAPIKey 对 key 做 HMAC-SHA256 哈希（C-F6：原 SHA-256 改为带 pepper）
 func hashAPIKey(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(hash[:])
+	return apikey.Hash(key, config.Get().Auth.APIKeyPepper)
 }
 
 // CreateAPIKey 创建 API Key

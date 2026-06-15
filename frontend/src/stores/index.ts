@@ -2,31 +2,29 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User, DashboardStats, AlertTrend, Alert, Asset, Site, Rack, Ticket, NotificationChannel } from '../types'
 
-// ==================== 认证 Store ====================
+// ==================== 认证 Store（C-F5：token 改为 httpOnly cookie，不再存 zustand） ====================
 interface AuthState {
-  token: string | null
   user: User | null
-  setAuth: (token: string, user: User) => void
+  setAuth: (user: User) => void
   logout: () => void
 }
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      token: null,
       user: null,
-      setAuth: (token, user) => {
-        localStorage.setItem('token', token)
-        set({ token, user })
+      setAuth: (user) => {
+        // C-F5: 不再存 token；后端已 set-cookie auth_token
+        // 仅缓存 user 字典（id/nickname/role/avatar，无敏感）
+        set({ user })
       },
       logout: () => {
-        localStorage.removeItem('token')
-        set({ token: null, user: null })
+        set({ user: null })
       },
     }),
     {
       name: 'auth-storage',
-      partialize: (state) => ({ token: state.token, user: state.user }),
+      partialize: (state) => ({ user: state.user }),
     }
   )
 )

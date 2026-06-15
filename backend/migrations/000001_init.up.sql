@@ -1168,13 +1168,9 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p 
 WHERE r.code = 'auditor' AND p.action = 'read';
 
--- 创建默认管理员用户 (密码: admin123, 需要在生产环境修改)
-INSERT INTO users (username, password_hash, nickname, email, status) VALUES 
-('admin', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', '管理员', 'admin@company.com', 'active');
-
 -- 关联管理员和角色
-INSERT INTO user_roles (user_id, role_id)
-SELECT u.id, r.id FROM users u, roles r WHERE u.username = 'admin' AND r.code = 'admin';
+-- C-F2: 默认 admin 账号已从迁移中移除。请通过独立命令创建首个管理员：
+--   FIRST_ADMIN_USERNAME=admin FIRST_ADMIN_PASSWORD='YourStr0ngP@ss' go run ./cmd/admin-bootstrap
 
 -- 初始化工单模板
 INSERT INTO ticket_templates (name, category, description, keywords, steps) VALUES

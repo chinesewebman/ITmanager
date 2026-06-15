@@ -8,11 +8,11 @@ function Login() {
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true)
     try {
-      const response = await authApi.login(values)
-      const { token, user } = response.data.data
+      // C-F5: 后端 set-cookie auth_token（httpOnly, SameSite=Strict）
+      // 不再在前端存 token；仅缓存 user 字典
+      const response: any = await authApi.login(values)
+      const { user } = response.data.data
 
-      // 保存 token 和用户信息
-      localStorage.setItem('token', token)
       localStorage.setItem('user', JSON.stringify(user))
 
       message.success('登录成功')
