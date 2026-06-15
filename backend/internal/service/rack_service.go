@@ -75,19 +75,53 @@ func (s *rackService) GetRack(ctx context.Context, id string) (*RackDTO, error) 
 }
 
 // toRackDTOs 把 models.Rack 转换为 RackDTO，并聚合 used_units（机柜内设备 rack_position 总数）
+// C-P3: 改单条 GROUP BY 替代 N+1 Count（100 个机柜从 100+1 次 query → 1 次）
 func toRackDTOs(ctx context.Context, db *gorm.DB, racks []models.Rack) []RackDTO {
 	out := make([]RackDTO, 0, len(racks))
+	if len(racks) == 0 {
+		return out
+	}
+
+	// 1) 收集所有 rack ID
+	rackIDs := make([]string, len(racks))
+	idToIndex := make(map[string]int, len(racks))
+	for i, r := range racks {
+		rackIDs[i] = r.ID.String()
+		idToIndex[r.ID.String()] = i
+	}
+
+	// 2) 一次 GROUP BY 查回所有 rack 的 used count
+	type countRow struct {
+		RackID string
+		Used   int64
+	}
+	var rows []countRow
+	if err := db.WithContext(ctx).Model(&models.Asset{}).
+		Select("rack_id, COUNT(*) AS used").
+		Where("rack_id IN ? AND rack_position IS NOT NULL", rackIDs).
+		Group("rack_id").
+		Scan(&rows).Error; err == nil {
+		for _, cr := range rows {
+			if idx, ok := idToIndex[cr.RackID]; ok {
+				_ = idx
+			}
+		}
+	}
+
+	// 3) 用 map 复用聚合结果
+	usedMap := make(map[string]int, len(rows))
+	for _, cr := range rows {
+		usedMap[cr.RackID] = int(cr.Used)
+	}
+
 	for _, r := range racks {
-		var used int64
-		db.WithContext(ctx).Model(&models.Asset{}).
-			Where("rack_id = ? AND rack_position IS NOT NULL", r.ID).
-			Count(&used)
+		rid := r.ID.String()
 		out = append(out, RackDTO{
-			ID:         r.ID.String(),
+			ID:         rid,
 			Name:       r.Name,
 			SiteID:     r.SiteID.String(),
 			TotalUnits: r.TotalU,
-			UsedUnits:  int(used),
+			UsedUnits:  usedMap[rid], // 0 if not in result
 		})
 	}
 	return out
@@ -100,11 +134,32 @@ func (s *rackService) GetRackDevices(ctx context.Context, rackID string) ([]Rack
 		return nil, err
 	}
 	devices := make([]RackDevice, len(assets))
+
+	// C-P3: 单条 GROUP BY 拿所有设备的告警计数（替代 N 次 Count）
+	alertCountMap := make(map[string]int, len(assets))
+	if len(assets) > 0 {
+		assetIDs := make([]string, len(assets))
+		for i, a := range assets {
+			assetIDs[i] = a.ID.String()
+		}
+		type alertCountRow struct {
+			AssetID string
+			Cnt     int64
+		}
+		var rows []alertCountRow
+		if err := s.db.WithContext(ctx).Model(&models.Alert{}).
+			Select("asset_id, COUNT(*) AS cnt").
+			Where("asset_id IN ? AND status = ?", assetIDs, "problem").
+			Group("asset_id").
+			Scan(&rows).Error; err == nil {
+			for _, r := range rows {
+				alertCountMap[r.AssetID] = int(r.Cnt)
+			}
+		}
+	}
+
 	for i, a := range assets {
-		var alertCount int64
-		s.db.WithContext(ctx).Model(&models.Alert{}).
-			Where("asset_id = ? AND status = ?", a.ID, "problem").
-			Count(&alertCount)
+		alertCount := alertCountMap[a.ID.String()]
 		health := "green"
 		if alertCount > 0 {
 			health = "red"
@@ -112,7 +167,7 @@ func (s *rackService) GetRackDevices(ctx context.Context, rackID string) ([]Rack
 		devices[i] = RackDevice{
 			Asset:        a,
 			HealthStatus: health,
-			AlertCount:   int(alertCount),
+			AlertCount:   alertCount,
 		}
 	}
 	return devices, nil

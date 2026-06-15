@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"network-monitor-platform/internal/api/handlers"
 	"network-monitor-platform/internal/config"
@@ -11,6 +13,7 @@ import (
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // SetupRouter 设置路由
@@ -23,8 +26,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	r.Use(middleware.CORS(cfg))
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
-
-	r.GET("/health", healthCheck)
 
 	// 构造 service / handler
 	db := database.GetDB()
@@ -152,4 +153,44 @@ func healthCheck(c *gin.Context) {
 		"version":  "1.0.0",
 		"database": "connected",
 	})
+}
+
+// livenessHandler C-P1: 进程存活探针（K8s livenessProbe）
+// 只确认进程能响应 HTTP，不依赖 DB/外部服务
+func livenessHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "alive"})
+}
+
+// readinessHandler C-P1: 就绪探针（K8s readinessProbe）
+// 真 ping DB（500ms 超时）+ 报告 DB pool 状态，失败 → 503 摘流
+func readinessHandler(gormDB *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 500*time.Millisecond)
+		defer cancel()
+
+		checks := gin.H{"status": "ready"}
+		httpStatus := http.StatusOK
+
+		sqlDB, err := gormDB.DB()
+		if err != nil {
+			checks["status"] = "not_ready"
+			checks["database"] = "no_sql_handle: " + err.Error()
+			httpStatus = http.StatusServiceUnavailable
+		} else if err := sqlDB.PingContext(ctx); err != nil {
+			checks["status"] = "not_ready"
+			checks["database"] = "ping_failed: " + err.Error()
+			httpStatus = http.StatusServiceUnavailable
+		} else {
+			// 报告 DB pool 状态，便于容量规划
+			stats := sqlDB.Stats()
+			checks["database"] = gin.H{
+				"open":     stats.OpenConnections,
+				"in_use":   stats.InUse,
+				"idle":     stats.Idle,
+				"max_open": stats.MaxOpenConnections,
+			}
+		}
+
+		c.JSON(httpStatus, checks)
+	}
 }

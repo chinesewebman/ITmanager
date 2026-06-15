@@ -94,17 +94,40 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 func (s *alertService) statsInternal(ctx context.Context) (AlertStats, error) {
 	var stats AlertStats
 	db := s.db.WithContext(ctx).Model(&models.Alert{})
-	if err := db.Count(&stats.Total).Error; err != nil {
-		return stats, err
+
+	// C-P4: 单条条件聚合（替代 4 次全表 Count）
+	// SUM(CASE WHEN ...) 是 PG/MySQL 通用写法，gorm 用 Raw + Scan
+	type countRow struct {
+		Total        int64
+		Problem      int64
+		Acknowledged int64
+		Resolved     int64
 	}
-	if err := db.Where("status = ?", "problem").Count(&stats.Problem).Error; err != nil {
-		return stats, err
-	}
-	if err := db.Where("status = ?", "acknowledged").Count(&stats.Acknowledged).Error; err != nil {
-		return stats, err
-	}
-	if err := db.Where("status = ?", "resolved").Count(&stats.Resolved).Error; err != nil {
-		return stats, err
+	var row countRow
+	err := db.Raw(`
+		SELECT
+			COUNT(*) AS total,
+			COUNT(*) FILTER (WHERE status = 'problem')       AS problem,
+			COUNT(*) FILTER (WHERE status = 'acknowledged') AS acknowledged,
+			COUNT(*) FILTER (WHERE status = 'resolved')     AS resolved
+		FROM alerts
+	`).Scan(&row).Error
+	if err == nil {
+		stats = AlertStats(row)
+	} else {
+		// SQLite / 不支持 FILTER 的 DB 退化用 SUM CASE
+		err = db.Raw(`
+			SELECT
+				COUNT(*) AS total,
+				SUM(CASE WHEN status = 'problem'       THEN 1 ELSE 0 END) AS problem,
+				SUM(CASE WHEN status = 'acknowledged' THEN 1 ELSE 0 END) AS acknowledged,
+				SUM(CASE WHEN status = 'resolved'     THEN 1 ELSE 0 END) AS resolved
+			FROM alerts
+		`).Scan(&row).Error
+		if err != nil {
+			return stats, err
+		}
+		stats = AlertStats(row)
 	}
 	return stats, nil
 }
