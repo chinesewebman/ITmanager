@@ -1,4 +1,7 @@
-package handlers
+// Package apierr 提供统一的 HTTP 错误响应契约，前后端共用。
+// 抽出 apierr 的动机：解除 handlers ↔ middleware 之间的 import cycle，
+// 任何包都可以引用 apierr 而不破坏分层（F4 from codex audit）。
+package apierr
 
 import (
 	"errors"
@@ -27,9 +30,9 @@ const (
 	CodeValidationFailed = "validation_failed"
 )
 
-// RespondError 统一错误响应。
+// Respond 统一错误响应。
 // 内部错误（DB / 第三方）只暴露通用文案，原始 err 记到日志。
-func RespondError(c *gin.Context, status int, code, message string, internalErr error) {
+func Respond(c *gin.Context, status int, code, message string, internalErr error) {
 	if internalErr != nil && status >= 500 {
 		// 5xx 错误：仅记录原始 err，对外不暴露
 		gin.DefaultErrorWriter.Write([]byte(
@@ -43,41 +46,41 @@ func RespondError(c *gin.Context, status int, code, message string, internalErr 
 	})
 }
 
-// RespondBadRequest 400 快捷方法
-func RespondBadRequest(c *gin.Context, message string) {
-	RespondError(c, http.StatusBadRequest, CodeBadRequest, message, nil)
+// BadRequest 400
+func BadRequest(c *gin.Context, message string) {
+	Respond(c, http.StatusBadRequest, CodeBadRequest, message, nil)
 }
 
-// RespondUnauthorized 401
-func RespondUnauthorized(c *gin.Context, message string) {
+// Unauthorized 401
+func Unauthorized(c *gin.Context, message string) {
 	if message == "" {
 		message = "未授权或登录已过期"
 	}
-	RespondError(c, http.StatusUnauthorized, CodeUnauthorized, message, nil)
+	Respond(c, http.StatusUnauthorized, CodeUnauthorized, message, nil)
 }
 
-// RespondForbidden 403
-func RespondForbidden(c *gin.Context, message string) {
+// Forbidden 403
+func Forbidden(c *gin.Context, message string) {
 	if message == "" {
 		message = "无访问权限"
 	}
-	RespondError(c, http.StatusForbidden, CodeForbidden, message, nil)
+	Respond(c, http.StatusForbidden, CodeForbidden, message, nil)
 }
 
-// RespondNotFound 404
-func RespondNotFound(c *gin.Context, message string) {
+// NotFound 404
+func NotFound(c *gin.Context, message string) {
 	if message == "" {
 		message = "资源不存在"
 	}
-	RespondError(c, http.StatusNotFound, CodeNotFound, message, nil)
+	Respond(c, http.StatusNotFound, CodeNotFound, message, nil)
 }
 
-// RespondInternal 500 - 不向客户端暴露原始 err
-func RespondInternal(c *gin.Context, message string, internalErr error) {
+// Internal 500 - 不向客户端暴露原始 err
+func Internal(c *gin.Context, message string, internalErr error) {
 	if message == "" {
 		message = "服务器内部错误"
 	}
-	RespondError(c, http.StatusInternalServerError, CodeInternal, message, internalErr)
+	Respond(c, http.StatusInternalServerError, CodeInternal, message, internalErr)
 }
 
 // TranslateDBError 将 gorm 错误翻译为对外的 4xx 响应，避免泄露 SQL 细节。
@@ -87,10 +90,10 @@ func TranslateDBError(c *gin.Context, err error) bool {
 		return false
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		RespondNotFound(c, "")
+		NotFound(c, "")
 		return true
 	}
 	// 其他 DB 错误视为 5xx，不泄露 SQL
-	RespondInternal(c, "数据库操作失败", err)
+	Internal(c, "数据库操作失败", err)
 	return true
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"time"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/models"
@@ -30,7 +31,7 @@ const maxFailedLoginAttempts = 5
 func Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondBadRequest(c, "请输入用户名和密码")
+		apierr.BadRequest(c, "请输入用户名和密码")
 		return
 	}
 
@@ -38,19 +39,19 @@ func Login(c *gin.Context) {
 	var user models.User
 	if err := database.DB.First(&user, "username = ?", req.Username).Error; err != nil {
 		// 故意返回通用消息，避免暴露用户名是否存在
-		RespondUnauthorized(c, "用户名或密码错误")
+		apierr.Unauthorized(c, "用户名或密码错误")
 		return
 	}
 
 	// 检查用户状态
 	if user.Status == "inactive" {
-		RespondForbidden(c, "账户已被禁用")
+		apierr.Forbidden(c, "账户已被禁用")
 		return
 	}
 
 	// 检查账户是否被锁定
 	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
-		RespondForbidden(c, "账户已被锁定，请稍后再试")
+		apierr.Forbidden(c, "账户已被锁定，请稍后再试")
 		return
 	}
 
@@ -63,7 +64,7 @@ func Login(c *gin.Context) {
 			user.LockedUntil = &lockedUntil
 		}
 		_ = database.DB.Save(&user).Error
-		RespondUnauthorized(c, "用户名或密码错误")
+		apierr.Unauthorized(c, "用户名或密码错误")
 		return
 	}
 
@@ -78,7 +79,7 @@ func Login(c *gin.Context) {
 	// 生成 Token
 	token, err := middleware.GenerateToken(user.ID.String(), user.Username, user.Role)
 	if err != nil {
-		RespondInternal(c, "生成 Token 失败", err)
+		apierr.Internal(c, "生成 Token 失败", err)
 		return
 	}
 
@@ -110,13 +111,13 @@ func Logout(c *gin.Context) {
 func GetCurrentUser(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
-		RespondUnauthorized(c, "")
+		apierr.Unauthorized(c, "")
 		return
 	}
 
 	var user models.User
 	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
-		RespondNotFound(c, "用户不存在")
+		apierr.NotFound(c, "用户不存在")
 		return
 	}
 
@@ -139,33 +140,33 @@ func GetCurrentUser(c *gin.Context) {
 func ChangePassword(c *gin.Context) {
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondBadRequest(c, "请输入旧密码和新密码")
+		apierr.BadRequest(c, "请输入旧密码和新密码")
 		return
 	}
 
 	userID := c.GetString("user_id")
 	var user models.User
 	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
-		RespondNotFound(c, "用户不存在")
+		apierr.NotFound(c, "用户不存在")
 		return
 	}
 
 	// 验证旧密码
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)); err != nil {
-		RespondBadRequest(c, "旧密码错误")
+		apierr.BadRequest(c, "旧密码错误")
 		return
 	}
 
 	// 加密新密码
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		RespondInternal(c, "密码加密失败", err)
+		apierr.Internal(c, "密码加密失败", err)
 		return
 	}
 
 	user.PasswordHash = string(hash)
 	if err := database.DB.Save(&user).Error; err != nil {
-		RespondInternal(c, "密码更新失败", err)
+		apierr.Internal(c, "密码更新失败", err)
 		return
 	}
 

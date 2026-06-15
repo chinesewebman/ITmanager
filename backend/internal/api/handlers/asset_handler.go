@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
@@ -34,7 +35,7 @@ func (h *AssetHandler) ListAssets(c *gin.Context) {
 		PageSize:  pageSize,
 	})
 	if err != nil {
-		RespondInternal(c, "获取资产列表失败", err)
+		apierr.Internal(c, "获取资产列表失败", err)
 		return
 	}
 
@@ -54,10 +55,10 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 	asset, networks, err := h.svc.Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "资产不存在")
+			apierr.NotFound(c, "资产不存在")
 			return
 		}
-		RespondInternal(c, "获取资产失败", err)
+		apierr.Internal(c, "获取资产失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -73,15 +74,15 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	var asset models.Asset
 	if err := c.ShouldBindJSON(&asset); err != nil {
-		RespondBadRequest(c, "请求参数错误")
+		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
 	if err := h.svc.Create(c.Request.Context(), &asset); err != nil {
 		if errors.Is(err, service.ErrInvalidInput) {
-			RespondBadRequest(c, "资产名称不能为空")
+			apierr.BadRequest(c, "资产名称不能为空")
 			return
 		}
-		RespondInternal(c, "创建资产失败", err)
+		apierr.Internal(c, "创建资产失败", err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
@@ -94,16 +95,16 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
-		RespondBadRequest(c, "请求参数错误")
+		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
 	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "资产不存在")
+			apierr.NotFound(c, "资产不存在")
 			return
 		}
-		RespondInternal(c, "更新资产失败", err)
+		apierr.Internal(c, "更新资产失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -115,7 +116,7 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 // DeleteAsset 删除
 func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 	if err := h.svc.Delete(c.Request.Context(), c.Param("id")); err != nil {
-		RespondInternal(c, "删除资产失败", err)
+		apierr.Internal(c, "删除资产失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -131,7 +132,7 @@ func (h *AssetHandler) ExportAssets(c *gin.Context) {
 	// 导出走全量查询（不分页）
 	items, _, err := h.svc.List(c.Request.Context(), service.AssetFilter{Page: 1, PageSize: 500})
 	if err != nil {
-		RespondInternal(c, "导出资产失败", err)
+		apierr.Internal(c, "导出资产失败", err)
 		return
 	}
 

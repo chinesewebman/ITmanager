@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Divider } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined } from '@ant-design/icons'
-import axios from 'axios'
+import { notificationApi } from '../services/api'
 
 interface NotificationChannel {
   id: string
@@ -20,8 +20,8 @@ function Settings() {
   const fetchChannels = async () => {
     setLoading(true)
     try {
-      const res = await axios.get('/api/notification/channels')
-      setChannels(res.data.data || [])
+      const res: any = await notificationApi.listChannels()
+      setChannels(res?.data?.data || [])
     } catch (error) {
       console.error('获取通知渠道失败:', error)
       setChannels([
@@ -52,7 +52,7 @@ function Settings() {
 
   const handleToggleChannel = async (id: string, enabled: boolean) => {
     try {
-      await axios.put(`/api/notification/channels/${id}`, { is_enabled: enabled })
+      await notificationApi.updateChannel(id, { is_enabled: enabled })
       message.success(enabled ? '已启用' : '已禁用')
       fetchChannels()
     } catch (error) {
@@ -62,7 +62,7 @@ function Settings() {
 
   const handleTestChannel = async (id: string) => {
     try {
-      await axios.post(`/api/notification/channels/${id}/test`)
+      await notificationApi.testChannel(id)
       message.success('测试消息已发送')
     } catch (error) {
       message.error('发送失败')
@@ -71,7 +71,7 @@ function Settings() {
 
   const handleDeleteChannel = async (id: string) => {
     try {
-      await axios.delete(`/api/notification/channels/${id}`)
+      await notificationApi.deleteChannel(id)
       message.success('删除成功')
       fetchChannels()
     } catch (error) {

@@ -3,10 +3,10 @@ package middleware
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"net/http"
 	"strings"
 	"time"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
@@ -79,10 +79,7 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "请求头缺少 Authorization",
-			})
+			apierr.Unauthorized(c, "请求头缺少 Authorization")
 			c.Abort()
 			return
 		}
@@ -99,10 +96,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		// Check for Bearer token format
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Authorization 格式错误，支持 Bearer token 或 X-API-Key",
-			})
+			apierr.Unauthorized(c, "Authorization 格式错误，支持 Bearer token 或 X-API-Key")
 			c.Abort()
 			return
 		}
@@ -110,10 +104,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		tokenString := parts[1]
 		claims, err := VerifyToken(tokenString)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Token 无效或已过期",
-			})
+			apierr.Unauthorized(c, "Token 无效或已过期")
 			c.Abort()
 			return
 		}
@@ -134,20 +125,14 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	keyHash := hashAPIKey(apiKey)
 
 	if err := database.DB.Where("key_hash = ? AND status = ?", keyHash, "active").First(&key).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"code":    401,
-			"message": "API Key 无效或已禁用",
-		})
+		apierr.Unauthorized(c, "API Key 无效或已禁用")
 		c.Abort()
 		return
 	}
 
 	// Check expiration
 	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"code":    401,
-			"message": "API Key 已过期",
-		})
+		apierr.Unauthorized(c, "API Key 已过期")
 		c.Abort()
 		return
 	}
@@ -163,10 +148,7 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 			}
 		}
 		if !ipAllowed {
-			c.JSON(http.StatusForbidden, gin.H{
-				"code":    403,
-				"message": "IP地址不在允许列表中",
-			})
+			apierr.Forbidden(c, "IP地址不在允许列表中")
 			c.Abort()
 			return
 		}
@@ -178,10 +160,7 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	// Get user info
 	var user models.User
 	if err := database.DB.First(&user, "id = ?", key.UserID).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"code":    401,
-			"message": "API Key 关联的用户不存在",
-		})
+		apierr.Unauthorized(c, "API Key 关联的用户不存在")
 		c.Abort()
 		return
 	}
@@ -207,10 +186,7 @@ func RequireRole(roles ...string) gin.HandlerFunc {
 			}
 		}
 
-		c.JSON(http.StatusForbidden, gin.H{
-			"code":    403,
-			"message": "权限不足",
-		})
+		apierr.Forbidden(c, "权限不足")
 		c.Abort()
 	}
 }

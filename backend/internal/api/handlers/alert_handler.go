@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
@@ -31,7 +32,7 @@ func (h *AlertHandler) ListAlerts(c *gin.Context) {
 		Limit:    limit,
 	})
 	if err != nil {
-		RespondInternal(c, "获取告警列表失败", err)
+		apierr.Internal(c, "获取告警列表失败", err)
 		return
 	}
 
@@ -49,10 +50,10 @@ func (h *AlertHandler) GetAlert(c *gin.Context) {
 	alert, err := h.svc.Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "告警不存在")
+			apierr.NotFound(c, "告警不存在")
 			return
 		}
-		RespondInternal(c, "获取告警失败", err)
+		apierr.Internal(c, "获取告警失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -69,10 +70,10 @@ func (h *AlertHandler) AcknowledgeAlert(c *gin.Context) {
 	}
 	if err := h.svc.Acknowledge(c.Request.Context(), c.Param("id"), userID); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "告警不存在")
+			apierr.NotFound(c, "告警不存在")
 			return
 		}
-		RespondInternal(c, "确认告警失败", err)
+		apierr.Internal(c, "确认告警失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -89,10 +90,10 @@ func (h *AlertHandler) ResolveAlert(c *gin.Context) {
 	}
 	if err := h.svc.Resolve(c.Request.Context(), c.Param("id"), userID); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "告警不存在")
+			apierr.NotFound(c, "告警不存在")
 			return
 		}
-		RespondInternal(c, "解决告警失败", err)
+		apierr.Internal(c, "解决告警失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -105,7 +106,7 @@ func (h *AlertHandler) ResolveAlert(c *gin.Context) {
 func (h *AlertHandler) GetAlertStats(c *gin.Context) {
 	bySev, byHour, err := h.svc.Stats(c.Request.Context())
 	if err != nil {
-		RespondInternal(c, "获取告警统计失败", err)
+		apierr.Internal(c, "获取告警统计失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -121,7 +122,7 @@ func (h *AlertHandler) GetAlertStats(c *gin.Context) {
 func (h *AlertHandler) ListAlertRules(c *gin.Context) {
 	rules, err := h.svc.ListRules(c.Request.Context())
 	if err != nil {
-		RespondInternal(c, "获取告警规则列表失败", err)
+		apierr.Internal(c, "获取告警规则列表失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -134,15 +135,15 @@ func (h *AlertHandler) ListAlertRules(c *gin.Context) {
 func (h *AlertHandler) CreateAlertRule(c *gin.Context) {
 	var rule models.AlertRule
 	if err := c.ShouldBindJSON(&rule); err != nil {
-		RespondBadRequest(c, "请求参数错误")
+		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
 	if err := h.svc.CreateRule(c.Request.Context(), &rule); err != nil {
 		if errors.Is(err, service.ErrInvalidInput) {
-			RespondBadRequest(c, "规则数据不完整")
+			apierr.BadRequest(c, "规则数据不完整")
 			return
 		}
-		RespondInternal(c, "创建告警规则失败", err)
+		apierr.Internal(c, "创建告警规则失败", err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
@@ -155,16 +156,16 @@ func (h *AlertHandler) CreateAlertRule(c *gin.Context) {
 func (h *AlertHandler) UpdateAlertRule(c *gin.Context) {
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
-		RespondBadRequest(c, "请求参数错误")
+		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
 	rule, err := h.svc.UpdateRule(c.Request.Context(), c.Param("id"), updates)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
-			RespondNotFound(c, "告警规则不存在")
+			apierr.NotFound(c, "告警规则不存在")
 			return
 		}
-		RespondInternal(c, "更新告警规则失败", err)
+		apierr.Internal(c, "更新告警规则失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -176,7 +177,7 @@ func (h *AlertHandler) UpdateAlertRule(c *gin.Context) {
 // DeleteAlertRule 删除
 func (h *AlertHandler) DeleteAlertRule(c *gin.Context) {
 	if err := h.svc.DeleteRule(c.Request.Context(), c.Param("id")); err != nil {
-		RespondInternal(c, "删除告警规则失败", err)
+		apierr.Internal(c, "删除告警规则失败", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

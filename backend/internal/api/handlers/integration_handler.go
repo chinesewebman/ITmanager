@@ -3,23 +3,22 @@ package handlers
 import (
 	"net/http"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/integration"
 
 	"github.com/gin-gonic/gin"
 )
 
-// IntegrationHandler 集成处理器
+// IntegrationHandler 集成 HTTP handler（不再用 config.Get()，由 routes 注入）
 type IntegrationHandler struct {
-	service *integration.IntegrationService
+	svc    *integration.IntegrationService
+	config *config.Config
 }
 
-// NewIntegrationHandler 创建集成处理器
-func NewIntegrationHandler() *IntegrationHandler {
-	cfg := config.Get()
-	return &IntegrationHandler{
-		service: integration.NewIntegrationService(cfg),
-	}
+// NewIntegrationHandler 构造函数
+func NewIntegrationHandler(svc *integration.IntegrationService, cfg *config.Config) *IntegrationHandler {
+	return &IntegrationHandler{svc: svc, config: cfg}
 }
 
 // SyncRequest 同步请求
@@ -39,56 +38,48 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 
 	switch req.Type {
 	case "netbox":
-		count, e := h.service.SyncFromNetBox()
+		count, e := h.svc.SyncFromNetBox()
 		results = map[string]int{"netbox": count}
 		err = e
 	case "zabbix":
-		count, e := h.service.SyncFromZabbix()
+		count, e := h.svc.SyncFromZabbix()
 		results = map[string]int{"zabbix": count}
 		err = e
 	case "glpi":
-		count, e := h.service.SyncFromGLPI()
+		count, e := h.svc.SyncFromGLPI()
 		results = map[string]int{"glpi": count}
 		err = e
 	default:
-		results, err = h.service.SyncAll()
+		results, err = h.svc.SyncAll()
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": "同步失败: " + err.Error(),
-		})
+		apierr.Internal(c, "同步失败", err)
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"synced": results,
-		},
+		"code":    0,
+		"data":    gin.H{"synced": results},
 		"message": "同步完成",
 	})
 }
 
 // GetIntegrationStatus 获取集成状态
 func (h *IntegrationHandler) GetIntegrationStatus(c *gin.Context) {
-	cfg := config.Get()
-
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
 			"netbox": gin.H{
-				"enabled": cfg.Integrations.Netbox.URL != "",
-				"url":     cfg.Integrations.Netbox.URL,
+				"enabled": h.config.Integrations.Netbox.URL != "",
+				"url":     h.config.Integrations.Netbox.URL,
 			},
 			"zabbix": gin.H{
-				"enabled": cfg.Integrations.Zabbix.URL != "",
-				"url":     cfg.Integrations.Zabbix.URL,
+				"enabled": h.config.Integrations.Zabbix.URL != "",
+				"url":     h.config.Integrations.Zabbix.URL,
 			},
 			"glpi": gin.H{
-				"enabled": cfg.Integrations.GLPI.URL != "",
-				"url":     cfg.Integrations.GLPI.URL,
+				"enabled": h.config.Integrations.GLPI.URL != "",
+				"url":     h.config.Integrations.GLPI.URL,
 			},
 		},
 	})

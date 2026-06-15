@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
 
@@ -52,14 +53,14 @@ func CreateAPIKey(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		RespondBadRequest(c, "请求参数错误")
+		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
 
 	userID := c.GetString("user_id")
 	uid, err := uuid.Parse(userID)
 	if err != nil {
-		RespondBadRequest(c, "无效的用户ID")
+		apierr.BadRequest(c, "无效的用户ID")
 		return
 	}
 
@@ -68,7 +69,7 @@ func CreateAPIKey(c *gin.Context) {
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
 		t, err := time.Parse("2006-01-02", *req.ExpiresAt)
 		if err != nil {
-			RespondBadRequest(c, "expires_at 格式错误，应为 YYYY-MM-DD")
+			apierr.BadRequest(c, "expires_at 格式错误，应为 YYYY-MM-DD")
 			return
 		}
 		expiresAt = &t
@@ -102,7 +103,7 @@ func CreateAPIKey(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&apiKey).Error; err != nil {
-		RespondInternal(c, "创建 API Key 失败", err)
+		apierr.Internal(c, "创建 API Key 失败", err)
 		return
 	}
 
@@ -130,7 +131,7 @@ func ListAPIKeys(c *gin.Context) {
 
 	var keys []models.APIKey
 	if err := database.DB.Where("user_id = ?", uid).Order("created_at DESC").Find(&keys).Error; err != nil {
-		RespondInternal(c, "获取 API Key 列表失败", err)
+		apierr.Internal(c, "获取 API Key 列表失败", err)
 		return
 	}
 
@@ -163,12 +164,12 @@ func DeleteAPIKey(c *gin.Context) {
 
 	var key models.APIKey
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID).First(&key).Error; err != nil {
-		RespondNotFound(c, "API Key 不存在")
+		apierr.NotFound(c, "API Key 不存在")
 		return
 	}
 
 	if err := database.DB.Delete(&key).Error; err != nil {
-		RespondInternal(c, "删除 API Key 失败", err)
+		apierr.Internal(c, "删除 API Key 失败", err)
 		return
 	}
 
@@ -185,13 +186,13 @@ func RevokeAPIKey(c *gin.Context) {
 
 	var key models.APIKey
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID).First(&key).Error; err != nil {
-		RespondNotFound(c, "API Key 不存在")
+		apierr.NotFound(c, "API Key 不存在")
 		return
 	}
 
 	key.Status = "revoked"
 	if err := database.DB.Save(&key).Error; err != nil {
-		RespondInternal(c, "吊销 API Key 失败", err)
+		apierr.Internal(c, "吊销 API Key 失败", err)
 		return
 	}
 

@@ -37,7 +37,9 @@ function Assets() {
     setLoading(true)
     try {
       const res: any = await assetApi.list()
-      setData(res?.data?.items ?? [])
+      // C-F11: 后端返回 {code, data: {items,total,page,size}}，
+      // axios response 在 api 实例基础上再包一层，所以是 res.data.data.items
+      setData(res?.data?.data?.items ?? [])
     } catch (error) {
       console.error('获取资产列表失败:', error)
       setData(MOCK_DATA)
