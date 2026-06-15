@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { Button, Select, Space, message } from 'antd'
 import { SyncOutlined } from '@ant-design/icons'
 import { ticketApi } from '../services/api'
@@ -7,6 +6,8 @@ import { TicketTable, type Ticket } from '../components/TicketTable'
 import { TicketFormModal, type TicketFormValues } from '../components/TicketFormModal'
 import { TicketDetailModal } from '../components/TicketDetailModal'
 import { TicketStatsCards } from '../components/TicketStatsCards'
+import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
+import { useState } from 'react'
 
 const MOCK_TICKETS: Ticket[] = [
   { id: '1', title: '服务器磁盘空间不足', priority: 'high', status: 'open', requester: '张三', assignee: '李四', created_at: '2026-02-14 10:00:00', updated_at: '2026-02-14 11:00:00' },
@@ -18,74 +19,50 @@ const MOCK_TICKETS: Ticket[] = [
 const DEFAULT_STATS = { pending: 3, inProgress: 5, waiting: 2, resolved: 15 }
 
 function Tickets() {
-  const [data, setData] = useState<Ticket[]>([])
-  const [loading, setLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [priorityFilter, setPriorityFilter] = useState<string>('')
   const [createOpen, setCreateOpen] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
   const [viewTicket, setViewTicket] = useState<Ticket | null>(null)
 
-  const fetchData = async () => {
-    setLoading(true)
-    try {
-      // 走 services/api.ts 拦截器，自动带 token (C-F9 修复)
-      // status/priority 透传到后端 (C-F10 修复)
+  // C-P9: filter 变化走 queryKey 隔离缓存
+  const filters = { status: statusFilter, priority: priorityFilter }
+  const { data, isLoading, refetch } = useApiQuery<Ticket[]>(
+    queryKeys.tickets.list(filters),
+    async () => {
       const res: any = await ticketApi.list({
         status: statusFilter || undefined,
         priority: priorityFilter || undefined,
       })
       const raw = res?.data?.data?.items ?? res?.data?.data ?? []
-      // C-F14: 后端模型字段是 requester_name/assignee_name，
-      // 前端 TicketTable 用 requester/assignee — 兼容映射避免空表格
-      const normalized = (Array.isArray(raw) ? raw : []).map((t: any) => ({
+      // C-F14: requester_name/assignee_name → requester/assignee 兼容映射
+      return (Array.isArray(raw) ? raw : []).map((t: any) => ({
         ...t,
         requester: t.requester ?? t.requester_name ?? '',
         assignee: t.assignee ?? t.assignee_name ?? '',
       }))
-      setData(normalized)
-    } catch (e) {
-      console.error('获取工单列表失败:', e)
-      setData(MOCK_TICKETS)
-    } finally {
-      setLoading(false)
-    }
-  }
+    },
+  )
 
-  useEffect(() => {
-    fetchData()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, priorityFilter])
-
-  const handleSubmit = async (values: TicketFormValues) => {
-    setSubmitting(true)
-    try {
-      await ticketApi.create(values)
+  const createMut = useApiMutation((v: TicketFormValues) => ticketApi.create(v), {
+    onSuccess: () => {
       message.success('工单已创建')
       setCreateOpen(false)
-      fetchData()
-    } catch {
-      message.error('创建失败（已用本地 mock）')
-      // 兜底：本地插入一条让用户看见（C-F14 兼容映射）
-      setData((prev) => [
-        { id: String(Date.now()), ...values, status: 'open', requester: '当前用户', requester_name: '当前用户', assignee: '', assignee_name: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() } as Ticket,
-        ...prev,
-      ])
-      setCreateOpen(false)
-    } finally {
-      setSubmitting(false)
-    }
-  }
+      refetch()
+    },
+    onError: () => message.error('创建失败'),
+  })
+
+  const list = data ?? MOCK_TICKETS
 
   return (
     <div>
       <PageHeader
         title="工单管理"
-        subtitle={`共 ${data.length} 个工单`}
+        subtitle={`共 ${list.length} 个工单`}
         onCreate={() => setCreateOpen(true)}
         createText="创建工单"
         extra={
-          <Button icon={<SyncOutlined />} onClick={fetchData}>
+          <Button icon={<SyncOutlined />} onClick={() => refetch()}>
             刷新
           </Button>
         }
@@ -123,14 +100,13 @@ function Tickets() {
           />
         </Space>
       </div>
-
-      <TicketTable data={data} loading={loading} onView={setViewTicket} />
+      <TicketTable data={list} loading={isLoading} onView={setViewTicket} />
 
       <TicketFormModal
         open={createOpen}
-        submitting={submitting}
+        submitting={createMut.isPending}
         onCancel={() => setCreateOpen(false)}
-        onSubmit={handleSubmit}
+        onSubmit={(v) => createMut.mutate(v)}
       />
       <TicketDetailModal ticket={viewTicket} onClose={() => setViewTicket(null)} />
     </div>

@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
-import { Card, Col, List, Row, Spin, Tag } from 'antd'
+import { Card, Col, List, Row, Tag } from 'antd'
 import { dashboardApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { DashboardCards, type DashboardCardsStats } from '../components/DashboardCards'
 import { AlertTrendChart, type AlertTrend } from '../components/AlertTrendChart'
+import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
 
 const MOCK_STATS: DashboardCardsStats = {
   assets: 156,
@@ -40,49 +40,43 @@ const MOCK_RECENT: RecentAlert[] = [
 ]
 
 function Dashboard() {
-  const [loading, setLoading] = useState(true)
-  const [stats, setStats] = useState<DashboardCardsStats>(MOCK_STATS)
-  const [trends, setTrends] = useState<AlertTrend[]>(MOCK_TRENDS)
+  // C-P9: stats + trends 走 React Query（1min 缓存）
+  const { data: stats } = useApiQuery<DashboardCardsStats>(
+    queryKeys.dashboard.stats(),
+    async () => {
+      const res: any = await dashboardApi.getStats()
+      return res?.data?.data ?? MOCK_STATS
+    },
+    { staleTime: 60_000 },
+  )
+  const { data: trends } = useApiQuery<AlertTrend[]>(
+    queryKeys.dashboard.trends(),
+    async () => {
+      const res: any = await dashboardApi.getTrends()
+      return res?.data?.data?.alert_trends ?? MOCK_TRENDS
+    },
+    { staleTime: 60_000 },
+  )
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [s, t] = await Promise.all([dashboardApi.getStats(), dashboardApi.getTrends()])
-        if (s?.data?.data) setStats(s.data.data)
-        if (t?.data?.data?.alert_trends) setTrends(t.data.data.alert_trends)
-      } catch (e) {
-        console.error('获取仪表盘数据失败:', e)
-      } finally {
-        setLoading(false)
-      }
-    }
-    load()
-  }, [])
+  const safeStats = stats ?? MOCK_STATS
+  const safeTrends = trends ?? MOCK_TRENDS
 
   // 简化的 delta 计算：对比前 3 天 vs 后 3 天的均值
   const delta =
-    trends.length >= 6
-      ? trends.slice(-3).reduce((s, p) => s + p.count, 0) -
-        trends.slice(-6, -3).reduce((s, p) => s + p.count, 0)
-      : 5 // 兜底
-
-  if (loading) {
-    return (
-      <div style={{ textAlign: 'center', padding: 100 }}>
-        <Spin size="large" />
-      </div>
-    )
-  }
+    safeTrends.length >= 6
+      ? safeTrends.slice(-3).reduce((s, p) => s + p.count, 0) -
+        safeTrends.slice(-6, -3).reduce((s, p) => s + p.count, 0)
+      : 5
 
   return (
     <div>
       <PageHeader title="仪表盘" subtitle="网络运维平台核心指标速览" />
 
-      <DashboardCards stats={stats} alertTrendDelta={delta} />
+      <DashboardCards stats={safeStats} alertTrendDelta={delta} />
 
       <Row gutter={16} style={{ marginTop: 16 }}>
         <Col span={16}>
-          <AlertTrendChart data={trends} />
+          <AlertTrendChart data={safeTrends} />
         </Col>
         <Col span={8}>
           <Card title="最近告警" style={{ height: 380 }}>

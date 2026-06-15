@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
 import { Select, Spin, Modal } from 'antd'
 import { siteApi, rackApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { RackGrid, type Rack } from '../components/RackGrid'
 import { RackDeviceList, type RackDevice } from '../components/RackDeviceList'
+import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
+import { useState } from 'react'
 
 interface Site {
   id: string
@@ -35,59 +36,41 @@ function mockDevices(): RackDevice[] {
 }
 
 function Racks() {
-  const [sites, setSites] = useState<Site[]>([])
   const [selectedSite, setSelectedSite] = useState<string>('')
-  const [racks, setRacks] = useState<Rack[]>([])
-  const [loading, setLoading] = useState(false)
   const [selectedRack, setSelectedRack] = useState<Rack | null>(null)
-  const [devices, setDevices] = useState<RackDevice[]>([])
 
-  const loadSites = async () => {
-    try {
-      // 走 services/api.ts 拦截器，自动带 token (C-F9 修复)
+  // C-P9: 站点列表用 React Query（极少变化，缓存 5min）
+  const { data: sitesData } = useApiQuery<Site[]>(
+    queryKeys.racks.all,
+    async () => {
       const res: any = await siteApi.list()
-      setSites(res?.data?.data || [])
-    } catch {
-      setSites(MOCK_SITES)
-    }
-  }
+      return res?.data?.data ?? MOCK_SITES
+    },
+    { staleTime: 5 * 60_000 },
+  )
+  const sites = sitesData ?? MOCK_SITES
 
-  const loadRacks = async (siteId: string) => {
-    setLoading(true)
-    try {
-      const res: any = await rackApi.list({ site_id: siteId })
-      setRacks(res?.data?.data || [])
-    } catch {
-      setRacks(mockRacks(siteId))
-    } finally {
-      setLoading(false)
-    }
-  }
+  // 机柜列表按 site 隔离
+  const { data: racksData, isLoading } = useApiQuery<Rack[]>(
+    ['racks', 'list', selectedSite],
+    async () => {
+      const res: any = await rackApi.list({ site_id: selectedSite })
+      return res?.data?.data ?? mockRacks(selectedSite)
+    },
+    { enabled: !!selectedSite, staleTime: 30_000 },
+  )
+  const racks = racksData ?? []
 
-  const loadDevices = async (rackId: string) => {
-    try {
-      const res: any = await rackApi.getDevices(rackId)
-      setDevices(res?.data?.data || [])
-    } catch {
-      setDevices(mockDevices())
-    }
-  }
-
-  useEffect(() => {
-    loadSites()
-  }, [])
-
-  useEffect(() => {
-    if (selectedSite) {
-      loadRacks(selectedSite)
-    }
-  }, [selectedSite])
-
-  useEffect(() => {
-    if (selectedRack) {
-      loadDevices(selectedRack.id)
-    }
-  }, [selectedRack])
+  // 设备列表按 rack 隔离
+  const { data: devicesData } = useApiQuery<RackDevice[]>(
+    queryKeys.racks.devices(selectedRack?.id ?? ''),
+    async () => {
+      const res: any = await rackApi.getDevices(selectedRack!.id)
+      return res?.data?.data ?? mockDevices()
+    },
+    { enabled: !!selectedRack, staleTime: 30_000 },
+  )
+  const devices = devicesData ?? []
 
   return (
     <div>
@@ -102,7 +85,7 @@ function Racks() {
         />
       </div>
 
-      {loading ? (
+      {isLoading ? (
         <div style={{ textAlign: 'center', padding: 100 }}>
           <Spin size="large" />
         </div>

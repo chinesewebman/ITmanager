@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { useState, useEffect } from 'react'
 import { Layout, Menu, theme, Dropdown, Avatar, Space } from 'antd'
 import type { MenuProps } from 'antd'
@@ -12,14 +13,15 @@ import {
   LogoutOutlined,
 } from '@ant-design/icons'
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import Dashboard from './pages/Dashboard'
+// C-P10: 路由级 code-splitting（每个 page 独立 chunk，首屏只下载用到的）
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Assets = lazy(() => import('./pages/Assets'))
+const Alerts = lazy(() => import('./pages/Alerts'))
+const Racks = lazy(() => import('./pages/Racks'))
+const Tickets = lazy(() => import('./pages/Tickets'))
+const Settings = lazy(() => import('./pages/Settings'))
+import Login from './pages/Login' // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from './components/ErrorBoundary'
-import Assets from './pages/Assets'
-import Alerts from './pages/Alerts'
-import Racks from './pages/Racks'
-import Tickets from './pages/Tickets'
-import Settings from './pages/Settings'
-import Login from './pages/Login'
 import { authApi } from './services/api'
 
 const { Header, Sider, Content } = Layout
@@ -137,15 +139,17 @@ function AppLayout() {
               borderRadius: borderRadiusLG,
             }}
           >
-            <Routes>
-              <Route path="/" element={<ErrorBoundary pageName="仪表盘"><Dashboard /></ErrorBoundary>} />
-              <Route path="/assets" element={<ErrorBoundary pageName="资产管理"><Assets /></ErrorBoundary>} />
-              <Route path="/alerts" element={<ErrorBoundary pageName="告警中心"><Alerts /></ErrorBoundary>} />
-              <Route path="/racks" element={<ErrorBoundary pageName="机房机柜"><Racks /></ErrorBoundary>} />
-              <Route path="/tickets" element={<ErrorBoundary pageName="工单管理"><Tickets /></ErrorBoundary>} />
-              <Route path="/settings" element={<ErrorBoundary pageName="系统设置"><Settings /></ErrorBoundary>} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
+            <Suspense fallback={<div style={{ textAlign: 'center', padding: 100 }}>加载中…</div>}>
+              <Routes>
+                <Route path="/" element={<ErrorBoundary pageName="仪表盘"><Dashboard /></ErrorBoundary>} />
+                <Route path="/assets" element={<ErrorBoundary pageName="资产管理"><Assets /></ErrorBoundary>} />
+                <Route path="/alerts" element={<ErrorBoundary pageName="告警中心"><Alerts /></ErrorBoundary>} />
+                <Route path="/racks" element={<ErrorBoundary pageName="机房机柜"><Racks /></ErrorBoundary>} />
+                <Route path="/tickets" element={<ErrorBoundary pageName="工单管理"><Tickets /></ErrorBoundary>} />
+                <Route path="/settings" element={<ErrorBoundary pageName="系统设置"><Settings /></ErrorBoundary>} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Suspense>
           </div>
         </Content>
       </Layout>

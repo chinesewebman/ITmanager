@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
 import { Button, Select, Space, message } from 'antd'
 import { SyncOutlined } from '@ant-design/icons'
 import { alertApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { AlertTable, type Alert } from '../components/AlertTable'
 import { AlertStatsCards, type AlertStats } from '../components/AlertStatsCards'
+import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
+import { useState } from 'react'
 
 const MOCK_ALERTS: Alert[] = [
   { id: '1', host: 'web-server-01', message: 'CPU使用率超过90%', severity: 5, severity_name: '灾难', status: 'problem', created_at: '2026-02-14 10:00:00' },
@@ -15,59 +16,49 @@ const MOCK_ALERTS: Alert[] = [
 
 const DEFAULT_STATS: AlertStats = { total: 15, problem: 8, acknowledged: 3, resolved: 4 }
 
+interface AlertsResp {
+  items: Alert[]
+  stats: AlertStats
+}
+
 function Alerts() {
-  const [data, setData] = useState<Alert[]>([])
-  const [loading, setLoading] = useState(false)
-  const [stats, setStats] = useState<AlertStats>(DEFAULT_STATS)
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [severityFilter, setSeverityFilter] = useState<string>('')
 
-  const fetchData = async () => {
-    setLoading(true)
-    try {
+  // C-P9: 列表 + stats 合并到 React Query，filter 变化走 queryKey 隔离缓存
+  const filters = { status: statusFilter, severity: severityFilter }
+  const { data, isLoading, refetch } = useApiQuery<AlertsResp>(
+    queryKeys.alerts.list(filters),
+    async () => {
       const params: { status?: string; severity?: string } = {}
       if (statusFilter) params.status = statusFilter
       if (severityFilter) params.severity = severityFilter
-
       const res: any = await alertApi.list(params)
-      setData(res?.data?.data?.items ?? [])
-      setStats(res?.data?.data?.stats ?? DEFAULT_STATS)
-    } catch (error) {
-      console.error('获取告警列表失败:', error)
-      setData(MOCK_ALERTS)
-      setStats(DEFAULT_STATS)
-    } finally {
-      setLoading(false)
-    }
-  }
+      return {
+        items: res?.data?.data?.items ?? MOCK_ALERTS,
+        stats: res?.data?.data?.stats ?? DEFAULT_STATS,
+      }
+    },
+  )
 
-  useEffect(() => {
-    fetchData()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, severityFilter])
-
-  const handleAck = async (id: string) => {
-    try {
-      await alertApi.acknowledge(id)
+  // 写操作 invalidate alerts 树
+  const ackMut = useApiMutation((id: string) => alertApi.acknowledge(id), {
+    onSuccess: () => {
       message.success('告警已确认')
-      fetchData()
-    } catch {
-      // 兜底：本地变更
-      setData((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, status: 'acknowledged', ack_time: new Date().toISOString() } : a))
-      )
-    }
-  }
-
-  const handleResolve = async (id: string) => {
-    try {
-      await alertApi.resolve(id)
+      refetch()
+    },
+    onError: () => message.error('确认失败'),
+  })
+  const resolveMut = useApiMutation((id: string) => alertApi.resolve(id), {
+    onSuccess: () => {
       message.success('告警已解决')
-      fetchData()
-    } catch {
-      setData((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'resolved' } : a)))
-    }
-  }
+      refetch()
+    },
+    onError: () => message.error('解决失败'),
+  })
+
+  const list = data?.items ?? MOCK_ALERTS
+  const stats = data?.stats ?? DEFAULT_STATS
 
   return (
     <div>
@@ -75,7 +66,7 @@ function Alerts() {
         title="告警中心"
         subtitle={`当前 ${stats.problem} 个未处理告警`}
         extra={
-          <Button icon={<SyncOutlined />} onClick={fetchData}>
+          <Button icon={<SyncOutlined />} onClick={() => refetch()}>
             刷新
           </Button>
         }
@@ -112,7 +103,12 @@ function Alerts() {
         </Space>
       </div>
 
-      <AlertTable data={data} loading={loading} onAck={handleAck} onResolve={handleResolve} />
+      <AlertTable
+        data={list}
+        loading={isLoading}
+        onAck={(id) => ackMut.mutate(id)}
+        onResolve={(id) => resolveMut.mutate(id)}
+      />
     </div>
   )
 }

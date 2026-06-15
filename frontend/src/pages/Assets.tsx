@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { Button, message } from 'antd'
 import { SyncOutlined } from '@ant-design/icons'
 import { assetApi } from '../services/api'
@@ -6,6 +6,7 @@ import { AssetTable, type Asset } from '../components/AssetTable'
 import { AssetFormModal, type AssetFormValues } from '../components/AssetFormModal'
 import { AssetFilterBar } from '../components/AssetFilterBar'
 import { PageHeader } from '../components/PageHeader'
+import { useState, useMemo } from 'react'
 
 // 资产类型筛选项
 const TYPE_OPTIONS = [
@@ -26,69 +27,68 @@ const MOCK_DATA: Asset[] = [
 ]
 
 function Assets() {
-  const [data, setData] = useState<Asset[]>([])
-  const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState<Asset | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
   const [filter, setFilter] = useState({ keyword: '', assetType: '' })
 
-  const fetchData = async () => {
-    setLoading(true)
-    try {
+  // C-P9: React Query 拉取列表（30s 内不重 fetch）
+  const { data, isLoading, refetch } = useApiQuery<Asset[]>(
+    queryKeys.assets.list(),
+    async () => {
       const res: any = await assetApi.list()
-      // C-F11: 后端返回 {code, data: {items,total,page,size}}，
-      // axios response 在 api 实例基础上再包一层，所以是 res.data.data.items
-      setData(res?.data?.data?.items ?? [])
-    } catch (error) {
-      console.error('获取资产列表失败:', error)
-      setData(MOCK_DATA)
-    } finally {
-      setLoading(false)
-    }
-  }
+      return res?.data?.data?.items ?? []
+    },
+  )
 
-  useEffect(() => {
-    fetchData()
-  }, [])
-
-  // 前端过滤（搜索 + 类型）
-  const filtered = data.filter((item) => {
-    const kw = filter.keyword.toLowerCase()
-    const matchKw =
-      !kw ||
-      item.name.toLowerCase().includes(kw) ||
-      item.ip_address.includes(filter.keyword)
-    const matchType = !filter.assetType || item.asset_type === filter.assetType
-    return matchKw && matchType
+  // 写操作：创建/更新/删除统一 invalidate 列表
+  const createMut = useApiMutation((v: AssetFormValues) => assetApi.create(v), {
+    onSuccess: () => {
+      message.success('资产已创建')
+      setModalOpen(false)
+      refetch()
+    },
+    onError: () => message.error('创建失败'),
   })
+  const updateMut = useApiMutation(
+    ({ id, values }: { id: string; values: AssetFormValues }) => assetApi.update(id, values),
+    {
+      onSuccess: () => {
+        message.success('资产已更新')
+        setModalOpen(false)
+        refetch()
+      },
+      onError: () => message.error('更新失败'),
+    },
+  )
+  const submitting = createMut.isPending || updateMut.isPending
+
+  // 前端过滤
+  const filtered = useMemo(() => {
+    const list = data ?? MOCK_DATA
+    return list.filter((item) => {
+      const kw = filter.keyword.toLowerCase()
+      const matchKw =
+        !kw ||
+        item.name.toLowerCase().includes(kw) ||
+        item.ip_address.includes(filter.keyword)
+      const matchType = !filter.assetType || item.asset_type === filter.assetType
+      return matchKw && matchType
+    })
+  }, [data, filter])
 
   const handleEdit = (asset: Asset) => {
     setEditing(asset)
     setModalOpen(true)
   }
-
   const handleCreate = () => {
     setEditing(null)
     setModalOpen(true)
   }
-
-  const handleSubmit = async (values: AssetFormValues) => {
-    setSubmitting(true)
-    try {
-      if (editing) {
-        await assetApi.update(editing.id, values)
-        message.success('资产已更新')
-      } else {
-        await assetApi.create(values)
-        message.success('资产已创建')
-      }
-      setModalOpen(false)
-      fetchData()
-    } catch (e) {
-      message.error(editing ? '更新失败' : '创建失败')
-    } finally {
-      setSubmitting(false)
+  const handleSubmit = (values: AssetFormValues) => {
+    if (editing) {
+      updateMut.mutate({ id: editing.id, values })
+    } else {
+      createMut.mutate(values)
     }
   }
 
@@ -96,11 +96,11 @@ function Assets() {
     <div>
       <PageHeader
         title="资产管理"
-        subtitle={`共 ${data.length} 台资产`}
+        subtitle={`共 ${(data ?? MOCK_DATA).length} 台资产`}
         onCreate={handleCreate}
         createText="添加资产"
         extra={
-          <Button icon={<SyncOutlined />} onClick={fetchData}>
+          <Button icon={<SyncOutlined />} onClick={() => refetch()}>
             刷新
           </Button>
         }
@@ -108,7 +108,7 @@ function Assets() {
       <div style={{ marginBottom: 16 }}>
         <AssetFilterBar value={filter} onChange={setFilter} typeOptions={TYPE_OPTIONS} />
       </div>
-      <AssetTable data={filtered} loading={loading} onEdit={handleEdit} onChanged={fetchData} />
+      <AssetTable data={filtered} loading={isLoading} onEdit={handleEdit} onChanged={() => refetch()} />
       <AssetFormModal
         open={modalOpen}
         editing={editing}
