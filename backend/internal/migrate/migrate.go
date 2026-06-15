@@ -20,12 +20,37 @@ import (
 // FS 注入：调用方用 embed.FS 把 migrations/ 目录打包进二进制
 var FS embed.FS
 
-// 确保 schema_migrations 表存在
+// ensureTable 确保 schema_migrations 表存在
 func ensureTable(db *gorm.DB) error {
 	return db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version BIGINT PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`).Error
+}
+
+// advisoryLockKey 全局 migration 互斥锁的 key（C-F13）
+// 选 'MIGRO' + 'TION!' = 0x4D49_4752_4F54_494F_4E21
+// 必须全 8 字节非 0；选 ASCII 字符串 'MIGRATE!' 的 bigint 表示
+const advisoryLockKey int64 = 0x4D49_4752_4154_4521 // 'MIGRATE!'
+
+// acquireLock 通过 pg_advisory_lock 拿全局 migration 互斥锁
+// 失败立即返回；超时 / 死锁由 caller 处理
+func acquireLock(db *gorm.DB) error {
+	// PG advisory lock 立即尝试；非阻塞（pg_try_advisory_lock 返回 bool）
+	var got bool
+	if err := db.Raw("SELECT pg_try_advisory_lock(?)", advisoryLockKey).Scan(&got).Error; err != nil {
+		return fmt.Errorf("acquire advisory lock: %w", err)
+	}
+	if !got {
+		return fmt.Errorf("migration lock held by another process, retry later")
+	}
+	return nil
+}
+
+// releaseLock 释放 advisory lock（C-F13）
+func releaseLock(db *gorm.DB) {
+	// 忽略错误（unlock 失败不阻塞 caller）
+	_ = db.Exec("SELECT pg_advisory_unlock(?)", advisoryLockKey).Error
 }
 
 type migration struct {
@@ -113,6 +138,12 @@ func Status(db *gorm.DB) error {
 
 // Up 应用所有未执行的 migration
 func Up(db *gorm.DB) error {
+	// C-F13: 进程间互斥锁，防止两个 Up 并发跑同 version migration
+	if err := acquireLock(db); err != nil {
+		return err
+	}
+	defer releaseLock(db)
+
 	if err := ensureTable(db); err != nil {
 		return err
 	}
@@ -150,6 +181,12 @@ func Up(db *gorm.DB) error {
 
 // Down 回滚最后一个已应用的 migration
 func Down(db *gorm.DB) error {
+	// C-F13: 进程间互斥锁（跟 Up 用同一把锁）
+	if err := acquireLock(db); err != nil {
+		return err
+	}
+	defer releaseLock(db)
+
 	if err := ensureTable(db); err != nil {
 		return err
 	}
