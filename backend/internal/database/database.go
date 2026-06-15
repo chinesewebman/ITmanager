@@ -116,6 +116,12 @@ func GetDB() *gorm.DB {
 	return DB
 }
 
+// SetDBForTest 测试注入全局 DB（cleanup 时用旧值恢复）
+// 仅用于集成测试，生产代码不应调用
+func SetDBForTest(g *gorm.DB) {
+	DB = g
+}
+
 // Close 关闭数据库连接
 func Close() error {
 	if DB != nil {

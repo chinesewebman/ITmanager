@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS notification_logs;
+DROP TABLE IF EXISTS notification_channels;
+DROP TABLE IF EXISTS tickets;
+DROP TABLE IF EXISTS alerts;
+DROP TABLE IF EXISTS alert_rules;
+DROP TABLE IF EXISTS asset_networks;
+DROP TABLE IF EXISTS assets;
+DROP TABLE IF EXISTS sites;
+DROP TABLE IF EXISTS racks;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS users;

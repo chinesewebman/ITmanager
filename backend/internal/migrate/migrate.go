@@ -18,14 +18,24 @@ import (
 )
 
 // FS 注入：调用方用 embed.FS 把 migrations/ 目录打包进二进制
-var FS embed.FS
+// 接受 fs.FS 接口（embed.FS 实现了 fs.FS）方便测试注入
+var FS fs.FS = embed.FS{}
 
 // ensureTable 确保 schema_migrations 表存在
 func ensureTable(db *gorm.DB) error {
-	return db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	// SQLite 没有 TIMESTAMPTZ，用 DATETIME 替代
+	colType := "TIMESTAMPTZ"
+	defaultExpr := "NOW()"
+	if db.Dialector.Name() == "sqlite" {
+		colType = "DATETIME"
+		// SQLite 不支持 NOW()（Postgres 关键字），用 CURRENT_TIMESTAMP
+		defaultExpr = "CURRENT_TIMESTAMP"
+	}
+	stmt := `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version BIGINT PRIMARY KEY,
-		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`).Error
+		applied_at ` + colType + ` NOT NULL DEFAULT ` + defaultExpr + `
+	)`
+	return db.Exec(stmt).Error
 }
 
 // advisoryLockKey 全局 migration 互斥锁的 key（C-F13）
@@ -36,6 +46,11 @@ const advisoryLockKey int64 = 0x4D49_4752_4154_4521 // 'MIGRATE!'
 // acquireLock 通过 pg_advisory_lock 拿全局 migration 互斥锁
 // 失败立即返回；超时 / 死锁由 caller 处理
 func acquireLock(db *gorm.DB) error {
+	// SQLite 没有 advisory lock 概念（pg_try_advisory_lock 会报 no such function）
+	// 测试 + 本地开发用 sqlite，无需互斥；生产用 postgres 走真实锁
+	if db.Dialector.Name() == "sqlite" {
+		return nil
+	}
 	// PG advisory lock 立即尝试；非阻塞（pg_try_advisory_lock 返回 bool）
 	var got bool
 	if err := db.Raw("SELECT pg_try_advisory_lock(?)", advisoryLockKey).Scan(&got).Error; err != nil {
@@ -48,8 +63,11 @@ func acquireLock(db *gorm.DB) error {
 }
 
 // releaseLock 释放 advisory lock（C-F13）
+// 忽略错误（unlock 失败不阻塞 caller）
 func releaseLock(db *gorm.DB) {
-	// 忽略错误（unlock 失败不阻塞 caller）
+	if db.Dialector.Name() == "sqlite" {
+		return
+	}
 	_ = db.Exec("SELECT pg_advisory_unlock(?)", advisoryLockKey).Error
 }
 

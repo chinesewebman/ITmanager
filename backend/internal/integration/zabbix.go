@@ -14,8 +14,8 @@ import (
 
 // ZabbixClient Zabbix 客户端（C-P7：走 httpx）。
 type ZabbixClient struct {
-	c       *httpx.Client
-	user    string
+	c        *httpx.Client
+	user     string
 	password string
 
 	mu   sync.Mutex
@@ -27,8 +27,8 @@ func NewZabbixClient(cfg *config.ZabbixConfig, m httpx.MetricsRecorder) *ZabbixC
 	hcfg := httpx.DefaultConfig(cfg.URL)
 	hcfg.Timeout = 30 * time.Second
 	return &ZabbixClient{
-		c:       httpx.New(hcfg, "zabbix", m),
-		user:    cfg.User,
+		c:        httpx.New(hcfg, "zabbix", m),
+		user:     cfg.User,
 		password: cfg.Password,
 	}
 }

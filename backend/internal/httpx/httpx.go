@@ -6,14 +6,16 @@
 //   - 集成层只关心业务 URL 与 body，retry/熔断/ctx 一律走这里
 //
 // 用法：
-//   c := httpx.New(cfg, "netbox", &metrics)
-//   body, err := c.Do(ctx, "GET", "/api/dcim/devices/", nil)
+//
+//	c := httpx.New(cfg, "netbox", &metrics)
+//	body, err := c.Do(ctx, "GET", "/api/dcim/devices/", nil)
 //
 // Circuit breaker 状态机：
-//   closed → open（连续 ≥ threshold 次失败）
-//   open → half-open（cooldown 后下次请求）
-//   half-open → closed（成功）
-//   half-open → open（失败 → 重置 cooldown）
+//
+//	closed → open（连续 ≥ threshold 次失败）
+//	open → half-open（cooldown 后下次请求）
+//	half-open → closed（成功）
+//	half-open → open（失败 → 重置 cooldown）
 package httpx
 
 import (
@@ -67,10 +69,10 @@ type Client struct {
 	metrics MetricsRecorder
 	system  string
 
-	mu          sync.Mutex
-	failStreak  int32
-	openUntil   time.Time // 熔断打开到此时（之后转 half-open）
-	openStreak  int32
+	mu               sync.Mutex
+	failStreak       int32
+	openUntil        time.Time // 熔断打开到此时（之后转 half-open）
+	openStreak       int32
 	halfOpenInflight int32
 }
 

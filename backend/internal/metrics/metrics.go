@@ -11,12 +11,13 @@
 //   - 保留：text format 兼容（0.0.4 标准足够 scrape）、label 基数控制、Go runtime/process metrics
 //
 // 用法：
-//   reg := metrics.New()
-//   reqCnt := reg.NewCounterVec("http_requests_total", "HTTP 请求计数", []string{"method", "path", "status"})
-//   reqDur := reg.NewHistogramVec("http_request_duration_seconds", "HTTP 请求耗时", []string{"method", "path"}, []float64{.005,.01,.05,.1,.5,1,5})
-//   httpSrv := &http.Server{Handler: middleware.Metrics(reqCnt, reqDur)(router)}
-//   httpSrv.ListenAndServe()
-//   // 暴露 /metrics：reg.Handler().ServeHTTP(...)
+//
+//	reg := metrics.New()
+//	reqCnt := reg.NewCounterVec("http_requests_total", "HTTP 请求计数", []string{"method", "path", "status"})
+//	reqDur := reg.NewHistogramVec("http_request_duration_seconds", "HTTP 请求耗时", []string{"method", "path"}, []float64{.005,.01,.05,.1,.5,1,5})
+//	httpSrv := &http.Server{Handler: middleware.Metrics(reqCnt, reqDur)(router)}
+//	httpSrv.ListenAndServe()
+//	// 暴露 /metrics：reg.Handler().ServeHTTP(...)
 package metrics
 
 import (

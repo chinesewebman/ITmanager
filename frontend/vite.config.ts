@@ -18,4 +18,11 @@ export default defineConfig({
       },
     },
   },
+  // vitest 集成：jsdom 环境跑 React 组件测试
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+  },
 })
