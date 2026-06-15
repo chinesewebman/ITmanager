@@ -13,6 +13,7 @@ import {
 } from '@ant-design/icons'
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import Assets from './pages/Assets'
 import Alerts from './pages/Alerts'
 import Racks from './pages/Racks'
@@ -137,12 +138,12 @@ function AppLayout() {
             }}
           >
             <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/assets" element={<Assets />} />
-              <Route path="/alerts" element={<Alerts />} />
-              <Route path="/racks" element={<Racks />} />
-              <Route path="/tickets" element={<Tickets />} />
-              <Route path="/settings" element={<Settings />} />
+              <Route path="/" element={<ErrorBoundary pageName="仪表盘"><Dashboard /></ErrorBoundary>} />
+              <Route path="/assets" element={<ErrorBoundary pageName="资产管理"><Assets /></ErrorBoundary>} />
+              <Route path="/alerts" element={<ErrorBoundary pageName="告警中心"><Alerts /></ErrorBoundary>} />
+              <Route path="/racks" element={<ErrorBoundary pageName="机房机柜"><Racks /></ErrorBoundary>} />
+              <Route path="/tickets" element={<ErrorBoundary pageName="工单管理"><Tickets /></ErrorBoundary>} />
+              <Route path="/settings" element={<ErrorBoundary pageName="系统设置"><Settings /></ErrorBoundary>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
