@@ -1,3 +1,4 @@
+// Package api 提供 HTTP 路由与全局 metrics 句柄。
 package api
 
 import (
@@ -9,12 +10,79 @@ import (
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/integration"
+	"network-monitor-platform/internal/metrics"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// platformMetrics C-P5: 全局 metrics registry。
+// 暴露在 /metrics 端点；HTTP 中间件自动记录请求级 metric。
+var platformMetrics *metrics.Registry
+
+// InitMetrics 初始化 metrics registry 与默认 metric。
+// 必须在 SetupRouter 之前调用（main.go 已调用）。
+func InitMetrics() *metrics.Registry {
+	if platformMetrics != nil {
+		return platformMetrics
+	}
+	platformMetrics = metrics.New()
+
+	// HTTP 请求级 metric（由 middleware.HTTPMetrics 写入）
+	platformMetrics.NewCounterVec(
+		"http_requests_total",
+		"HTTP 请求总数",
+		[]string{"method", "path", "status"},
+	)
+	platformMetrics.NewHistogramVec(
+		"http_request_duration_seconds",
+		"HTTP 请求耗时（秒）",
+		[]string{"method", "path"},
+		[]float64{.005, .01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	)
+	// DB pool gauge（由 /metrics 收集时实时拉取）
+	platformMetrics.NewGaugeVec(
+		"db_pool_open_connections",
+		"DB pool 打开连接数",
+		nil,
+	)
+	platformMetrics.NewGaugeVec(
+		"db_pool_in_use",
+		"DB pool in-use 连接数",
+		nil,
+	)
+	platformMetrics.NewGaugeVec(
+		"db_pool_idle",
+		"DB pool idle 连接数",
+		nil,
+	)
+	platformMetrics.NewGaugeVec(
+		"db_pool_wait_count",
+		"DB pool 等待连接总数（累计）",
+		nil,
+	)
+
+	return platformMetrics
+}
+
+// UpdateDBPoolMetrics 拉取 sql.DB 状态写入 gauge。
+// 在 /metrics 拉取前调用（与 Handler 集成）。
+func UpdateDBPoolMetrics(gormDB *gorm.DB) {
+	if platformMetrics == nil || gormDB == nil {
+		return
+	}
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		return
+	}
+	stats := sqlDB.Stats()
+	platformMetrics.SetGauge("db_pool_open_connections", float64(stats.OpenConnections))
+	platformMetrics.SetGauge("db_pool_in_use", float64(stats.InUse))
+	platformMetrics.SetGauge("db_pool_idle", float64(stats.Idle))
+	platformMetrics.SetGauge("db_pool_wait_count", float64(stats.WaitCount))
+}
 
 // SetupRouter 设置路由
 func SetupRouter(cfg *config.Config) *gin.Engine {
@@ -24,11 +92,26 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	r := gin.Default()
 	r.Use(middleware.CORS(cfg))
+	// C-P5: HTTP metrics 中间件（仅在 metrics 启用时挂载，避免无意义开销）
+	if platformMetrics != nil {
+		r.Use(middleware.HTTPMetrics(platformMetrics))
+	}
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 
-	// 构造 service / handler
+	// C-P1 + C-P5: 健康/就绪/metrics 探针（无需鉴权）
 	db := database.GetDB()
+	r.GET("/healthz", livenessHandler)
+	r.GET("/readyz", readinessHandler(db))
+	// C-P5: Prometheus metrics 端点
+	if cfg.Server.MetricsEnabled {
+		// 拉取时实时更新 DB pool gauge
+		r.GET("/metrics", func(c *gin.Context) {
+			UpdateDBPoolMetrics(database.GetDB())
+			platformMetrics.Handler().ServeHTTP(c.Writer, c.Request)
+		})
+	}
+
 	assetSvc := service.NewAssetService(db)
 	alertSvc := service.NewAlertService(db)
 	rackSvc := service.NewRackService(db)
@@ -49,6 +132,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	api := r.Group("/api")
 	{
+		// 兼容旧探针：/api/health 内部转发到 liveness（部分 manifest 仍引用旧路径）
+		api.GET("/health", func(c *gin.Context) { livenessHandler(c) })
+
 		auth := api.Group("/auth")
 		{
 			auth.POST("/login", handlers.Login)

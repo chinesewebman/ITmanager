@@ -1,7 +1,9 @@
 server:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8080
-  mode: "debug"  # debug / release
+  mode: debug
+  # C-P5: 是否暴露 /metrics 端点（生产环境建议开启供 Prometheus 抓取）
+  metrics_enabled: true
 
 database:
   host: "localhost"

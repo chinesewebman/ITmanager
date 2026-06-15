@@ -23,9 +23,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
-	Mode string `mapstructure:"mode"`
+	Host           string `mapstructure:"host"`
+	Port           int    `mapstructure:"port"`
+	Mode           string `mapstructure:"mode"`
+	MetricsEnabled bool   `mapstructure:"metrics_enabled"` // C-P5: 暴露 /metrics
 }
 
 type DatabaseConfig struct {
@@ -146,6 +147,7 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.port", 8080)
 	viper.SetDefault("server.mode", "debug")
+	viper.SetDefault("server.metrics_enabled", false) // C-P5: 默认关（外部暴露时再开）
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("auth.jwt.expire", 86400)
