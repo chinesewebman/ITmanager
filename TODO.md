@@ -3,6 +3,7 @@
 ## 当前状态 (2026-06-16)
 
 > 本次更新：补 2026-02-15 ~ 2026-06-16 期间实际完成的工作（21 bug 修复 + 116 new tests + Swagger UI 集成 + type-safe API client）。
+> 优化方向见 [docs/优化路线图.md](docs/优化路线图.md)。
 
 ### 已完成 (2026-06-16 更新增量)
 
@@ -73,6 +74,39 @@
 - [ ] HTTPS (Let's Encrypt)
 - [ ] 日志收集 (Filebeat)
 - [ ] 生产部署 + 冒烟测试
+
+## 6. 优化路线图（详见 [docs/优化路线图.md](docs/优化路线图.md)）
+
+### P0 - 立即做
+- [ ] **P0-1 诊断时间线** (2-3h) — `GET /api/v1/diagnostics/{asset_id}/timeline` + 前端 Timeline 页
+- [ ] **P0-2 抑制规则引擎** (4-6h) — 5min 同 host 合并 + 阈值匹配 + TTL 过期
+
+### P1 - 本月内
+- [ ] **P1-1 网络拓扑** (6-8h) — react-flow + `GET /api/v1/topology`
+- [ ] **P1-2 值班+升级** (8-10h) — oncall_schedules + escalation_policies
+
+### P2 - 下个月
+- [ ] **P2-1 故障 Runbook** (3-4h) — 资产关联 SOP
+- [ ] **P2-2 Zabbix 兜底** (4h) — metric_snapshots 落 TimescaleDB
+
+### 覆盖率目标 75%
+- [ ] `internal/database` 0% → 60%
+- [ ] `internal/middleware` 36.5% → 70%
+- [ ] `internal/integration` 39.5% → 60%
+
+### 用户/诊断小改进（穿插做）
+- [ ] 全局搜索 Cmd+K (3h)
+- [ ] 一键 ping/traceroute (2h)
+- [ ] 暗色模式 (0.5h)
+- [ ] 标记误报 → ML 训练集 (1h)
+- [ ] 统一 tags 中间表 (6h)
+- [ ] 移动端适配 (4h)
+- [ ] MIB 浏览器 (8h)
+- [ ] 历史快照对比 (6h)
+- [ ] 故障复盘 PDF (4h)
+- [ ] 工时统计 KPI (3h)
+
+每条任务完成后跑：编写代码 → 代码审查 → 单元测试 → pre-commit → commit。
 
 ## 启动命令
 
