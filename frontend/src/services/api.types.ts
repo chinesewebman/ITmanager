@@ -515,6 +515,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/topology": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 获取网络拓扑图
+         * @description 聚合 assets + asset_networks + alerts，自动布局 (环形) + 虚拟节点标记
+         */
+        get: operations["getTopology"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -596,6 +616,45 @@ export interface components {
             last_fired_at?: string;
             /** Format: date-time */
             window_expires_at?: string;
+        };
+        TopologyNode: {
+            /** Format: uuid */
+            id?: string;
+            name?: string;
+            asset_tag?: string;
+            asset_type?: string;
+            brand?: string;
+            status?: string;
+            open_alerts?: number;
+            is_virtual?: boolean;
+            connected_assets?: number;
+            position_x?: number;
+            position_y?: number;
+        };
+        TopologyEdge: {
+            /** Format: uuid */
+            id?: string;
+            source?: string;
+            target?: string;
+            interface_name?: string;
+            status?: string;
+            speed?: number;
+            purpose?: string;
+        };
+        TopologyStats: {
+            total_nodes?: number;
+            total_edges?: number;
+            nodes_with_alert?: number;
+            down_edges?: number;
+            virtual_nodes?: number;
+            window_days?: number;
+        };
+        TopologyGraph: {
+            nodes?: components["schemas"]["TopologyNode"][];
+            edges?: components["schemas"]["TopologyEdge"][];
+            stats?: components["schemas"]["TopologyStats"];
+            /** Format: date-time */
+            generated_at?: string;
         };
         Error: {
             code?: number;
@@ -1796,6 +1855,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuppressionMatchResult"];
+                };
+            };
+        };
+    };
+    getTopology: {
+        parameters: {
+            query?: {
+                days?: number;
+                only_with_alerts?: boolean;
+                /** @description 逗号分隔，如 "server,switch" */
+                asset_types?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopologyGraph"];
                 };
             };
         };

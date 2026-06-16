@@ -145,6 +145,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	channelSvc := service.NewChannelService(db)
 	diagnosticSvc := service.NewDiagnosticService(db)
 	suppressionSvc := service.NewAlertSuppressionService(db)
+	topologySvc := service.NewTopologyService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -156,6 +157,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	channelH := handlers.NewChannelHandler(channelSvc)
 	diagnosticH := handlers.NewDiagnosticHandler(diagnosticSvc)
 	suppressionH := handlers.NewAlertSuppressionHandler(suppressionSvc)
+	topologyH := handlers.NewTopologyHandler(topologySvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -271,6 +273,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				suppressions.GET("/:id", suppressionH.GetAlertSuppression)
 				suppressions.PUT("/:id", suppressionH.UpdateAlertSuppression)
 				suppressions.DELETE("/:id", suppressionH.DeleteAlertSuppression)
+			}
+
+			// 网络拓扑（P1-1）
+			topology := protected.Group("/topology")
+			{
+				topology.GET("", topologyH.GetTopology)
 			}
 		}
 	}

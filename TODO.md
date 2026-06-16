@@ -80,6 +80,7 @@
 ### P0 - 立即做
 - [x] **P0-1 诊断时间线** (2-3h) ✅ — `GET /api/v1/diagnostics/assets/:id/timeline` 聚合 alerts/tickets/asset_networks 4 张表 + MTTR 摘要 + 前端 Antd Timeline 渲染。Service 10 test + Handler 7 test + Routes 3 test + 前端 3 test = **23 new tests**。文档：`docs/优化路线图.md`。
 - [x] **P0-2 抑制规则引擎** (4-6h) ✅ — `alert_suppressions` 表 + CRUD API + /preview 模拟评估 + in-memory 窗口缓存（sync.RWMutex）。Service 24 test + Handler 15 test = **39 new tests**。前端 `/alert-suppressions` 管理页 + menu。
+- [x] **P1-1 网络拓扑** (6-8h) ✅ — `GET /api/v1/topology` 聚合 assets + asset_networks + alerts + 环形自动布局 + 虚拟节点 (connected_to 找不到时)。Service 11 test + Handler 6 test + 前端 5 test = **22 new tests**。前端 `/topology` SVG 渲染（0 依赖）+ 告警 badge + down 边高亮。
 
 ### P1 - 本月内
 - [ ] **P1-1 网络拓扑** (6-8h) — react-flow + `GET /api/v1/topology`

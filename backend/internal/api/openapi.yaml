@@ -868,6 +868,41 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuppressionMatchResult'
 
+  /topology:
+    get:
+      tags:
+        - 网络拓扑
+      summary: 获取网络拓扑图
+      description: 聚合 assets + asset_networks + alerts，自动布局 (环形) + 虚拟节点标记
+      operationId: getTopology
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            maximum: 365
+        - name: only_with_alerts
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: asset_types
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔，如 "server,switch"
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyGraph'
+
 components:
   securitySchemes:
     BearerAuth:
@@ -1013,6 +1048,83 @@ components:
           type: string
           format: date-time
         window_expires_at:
+          type: string
+          format: date-time
+
+    # ==================== 网络拓扑 ====================
+    TopologyNode:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        asset_tag:
+          type: string
+        asset_type:
+          type: string
+        brand:
+          type: string
+        status:
+          type: string
+        open_alerts:
+          type: integer
+        is_virtual:
+          type: boolean
+        connected_assets:
+          type: integer
+        position_x:
+          type: number
+        position_y:
+          type: number
+    TopologyEdge:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        source:
+          type: string
+        target:
+          type: string
+        interface_name:
+          type: string
+        status:
+          type: string
+        speed:
+          type: integer
+        purpose:
+          type: string
+    TopologyStats:
+      type: object
+      properties:
+        total_nodes:
+          type: integer
+        total_edges:
+          type: integer
+        nodes_with_alert:
+          type: integer
+        down_edges:
+          type: integer
+        virtual_nodes:
+          type: integer
+        window_days:
+          type: integer
+    TopologyGraph:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyEdge'
+        stats:
+          $ref: '#/components/schemas/TopologyStats'
+        generated_at:
           type: string
           format: date-time
 
