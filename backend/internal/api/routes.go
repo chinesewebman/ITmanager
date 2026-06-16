@@ -146,6 +146,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	diagnosticSvc := service.NewDiagnosticService(db)
 	suppressionSvc := service.NewAlertSuppressionService(db)
 	topologySvc := service.NewTopologyService(db)
+	oncallSvc := service.NewOncallService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -158,6 +159,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	diagnosticH := handlers.NewDiagnosticHandler(diagnosticSvc)
 	suppressionH := handlers.NewAlertSuppressionHandler(suppressionSvc)
 	topologyH := handlers.NewTopologyHandler(topologySvc)
+	oncallH := handlers.NewOncallHandler(oncallSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -279,6 +281,22 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			topology := protected.Group("/topology")
 			{
 				topology.GET("", topologyH.GetTopology)
+			}
+
+			// 值班 + 升级（P1-2）
+			oncall := protected.Group("/oncall")
+			{
+				oncall.GET("/current", oncallH.GetCurrentOncall)
+				oncall.GET("/schedules", oncallH.ListSchedules)
+				oncall.POST("/schedules", oncallH.CreateSchedule)
+				oncall.DELETE("/schedules/:id", oncallH.DeleteSchedule)
+				oncall.GET("/schedules/:id/shifts", oncallH.ListShifts)
+				oncall.POST("/schedules/:id/shifts", oncallH.CreateShift)
+				oncall.DELETE("/shifts/:shift_id", oncallH.DeleteShift)
+				oncall.GET("/policies", oncallH.ListPolicies)
+				oncall.POST("/policies", oncallH.CreatePolicy)
+				oncall.GET("/policies/:id", oncallH.GetPolicy)
+				oncall.DELETE("/policies/:id", oncallH.DeletePolicy)
 			}
 		}
 	}

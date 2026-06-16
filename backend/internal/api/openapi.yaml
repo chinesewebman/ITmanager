@@ -903,6 +903,170 @@ paths:
               schema:
                 $ref: '#/components/schemas/TopologyGraph'
 
+  /oncall/current:
+    get:
+      tags:
+        - 值班
+      summary: 获取当前在班的 user
+      operationId: getCurrentOncall
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OncallCurrent'
+
+  /oncall/schedules:
+    get:
+      tags:
+        - 值班
+      summary: 列出值班组
+      operationId: listOncallSchedules
+      responses:
+        '200':
+          description: 成功
+    post:
+      tags:
+        - 值班
+      summary: 创建值班组
+      operationId: createOncallSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OncallSchedule'
+      responses:
+        '201':
+          description: 创建成功
+
+  /oncall/schedules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags:
+        - 值班
+      summary: 删除值班组（级联删 shifts）
+      operationId: deleteOncallSchedule
+      responses:
+        '204':
+          description: 成功
+
+  /oncall/schedules/{id}/shifts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags:
+        - 值班
+      summary: 列出 schedule 下所有班次
+      operationId: listOncallShifts
+      responses:
+        '200':
+          description: 成功
+    post:
+      tags:
+        - 值班
+      summary: 创建班次
+      operationId: createOncallShift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OncallShift'
+      responses:
+        '201':
+          description: 创建成功
+
+  /oncall/shifts/{shift_id}:
+    parameters:
+      - name: shift_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags:
+        - 值班
+      summary: 删除班次
+      operationId: deleteOncallShift
+      responses:
+        '204':
+          description: 成功
+
+  /oncall/policies:
+    get:
+      tags:
+        - 升级策略
+      summary: 列出升级策略
+      operationId: listEscalationPolicies
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EscalationPolicy'
+    post:
+      tags:
+        - 升级策略
+      summary: 创建升级策略（含 levels）
+      operationId: createEscalationPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscalationPolicy'
+      responses:
+        '201':
+          description: 创建成功
+
+  /oncall/policies/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags:
+        - 升级策略
+      summary: 获取单条升级策略
+      operationId: getEscalationPolicy
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EscalationPolicy'
+    delete:
+      tags:
+        - 升级策略
+      summary: 删除升级策略
+      operationId: deleteEscalationPolicy
+      responses:
+        '204':
+          description: 成功
+
 components:
   securitySchemes:
     BearerAuth:
@@ -1127,6 +1291,112 @@ components:
         generated_at:
           type: string
           format: date-time
+
+    # ==================== 值班 + 升级 ====================
+    OncallSchedule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        timezone:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    OncallShift:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        schedule_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        user_name:
+          type: string
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    OncallCurrent:
+      type: object
+      properties:
+        schedule_id:
+          type: string
+          format: uuid
+        schedule_name:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        user_name:
+          type: string
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        shift_id:
+          type: string
+          format: uuid
+    EscalationLevel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        policy_id:
+          type: string
+          format: uuid
+        level:
+          type: integer
+        target_type:
+          type: string
+        target_id:
+          type: string
+        wait_minutes:
+          type: integer
+        notify_methods:
+          type: string
+    EscalationPolicy:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        levels:
+          type: array
+          items:
+            $ref: '#/components/schemas/EscalationLevel'
 
     # ==================== 通用 ====================
     Error:

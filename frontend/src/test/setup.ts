@@ -1,9 +1,10 @@
 // vitest 全局 setup：注册 jest-dom matchers + 抑制 antd message.error 等副作用
-console.log('[setup] loading...')
-import '@testing-library/jest-dom/vitest'
-import { afterEach, vi } from 'vitest'
+import { expect, afterEach, vi } from 'vitest'
+import * as matchers from '@testing-library/jest-dom/matchers'
 import { cleanup } from '@testing-library/react'
-console.log('[setup] jest-dom matchers extended')
+
+// 注册 @testing-library/jest-dom matchers（toBeInTheDocument 等）
+expect.extend(matchers)
 
 // 每次测试后 unmount 组件（避免 React 状态泄漏）
 afterEach(() => {
