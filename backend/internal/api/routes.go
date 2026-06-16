@@ -144,6 +144,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	dashboardSvc := service.NewDashboardService(db)
 	channelSvc := service.NewChannelService(db)
 	diagnosticSvc := service.NewDiagnosticService(db)
+	suppressionSvc := service.NewAlertSuppressionService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -154,6 +155,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	dashboardH := handlers.NewDashboardHandler(dashboardSvc)
 	channelH := handlers.NewChannelHandler(channelSvc)
 	diagnosticH := handlers.NewDiagnosticHandler(diagnosticSvc)
+	suppressionH := handlers.NewAlertSuppressionHandler(suppressionSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -257,6 +259,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			diagnostics := protected.Group("/diagnostics")
 			{
 				diagnostics.GET("/assets/:id/timeline", diagnosticH.GetAssetTimeline)
+			}
+
+			// 告警抑制规则（P0-2）
+			// /preview 静态段必须在 /:id 之前
+			suppressions := protected.Group("/alert-suppressions")
+			{
+				suppressions.GET("", suppressionH.ListAlertSuppressions)
+				suppressions.POST("/preview", suppressionH.PreviewSuppression)
+				suppressions.POST("", suppressionH.CreateAlertSuppression)
+				suppressions.GET("/:id", suppressionH.GetAlertSuppression)
+				suppressions.PUT("/:id", suppressionH.UpdateAlertSuppression)
+				suppressions.DELETE("/:id", suppressionH.DeleteAlertSuppression)
 			}
 		}
 	}

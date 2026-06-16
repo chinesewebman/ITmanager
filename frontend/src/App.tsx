@@ -21,6 +21,7 @@ const Racks = lazy(() => import('./pages/Racks'))
 const Tickets = lazy(() => import('./pages/Tickets'))
 const Settings = lazy(() => import('./pages/Settings'))
 const AssetTimeline = lazy(() => import('./pages/AssetTimeline'))
+const AlertSuppressions = lazy(() => import('./pages/AlertSuppressions'))
 import Login from './pages/Login' // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { authApi } from './services/api'
@@ -56,6 +57,7 @@ function AppLayout() {
     { key: '/', icon: <DashboardOutlined />, label: '仪表盘' },
     { key: '/assets', icon: <DesktopOutlined />, label: '资产管理' },
     { key: '/alerts', icon: <AlertOutlined />, label: '告警中心' },
+    { key: '/alert-suppressions', icon: <AlertOutlined />, label: '告警抑制' },
     { key: '/racks', icon: <FolderOutlined />, label: '机房机柜' },
     { key: '/tickets', icon: <BuildOutlined />, label: '工单管理' },
     { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
@@ -146,6 +148,7 @@ function AppLayout() {
                 <Route path="/assets" element={<ErrorBoundary pageName="资产管理"><Assets /></ErrorBoundary>} />
                 <Route path="/assets/:id/diagnostics" element={<ErrorBoundary pageName="资产诊断"><AssetTimeline /></ErrorBoundary>} />
                 <Route path="/alerts" element={<ErrorBoundary pageName="告警中心"><Alerts /></ErrorBoundary>} />
+                <Route path="/alert-suppressions" element={<ErrorBoundary pageName="告警抑制"><AlertSuppressions /></ErrorBoundary>} />
                 <Route path="/racks" element={<ErrorBoundary pageName="机房机柜"><Racks /></ErrorBoundary>} />
                 <Route path="/tickets" element={<ErrorBoundary pageName="工单管理"><Tickets /></ErrorBoundary>} />
                 <Route path="/settings" element={<ErrorBoundary pageName="系统设置"><Settings /></ErrorBoundary>} />

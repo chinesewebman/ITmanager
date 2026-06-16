@@ -749,6 +749,125 @@ paths:
         '404':
           description: 资产不存在
 
+  /alert-suppressions:
+    get:
+      tags:
+        - 告警抑制
+      summary: 列出告警抑制规则
+      operationId: listAlertSuppressions
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlertSuppression'
+    post:
+      tags:
+        - 告警抑制
+      summary: 创建告警抑制规则
+      operationId: createAlertSuppression
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertSuppression'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSuppression'
+        '400':
+          description: 参数错误
+
+  /alert-suppressions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags:
+        - 告警抑制
+      summary: 获取单条告警抑制规则
+      operationId: getAlertSuppression
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSuppression'
+        '404':
+          description: 不存在
+    put:
+      tags:
+        - 告警抑制
+      summary: 更新告警抑制规则
+      operationId: updateAlertSuppression
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSuppression'
+        '400':
+          description: 参数错误
+    delete:
+      tags:
+        - 告警抑制
+      summary: 删除告警抑制规则
+      operationId: deleteAlertSuppression
+      responses:
+        '204':
+          description: 删除成功
+
+  /alert-suppressions/preview:
+    post:
+      tags:
+        - 告警抑制
+      summary: 模拟评估一条告警是否被抑制
+      operationId: previewSuppression
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [severity, host_id, host_name]
+              properties:
+                severity:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                host_id:
+                  type: string
+                  format: uuid
+                host_name:
+                  type: string
+      responses:
+        '200':
+          description: 评估结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuppressionMatchResult'
+
 components:
   securitySchemes:
     BearerAuth:
@@ -852,6 +971,50 @@ components:
             $ref: '#/components/schemas/TimelineEvent'
         summary:
           $ref: '#/components/schemas/DiagnosticSummary'
+
+    # ==================== 告警抑制 ====================
+    AlertSuppression:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        severity_max:
+          type: integer
+        host_pattern:
+          type: string
+        time_window_seconds:
+          type: integer
+        ttl_seconds:
+          type: integer
+        enabled:
+          type: boolean
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SuppressionMatchResult:
+      type: object
+      properties:
+        suppressed:
+          type: boolean
+        matched_rule:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        last_fired_at:
+          type: string
+          format: date-time
+        window_expires_at:
+          type: string
+          format: date-time
 
     # ==================== 通用 ====================
     Error:
