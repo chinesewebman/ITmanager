@@ -1,18 +1,24 @@
 # 网络运维监控平台 - 开发待办
 
-## 当前状态 (2026-02-15)
+## 当前状态 (2026-06-16)
 
-### 已完成
-- [x] 后端项目初始化 (Go + Gin)
-- [x] 前端项目初始化 (React + Ant Design)
-- [x] 配置文件结构
-- [x] 数据库模型定义
-- [x] API 路由和基础 handler
-- [x] 前端页面组件 (Dashboard, Assets, Alerts, Racks, Tickets, Settings)
-- [x] Docker 配置
-- [x] 前端开发服务器运行 (localhost:5173)
+> 本次更新：补 2026-02-15 ~ 2026-06-16 期间实际完成的工作（21 bug 修复 + 116 new tests + Swagger UI 集成 + type-safe API client）。
 
-### 待完成
+### 已完成 (2026-06-16 更新增量)
+
+- [x] **测试覆盖**：backend 230 → 401 passed (20 packages)，frontend 14 → 53 passed (8 files)，总测试 338 → 454
+- [x] **覆盖率**：61.2% (api 85.5% / apierr 88.5% / apikey 100% / config 94.3% / httpx 87.8%)
+- [x] **代码审查 Bug 修复 (17)**：
+  - handlers 8 bug：FailedLogin race / 弱密码 / 改回旧密码 / rate_limit 越界 / IP 越界 / uuid 静默 / type=garbage / Name UNIQUE
+  - httpx 2 bug：half-open race / ctx 取消误触熔断
+  - service 17 bug：Severity int / Limit=0 / 重复 First / Bulk 1000 上限 / 死代码 / usedMap 错 / User 分页 / Dashboard 单条 SQL / 假数据
+  - cmd + 前端 + 中间件 4 bug：admin role 检测 / testdata schema 漂移 / asset_networks ipv6_address / localStorage 缺失
+- [x] **Swagger UI 集成**：`/swagger/index.html` + `swagger-cli validate` CI
+- [x] **type-safe API client**：3/13 服务方法已 typed，`npm run gen:api` 自动生成
+- [x] **pre-commit hook**：gofmt + swagger-cli validate + .bak 拦截
+- [x] **TESTING.md**：4.7K 测试现状报告
+
+### 待完成 (2026-06-16 之后)
 
 ## 1. 数据库初始化 (优先级: 高)
 - [x] 运行 `go run ./cmd/seed/main.go` 创建初始数据
@@ -23,11 +29,18 @@
 - [x] 完善 Login/Logout 接口
 - [x] 添加默认管理员用户 (admin/admin123)
 - [x] 添加 API Key 认证支持
+- [x] **登录失败锁定** (FailedLogin atomic CAS 修复 race)
+- [x] **密码强度校验** (handler 拒绝弱密码)
 
 ## 3. 完善后端 API (优先级: 高)
 - [x] 资产 CRUD - 完整实现
 - [x] 告警确认/解决 - 完善逻辑
+  - [x] **Bulk 操作 1000 上限** (ErrTooManyItems)
+  - [x] **Severity 数值比较** (string → int)
 - [x] 工单管理 - 本地 CRUD 完成 (GLPI 集成待完成)
+- [x] **熔断器** (httpx: half-open race + ctx 取消修复)
+- [x] **User List 分页** (避免全表扫描)
+- [x] **Dashboard 单条 SQL 聚合** (5 次 count → 1 条)
 
 ## 4. 第三方集成 (优先级: 中)
 - [x] NetBox 集成 - 资产同步
@@ -38,7 +51,28 @@
 ## 5. 前端完善 (优先级: 中)
 - [x] 登录页面
 - [x] 实时数据对接
+- [x] **vitest 测试** (5 page + 8 hook + 31 store = 53 tests)
+- [x] **queryKeys factory** (`useApiQuery.test.ts`)
+- [x] **zustand store 单元测试** (`stores/index.test.ts`)
+- [x] **type-safe API client** (3/13 服务方法)
 - [ ] 机柜可视化增强
+- [ ] 前端 coverage 工具 (无 `--coverage` 配置)
+
+## 6. 文档与 CI (优先级: 中) — 2026-06-16 新增
+- [x] **TESTING.md** (4.7K)：测试现状 + 21 bug 清单 + 覆盖率表
+- [x] **Swagger UI** + CI validate
+- [x] **TODO.md / tasks.md / 12-优化建议.md / 开发计划.md** 状态同步 (2026-06-16)
+- [ ] **CI 升级**：加 `go test -race` + frontend vitest 步骤
+- [ ] **CI 升级**：加 coverage 阈值门禁 (目前仅 generate)
+- [ ] **覆盖盲区**：`internal/database` 0% (依赖 PG) / `internal/middleware` 36.5% (跟 api 共享) / `internal/integration` 39.5%
+- [ ] **type-safe 推进**：10/13 服务方法仍 `data: any`
+
+## 7. 部署与运维 (优先级: 低)
+- [ ] 生产环境 docker-compose
+- [ ] Nginx 反向代理
+- [ ] HTTPS (Let's Encrypt)
+- [ ] 日志收集 (Filebeat)
+- [ ] 生产部署 + 冒烟测试
 
 ## 启动命令
 
@@ -46,7 +80,7 @@
 # 1. 启动 PostgreSQL (如果未运行)
 docker run -d --name nmp-postgres \
   -e POSTGRES_USER=nmp \
-  -e POSTGRES_PASSWORD=nmp123 \
+  -e POSTGRES_PASSWORD=*** \
   -e POSTGRES_DB=network_monitor \
   -p 5432:5432 timescale/timescaledb:latest-pg16
 
@@ -63,4 +97,5 @@ cd frontend && npm run dev
 ## 访问地址
 - 前端: http://localhost:5173
 - 后端 API: http://localhost:8080
-- API 文档: http://localhost:8080/swagger/index.html (需要安装 swagger)
+- API 文档: http://localhost:8080/swagger/index.html
+- 测试报告: [TESTING.md](TESTING.md)
