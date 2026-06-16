@@ -3,6 +3,9 @@ package handlers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"network-monitor-platform/internal/apierr"
@@ -19,6 +22,8 @@ import (
 const (
 	defaultAPIKeyRateLimit = 1000
 	defaultAPIPermission   = "read"
+	// 🐛 BUG#4: rate_limit 合法范围 [1, 100000]
+	maxAPIKeyRateLimit = 100000
 )
 
 // generateAPIKeyPrefix 生成 8 字符前缀（用于 UI 列表展示）
@@ -65,6 +70,29 @@ func GenerateAPIKeyForTest() (string, string) {
 	return generateAPIKey()
 }
 
+// 🐛 BUG#4: rate_limit 范围校验 [1, 100000]
+func validateRateLimit(rl int) error {
+	if rl < 1 || rl > maxAPIKeyRateLimit {
+		return fmt.Errorf("rate_limit 必须在 1 到 %d 之间", maxAPIKeyRateLimit)
+	}
+	return nil
+}
+
+// 🐛 BUG#5: IP/CIDR 严格校验
+func validateIPWhitelist(list []string) error {
+	if len(list) == 0 {
+		return nil
+	}
+	for _, entry := range list {
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return fmt.Errorf("ip_whitelist 含非法条目: %q（必须是合法 IP 或 CIDR）", entry)
+			}
+		}
+	}
+	return nil
+}
+
 // CreateAPIKey 创建 API Key
 func CreateAPIKey(c *gin.Context) {
 	var req struct {
@@ -85,6 +113,20 @@ func CreateAPIKey(c *gin.Context) {
 	if err != nil {
 		apierr.BadRequest(c, "无效的用户ID")
 		return
+	}
+
+	// 🐛 BUG#5: IP 白名单严格校验
+	if err := validateIPWhitelist(req.IPWhitelist); err != nil {
+		apierr.BadRequest(c, err.Error())
+		return
+	}
+
+	// 🐛 BUG#4: rate_limit 范围校验（仅当显式提供时，0 = 用默认）
+	if req.RateLimit != 0 {
+		if err := validateRateLimit(req.RateLimit); err != nil {
+			apierr.BadRequest(c, err.Error())
+			return
+		}
 	}
 
 	// 解析过期时间
@@ -127,6 +169,11 @@ func CreateAPIKey(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&apiKey).Error; err != nil {
+		// 🐛 BUG#8: 检测同 user 重名，返 409 而非 500
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique") {
+			apierr.Conflict(c, "同 user 下已存在同名 API Key")
+			return
+		}
 		apierr.Internal(c, "创建 API Key 失败", err)
 		return
 	}
@@ -151,7 +198,12 @@ func CreateAPIKey(c *gin.Context) {
 // ListAPIKeys 获取当前用户的 API Key 列表（隐藏哈希）
 func ListAPIKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
-	uid, _ := uuid.Parse(userID)
+	uid, err := uuid.Parse(userID)
+	// 🐛 BUG#6: 之前吞掉 uuid.Parse 错误，无 user_id 也返全表
+	if err != nil {
+		apierr.Unauthorized(c, "无效的用户凭证")
+		return
+	}
 
 	var keys []models.APIKey
 	if err := database.DB.Where("user_id = ?", uid).Order("created_at DESC").Find(&keys).Error; err != nil {

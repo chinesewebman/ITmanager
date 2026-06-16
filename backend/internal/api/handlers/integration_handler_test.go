@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -122,15 +123,52 @@ func TestIntegrationStatus_不泄露Secret字段(t *testing.T) {
 	assert.NotContains(t, body, `"password"`)
 }
 
-// ==================== 已知 Issue 文档化 ====================
+// ==================== BUG FIX 回归测试 ====================
+
+// TestSync_非法Type_返400 — BUG#7
 //
-// 审查发现 issue #7：handler.Sync 在 type 不识别时静默 fallback 到 "all"
-// 修复建议：
-//   default: apierr.BadRequest(c, "不支持的 type: "+req.Type)
+//	之前 type="garbage" 静默走 default 分支（=SyncAll），用户不知道输错了
+//	修复：严格 switch，非法 type 直接 400
+func TestSync_非法Type_返400(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+
+	tests := []string{"garbage", "Netbox", "NETBOX", "unknown", "syncc"}
+	for _, ty := range tests {
+		t.Run("type="+ty, func(t *testing.T) {
+			body := []byte(`{"type":"` + ty + `"}`)
+			req := httptest.NewRequest("POST", "/integrations/sync", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code, "非法 type=%q 必须 400", ty)
+		})
+	}
+}
+
+// TestSync_合法Type_通过校验 — BUG#7 正向
 //
-// 当前生产代码（integration_handler.go:36-39）行为：
-//   if err := c.ShouldBindJSON(&req); err != nil {
-//       req.Type = "all" // 这里！如果 JSON parse 失败也走 all
-//   }
-// 应区分：JSON parse fail → 400, type unrecognize → 400
-// 留作后续修复，TODO 跟踪。
+//	合法值 netbox/zabbix/glpi/all/"" 必须过校验（虽然 svc=nil 会 panic，
+//	但 400 校验在 panic 前发生，所以应该看到 panic 而非 400）
+func TestSync_合法Type_通过校验(t *testing.T) {
+	// 这个 test 只验证 type 校验通过；svc=nil 会 panic
+	// 用 defer recover 抓 panic 来确认"过校验 + 走 svc 调用"
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+
+	for _, ty := range []string{"netbox", "zabbix", "glpi", "all", ""} {
+		t.Run("type="+ty, func(t *testing.T) {
+			defer func() {
+				_ = recover() // svc=nil 必然 panic，过校验即可
+			}()
+			body := []byte(`{"type":"` + ty + `"}`)
+			req := httptest.NewRequest("POST", "/integrations/sync", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			// 不应返 400
+			assert.NotEqual(t, http.StatusBadRequest, w.Code, "合法 type=%q 不该 400", ty)
+		})
+	}
+}

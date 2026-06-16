@@ -50,6 +50,8 @@ CREATE TABLE api_keys (
     created_at      DATETIME,
     updated_at      DATETIME
 );
+-- 🐛 BUG#8: api_key 同 user 不允许重名
+CREATE UNIQUE INDEX idx_api_keys_user_name ON api_keys(user_id, name);
 
 -- audit_logs
 CREATE TABLE audit_logs (

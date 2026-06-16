@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -47,6 +48,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at DATETIME,
     updated_at DATETIME
 );
+-- 🐛 BUG#8: 同 user 不允许重名
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_name ON api_keys(user_id, name);
 `
 
 func setupAPIKeyTestDB(t *testing.T) *gorm.DB {
@@ -378,7 +381,7 @@ func TestHashAPIKey_确定性且不同key产生不同hash(t *testing.T) {
 	assert.NotEqual(t, h1, h3)
 }
 
-// TestAPIPackage_与apikey包一致性 验证 handler 用的 hash 跟 apikey 包一致
+// TestHashAPIKey_与apikey包一致 验证 handler 用的 hash 跟 apikey 包一致
 // （防止 handler 误用旧 SHA-256 算法）
 func TestHashAPIKey_与apikey包一致(t *testing.T) {
 	pepper := "consistency-test-pepper-32-bytes-aaaa"
@@ -386,4 +389,106 @@ func TestHashAPIKey_与apikey包一致(t *testing.T) {
 	handlerHash := handlers.HashAPIKeyForTest(plaintext, pepper)
 	apikeyHash := apikey.Hash(plaintext, pepper)
 	assert.Equal(t, handlerHash, apikeyHash, "handler 必须用 apikey 包（同 HMAC-SHA256 算法）")
+}
+
+// ==================== BUG FIX 回归测试 ====================
+
+// TestCreateAPIKey_RateLimit负数_返400 — BUG#4
+func TestCreateAPIKey_RateLimit负数_返400(t *testing.T) {
+	setupAPIKeyTestDB(t)
+	setupAPIKeyTestPepper(t)
+	uid := createTestUser(t, setupAPIKeyTestDB(t))
+	r := newAPIKeyTestRouterAsUser(uid.String())
+
+	tests := []int{0, -1, -99999, 100001, 999999}
+	for _, rl := range tests {
+		if rl == 0 {
+			continue // 0 = 用默认，不该报错
+		}
+		t.Run(fmt.Sprintf("rate=%d", rl), func(t *testing.T) {
+			w := doRequest(t, r, "POST", "/api-keys", map[string]any{
+				"name":       fmt.Sprintf("rl-%d", rl),
+				"rate_limit": rl,
+			})
+			assert.Equal(t, http.StatusBadRequest, w.Code, "rate_limit=%d 必须拒绝", rl)
+		})
+	}
+}
+
+// TestCreateAPIKey_IP白名单非法_返400 — BUG#5
+func TestCreateAPIKey_IP白名单非法_返400(t *testing.T) {
+	setupAPIKeyTestDB(t)
+	setupAPIKeyTestPepper(t)
+	uid := createTestUser(t, setupAPIKeyTestDB(t))
+	r := newAPIKeyTestRouterAsUser(uid.String())
+
+	tests := [][]string{
+		{"not-an-ip"},
+		{"999.999.999.999"},
+		{"10.0.0.1", "garbage"},
+		{""},
+	}
+	for i, wl := range tests {
+		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
+			w := doRequest(t, r, "POST", "/api-keys", map[string]any{
+				"name":         fmt.Sprintf("ip-test-%d", i),
+				"ip_whitelist": wl,
+			})
+			assert.Equal(t, http.StatusBadRequest, w.Code, "ip_whitelist=%v 必须拒绝", wl)
+		})
+	}
+}
+
+// TestCreateAPIKey_IP白名单合法_通过 — BUG#5 正向
+func TestCreateAPIKey_IP白名单合法_通过(t *testing.T) {
+	setupAPIKeyTestDB(t)
+	setupAPIKeyTestPepper(t)
+	uid := createTestUser(t, setupAPIKeyTestDB(t))
+	r := newAPIKeyTestRouterAsUser(uid.String())
+
+	tests := [][]string{
+		{"192.168.1.1"},
+		{"10.0.0.0/24"},
+		{"::1"},
+		{"2001:db8::/32"},
+		{}, // 空白名单合法
+	}
+	for i, wl := range tests {
+		t.Run(fmt.Sprintf("valid-%d", i), func(t *testing.T) {
+			w := doRequest(t, r, "POST", "/api-keys", map[string]any{
+				"name":         fmt.Sprintf("ip-valid-%d", i),
+				"ip_whitelist": wl,
+			})
+			assert.Equal(t, http.StatusCreated, w.Code, "合法 ip_whitelist=%v 应通过", wl)
+		})
+	}
+}
+
+// TestListAPIKeys_无效UserID_返401 — BUG#6
+//
+//	之前 ListAPIKeys 吞掉 uuid.Parse 错误，会返全表所有用户的 key
+//	修复后：无效 UUID 返 401
+func TestListAPIKeys_无效UserID_返401(t *testing.T) {
+	setupAPIKeyTestDB(t)
+	r := newAPIKeyTestRouterAsUser("not-a-uuid")
+
+	w := doRequest(t, r, "GET", "/api-keys", nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "无效 user_id 必须 401，不能返全表")
+}
+
+// TestCreateAPIKey_重名_返409 — BUG#8
+func TestCreateAPIKey_重名_返409(t *testing.T) {
+	setupAPIKeyTestDB(t)
+	setupAPIKeyTestPepper(t)
+	uid := createTestUser(t, setupAPIKeyTestDB(t))
+	r := newAPIKeyTestRouterAsUser(uid.String())
+
+	// 第一次：成功
+	w1 := doRequest(t, r, "POST", "/api-keys", map[string]string{"name": "dup-name"})
+	require.Equal(t, http.StatusCreated, w1.Code)
+
+	// 第二次：重名必须 409
+	w2 := doRequest(t, r, "POST", "/api-keys", map[string]string{"name": "dup-name"})
+	assert.Equal(t, http.StatusConflict, w2.Code, "同 user 重名必须 409")
+	assert.Contains(t, w2.Body.String(), "同名")
 }

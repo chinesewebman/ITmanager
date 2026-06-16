@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // LoginRequest 登录请求
@@ -59,24 +61,35 @@ func Login(c *gin.Context) {
 
 	// 验证密码
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		// 记录失败次数 + 自动锁定
-		user.FailedLogin++
-		if user.FailedLogin >= maxFailedLoginAttempts {
-			lockedUntil := time.Now().Add(30 * time.Minute)
-			user.LockedUntil = &lockedUntil
+		// 🐛 BUG#1: 用 gorm.Expr 原子自增，避免并发 race
+		// 5 并发都读到 user.FailedLogin=0，仅靠内存判断会漏 lock。
+		// 解决：先原子 +1，再 re-fetch 看实际值再决定是否 lock
+		_ = database.DB.Model(&models.User{}).
+			Where("id = ?", user.ID).
+			UpdateColumn("failed_login", gorm.Expr("failed_login + 1")).Error
+
+		// 重新读最新状态
+		var fresh models.User
+		if dbErr := database.DB.First(&fresh, "id = ?", user.ID).Error; dbErr == nil {
+			if fresh.FailedLogin >= maxFailedLoginAttempts && fresh.LockedUntil == nil {
+				lockedUntil := time.Now().Add(30 * time.Minute)
+				_ = database.DB.Model(&models.User{}).
+					Where("id = ?", user.ID).
+					UpdateColumn("locked_until", lockedUntil).Error
+			}
 		}
-		_ = database.DB.Save(&user).Error
 		apierr.Unauthorized(c, "用户名或密码错误")
 		return
 	}
 
 	// 登录成功：重置失败次数 + 记录登录信息
-	user.FailedLogin = 0
-	user.LockedUntil = nil
 	now := time.Now()
-	user.LastLogin = &now
-	user.LastLoginIP = c.ClientIP()
-	_ = database.DB.Save(&user).Error
+	_ = database.DB.Model(&user).Updates(map[string]interface{}{
+		"failed_login":  0,
+		"locked_until":  nil,
+		"last_login":    &now,
+		"last_login_ip": c.ClientIP(),
+	}).Error
 
 	// 生成 Token
 	token, err := middleware.GenerateToken(user.ID.String(), user.Username, user.Role)
@@ -158,6 +171,26 @@ func GetCurrentUser(c *gin.Context) {
 	})
 }
 
+// 密码强度校验：最少 8 字符，必须同时包含字母和数字
+func validatePasswordStrength(pw string) error {
+	if len(pw) < 8 {
+		return errors.New("密码至少 8 个字符")
+	}
+	hasLetter, hasDigit := false, false
+	for _, r := range pw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return errors.New("密码必须同时包含字母和数字")
+	}
+	return nil
+}
+
 // ChangePassword 修改当前用户密码
 func ChangePassword(c *gin.Context) {
 	var req ChangePasswordRequest
@@ -176,6 +209,18 @@ func ChangePassword(c *gin.Context) {
 	// 验证旧密码
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)); err != nil {
 		apierr.BadRequest(c, "旧密码错误")
+		return
+	}
+
+	// 🐛 BUG#2: 新密码强度校验（最少 8 字符 + 字母 + 数字）
+	if err := validatePasswordStrength(req.NewPassword); err != nil {
+		apierr.BadRequest(c, err.Error())
+		return
+	}
+
+	// 🐛 BUG#3: 禁止设回旧密码（用户常踩坑）
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.NewPassword)) == nil {
+		apierr.BadRequest(c, "新密码不能与旧密码相同")
 		return
 	}
 

@@ -38,6 +38,15 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 		req.Type = "all" // 默认同步所有
 	}
 
+	// 🐛 BUG#7: 之前 type=garbage 静默走 default("all")，现在严格校验
+	switch req.Type {
+	case "netbox", "zabbix", "glpi", "all", "":
+		// 合法
+	default:
+		apierr.BadRequest(c, "type 必须是 netbox/zabbix/glpi/all 之一")
+		return
+	}
+
 	// C-P7: ctx 透传到下游 httpx 与 gorm
 	ctx, cancel := context.WithTimeout(c.Request.Context(), syncTimeout)
 	defer cancel()

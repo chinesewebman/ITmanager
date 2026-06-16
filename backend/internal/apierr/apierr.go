@@ -75,6 +75,14 @@ func NotFound(c *gin.Context, message string) {
 	Respond(c, http.StatusNotFound, CodeNotFound, message, nil)
 }
 
+// Conflict 409（资源冲突，如唯一键冲突）
+func Conflict(c *gin.Context, message string) {
+	if message == "" {
+		message = "资源冲突"
+	}
+	Respond(c, http.StatusConflict, CodeConflict, message, nil)
+}
+
 // Internal 500 - 不向客户端暴露原始 err
 func Internal(c *gin.Context, message string, internalErr error) {
 	if message == "" {

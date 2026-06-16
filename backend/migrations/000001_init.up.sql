@@ -114,6 +114,8 @@ CREATE TABLE api_keys (
     created_at      TIMESTAMP DEFAULT NOW(),
     updated_at      TIMESTAMP DEFAULT NOW()
 );
+-- 🐛 BUG#8: api_key 同 user 不允许重名
+CREATE UNIQUE INDEX idx_api_keys_user_name ON api_keys(user_id, name);
 
 -- ============================================================
 -- 第二部分：资产管理
