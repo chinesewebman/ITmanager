@@ -88,7 +88,7 @@
 - [ ] **P1-4 历史快照对比** (4-5h) — 2 个时间点资产配置 diff (CDP/LLDP/VLAN 变化)
 
 ### P2 - 下个月
-- [ ] **P2-1 故障 Runbook** (3-4h) — 资产关联 SOP (2026-06-16 进行中：model/service/handler/migration 已就绪，剩 route + swagger + tests + frontend 30-45min)
+- [x] **P2-1 故障 Runbook** (3-4h) ✅ `f79873f` — `runbooks` 表 + CRUD + ListForAssetTypeAndSeverity 推荐 + /runbooks/recommend. Service 16 test + Handler 15 test + 前端 3 test = **34 new tests**. swagger 6 paths + 1 schema + 25 Runbook types.
 - [ ] **P2-2 Zabbix 兜底** (4h) — metric_snapshots 落 TimescaleDB
 
 ### 覆盖率目标 75%
