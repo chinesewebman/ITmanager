@@ -226,6 +226,11 @@ func Get() *Config {
 	return cfg
 }
 
+// SetForTest 测试用 setter（允许 handler 测试不依赖 yaml 文件）
+func SetForTest(c *Config) {
+	cfg = c
+}
+
 // GetDuration 获取持续时间
 func (c *Config) GetDuration() time.Duration {
 	return time.Duration(c.Auth.JWT.Expire) * time.Second

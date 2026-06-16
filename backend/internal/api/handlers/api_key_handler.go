@@ -37,9 +37,32 @@ func generateAPIKey() (string, string) {
 	return prefix + "-" + key, prefix
 }
 
+// GetAPIKeyPepper 提取 config 依赖为函数变量（测试可覆盖）
+// 默认从 config 读，测试通过 SetAPIKeyPepper 注入
+var GetAPIKeyPepper = func() string {
+	return config.Get().Auth.APIKeyPepper
+}
+
+// SetAPIKeyPepperForTest 测试用 setter（恢复时调 unsetFunc）
+func SetAPIKeyPepperForTest(pepper string) func() {
+	old := GetAPIKeyPepper
+	GetAPIKeyPepper = func() string { return pepper }
+	return func() { GetAPIKeyPepper = old }
+}
+
 // hashAPIKey 对 key 做 HMAC-SHA256 哈希（C-F6：原 SHA-256 改为带 pepper）
 func hashAPIKey(key string) string {
-	return apikey.Hash(key, config.Get().Auth.APIKeyPepper)
+	return apikey.Hash(key, GetAPIKeyPepper())
+}
+
+// HashAPIKeyForTest 测试用导出版本（避免 _test.go 在不同 package 时无法访问）
+func HashAPIKeyForTest(key, pepper string) string {
+	return apikey.Hash(key, pepper)
+}
+
+// GenerateAPIKeyForTest 测试用导出版本
+func GenerateAPIKeyForTest() (string, string) {
+	return generateAPIKey()
 }
 
 // CreateAPIKey 创建 API Key
@@ -91,6 +114,7 @@ func CreateAPIKey(c *gin.Context) {
 
 	rawKey, prefix := generateAPIKey()
 	apiKey := models.APIKey{
+		ID:          uuid.New(), // 手动设 ID（sqlite 无 gen_random_uuid()）
 		UserID:      uid,
 		Name:        req.Name,
 		KeyHash:     hashAPIKey(rawKey),

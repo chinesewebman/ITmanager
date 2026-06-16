@@ -1,6 +1,8 @@
 package models
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,21 +42,51 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-// APIKey API密钥
+// APIKey API 密钥
 type APIKey struct {
 	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
 	UserID      uuid.UUID  `json:"user_id" gorm:"type:uuid;not null"`
 	Name        string     `json:"name" gorm:"size:100;not null"`
 	KeyHash     string     `json:"-" gorm:"size:255;not null"`
 	Prefix      string     `json:"prefix" gorm:"size:20;not null"`
-	Permissions []string   `json:"permissions" gorm:"type:text[]"`
-	IPWhitelist []string   `json:"ip_whitelist" gorm:"type:text[]"`
+	Permissions StringList `json:"permissions" gorm:"type:text;not null;default:'[]';serializer:json"`
+	IPWhitelist StringList `json:"ip_whitelist" gorm:"type:text;not null;default:'[]';serializer:json"`
 	RateLimit   int        `json:"rate_limit" gorm:"default:1000"`
 	ExpiresAt   *time.Time `json:"expires_at"`
 	LastUsedAt  *time.Time `json:"last_used_at"`
 	Status      string     `json:"status" gorm:"size:20;default:active"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// StringList 自定义类型实现 GORM JSON 序列化（PG/SQLite 通用）
+type StringList []string
+
+// Scan implements sql.Scanner
+func (s *StringList) Scan(value interface{}) error {
+	if value == nil {
+		*s = nil
+		return nil
+	}
+	var b []byte
+	switch v := value.(type) {
+	case []byte:
+		b = v
+	case string:
+		b = []byte(v)
+	default:
+		*s = nil
+		return nil
+	}
+	return json.Unmarshal(b, s)
+}
+
+// Value implements driver.Valuer
+func (s StringList) Value() (driver.Value, error) {
+	if s == nil {
+		return "[]", nil
+	}
+	return json.Marshal(s)
 }
 
 func (a *APIKey) TableName() string {
