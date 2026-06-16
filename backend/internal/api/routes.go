@@ -147,6 +147,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	suppressionSvc := service.NewAlertSuppressionService(db)
 	topologySvc := service.NewTopologyService(db)
 	oncallSvc := service.NewOncallService(db)
+	runbookSvc := service.NewRunbookService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -160,6 +161,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	suppressionH := handlers.NewAlertSuppressionHandler(suppressionSvc)
 	topologyH := handlers.NewTopologyHandler(topologySvc)
 	oncallH := handlers.NewOncallHandler(oncallSvc)
+	runbookH := handlers.NewRunbookHandler(runbookSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -297,6 +299,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				oncall.POST("/policies", oncallH.CreatePolicy)
 				oncall.GET("/policies/:id", oncallH.GetPolicy)
 				oncall.DELETE("/policies/:id", oncallH.DeletePolicy)
+			}
+
+			// 故障 Runbook（P2-1）
+			runbooks := protected.Group("/runbooks")
+			{
+				runbooks.POST("", runbookH.Create)
+				runbooks.GET("", runbookH.List)
+				runbooks.GET("/recommend", runbookH.Recommend)
+				runbooks.GET("/:id", runbookH.Get)
+				runbooks.PUT("/:id", runbookH.Update)
+				runbooks.DELETE("/:id", runbookH.Delete)
 			}
 		}
 	}

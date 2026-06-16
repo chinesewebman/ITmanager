@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -36,6 +37,9 @@ func (s *RunbookService) Create(ctx context.Context, rb *models.Runbook) error {
 		return fmt.Errorf("steps JSON 非法: %w: %w", ErrInvalidInput, err)
 	}
 	now := time.Now()
+	if rb.ID == uuid.Nil {
+		rb.ID = uuid.New()
+	}
 	rb.CreatedAt = now
 	rb.UpdatedAt = now
 	if err := s.db.WithContext(ctx).Create(rb).Error; err != nil {

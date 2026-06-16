@@ -1067,6 +1067,118 @@ paths:
         '204':
           description: 成功
 
+  # ==================== 故障 Runbook（P2-1）====================
+  /runbooks:
+    get:
+      tags:
+        - Runbook
+      summary: 列出 Runbook
+      operationId: listRunbooks
+      parameters:
+        - name: asset_type
+          in: query
+          schema: { type: string }
+        - name: severity
+          in: query
+          schema: { type: integer }
+        - name: enabled
+          in: query
+          schema: { type: boolean }
+        - name: keyword
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Runbook' }
+                  total: { type: integer }
+    post:
+      tags: [Runbook]
+      summary: 创建 Runbook
+      operationId: createRunbook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Runbook' }
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Runbook' }
+        '400': { description: 参数错误 }
+  /runbooks/recommend:
+    get:
+      tags: [Runbook]
+      summary: 按告警推荐 Runbook
+      operationId: recommendRunbooks
+      parameters:
+        - name: asset_type
+          in: query
+          schema: { type: string }
+        - name: severity
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: 推荐列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Runbook' }
+  /runbooks/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Runbook]
+      summary: 获取 Runbook
+      operationId: getRunbook
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Runbook' }
+        '404': { description: 不存在 }
+    put:
+      tags: [Runbook]
+      summary: 更新 Runbook
+      operationId: updateRunbook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Runbook' }
+      responses:
+        '200': { description: 成功 }
+        '400': { description: 参数错误 }
+        '404': { description: 不存在 }
+    delete:
+      tags: [Runbook]
+      summary: 删除 Runbook
+      operationId: deleteRunbook
+      responses:
+        '204': { description: 成功 }
+        '404': { description: 不存在 }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -1902,3 +2014,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/NotificationChannel'
+
+    Runbook:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        asset_type: { type: string }
+        summary: { type: string }
+        content_md: { type: string }
+        steps: { type: string, description: "JSON 步骤数组" }
+        tags: { type: string }
+        severity: { type: integer, description: "0=不限制; 1-5=对应告警严重度" }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
