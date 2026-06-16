@@ -1,5 +1,6 @@
 import axios, { AxiosInstance } from 'axios'
 import { message } from 'antd'
+import type { AssetListParams, AlertListParams, LoginRequest } from './apiClient'
 
 // 创建 axios 实例（C-F5：用 httpOnly cookie 替代 localStorage 存 token）
 const api: AxiosInstance = axios.create({
@@ -62,8 +63,7 @@ export default api
 
 // ==================== 认证 ====================
 export const authApi = {
-  login: (data: { username: string; password: string }) =>
-    api.post('/auth/login', data),
+  login: (data: LoginRequest) => api.post('/auth/login', data),
   logout: () => api.post('/auth/logout'),
 }
 
@@ -75,8 +75,7 @@ export const dashboardApi = {
 
 // ==================== 资产管理 ====================
 export const assetApi = {
-  list: (params?: { site_id?: string; type?: string; status?: string; page?: number; page_size?: number }) =>
-    api.get('/assets', { params }),
+  list: (params?: AssetListParams) => api.get('/assets', { params }),
   get: (id: string) => api.get(`/assets/${id}`),
   create: (data: any) => api.post('/assets', data),
   update: (id: string, data: any) => api.put(`/assets/${id}`, data),
@@ -85,8 +84,7 @@ export const assetApi = {
 
 // ==================== 告警中心 ====================
 export const alertApi = {
-  list: (params?: { status?: string; severity?: string; host_id?: string }) =>
-    api.get('/alerts', { params }),
+  list: (params?: AlertListParams) => api.get('/alerts', { params }),
   get: (id: string) => api.get(`/alerts/${id}`),
   acknowledge: (id: string) => api.put(`/alerts/${id}/ack`),
   resolve: (id: string) => api.put(`/alerts/${id}/resolve`),

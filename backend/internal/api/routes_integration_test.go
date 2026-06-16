@@ -322,12 +322,27 @@ func TestRoutes_NoRoute_返前端indexHtml(t *testing.T) {
 	assert.NotEqual(t, http.StatusUnauthorized, w.Code)
 }
 
-// ==================== 防止 gorm DB 未注入的 panic ====================
+// ==================== /swagger UI 集成 ====================
 
-// 关键：SetupRouter 必须能跑完（无 panic）—— 这是所有 handler 测试的前置条件
-func TestRoutes_SetupRouter_无panic(t *testing.T) {
-	assert.NotPanics(t, func() {
-		r := setupTestRouter(t)
-		assert.NotNil(t, r)
-	})
+func TestRoutes_SwaggerUI_可达(t *testing.T) {
+	r := setupTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	// gin-swagger 返回 200 + HTML（含 Swagger UI）
+	assert.Equal(t, http.StatusOK, w.Code, "/swagger/index.html 必须可达")
+	assert.Contains(t, w.Body.String(), "Swagger", "响应 body 应含 Swagger UI HTML")
+}
+
+func TestRoutes_OpenAPISpec_可达且合法YAML(t *testing.T) {
+	r := setupTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	// 基本 openapi 3.0 标识
+	assert.Contains(t, body, "openapi: 3.0")
+	assert.Contains(t, body, "paths:")
+	assert.Contains(t, body, "components:")
 }

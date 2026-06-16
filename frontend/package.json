@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx}\"",
-    "test": "vitest"
+    "test": "vitest",
+    "gen:api": "openapi-typescript ../backend/internal/api/openapi.yaml --output src/services/api.types.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^5.3.0",
@@ -25,6 +26,7 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
+    "@apidevtools/swagger-cli": "^4.0.4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.2.55",
@@ -36,6 +38,7 @@
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
     "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
     "prettier": "^3.2.5",
     "typescript": "^5.3.3",
     "vite": "^5.1.0",

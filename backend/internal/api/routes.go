@@ -258,6 +258,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		c.File("./frontend/dist/index.html")
 	})
 
+	// Swagger UI（用 backend/openapi.yaml 作为 spec）
+	RegisterSwagger(r)
+
 	return r
 }
 

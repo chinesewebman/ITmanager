@@ -1,6 +1,7 @@
 import { Button, Select, Space, message } from 'antd'
 import { SyncOutlined, CheckOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { alertApi } from '../services/api'
+import type { AlertListParams } from '../services/apiClient'
 import { PageHeader } from '../components/PageHeader'
 import { AlertTable, type Alert } from '../components/AlertTable'
 import { AlertStatsCards, type AlertStats } from '../components/AlertStatsCards'
@@ -31,9 +32,12 @@ function Alerts() {
   const { data, isLoading, refetch } = useApiQuery<AlertsResp>(
     queryKeys.alerts.list(filters),
     async () => {
-      const params: { status?: string; severity?: string } = {}
-      if (statusFilter) params.status = statusFilter
-      if (severityFilter) params.severity = severityFilter
+      // antd Select onChange 给 string，但 spec 要求 literal union
+      // 调用方负责 narrow（业务已知：只有 3 个合法值）
+      const params = {
+        ...(statusFilter && { status: statusFilter as AlertListParams['status'] }),
+        ...(severityFilter && { severity: severityFilter }),
+      } as AlertListParams
       const res: any = await alertApi.list(params)
       return {
         items: res?.data?.data?.items ?? MOCK_ALERTS,
