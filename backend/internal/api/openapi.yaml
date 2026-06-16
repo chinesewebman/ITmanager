@@ -705,6 +705,50 @@ paths:
         '200':
           description: 测试消息已发送
 
+  /diagnostics/assets/{id}/timeline:
+    get:
+      tags:
+        - 资产诊断
+      summary: 获取资产时间线（用于故障诊断）
+      description: |
+        聚合 alerts / tickets / assets / asset_networks 四张表，按时间倒序返回事件流。
+        含 MTTR (平均恢复时间)、open_alerts、open_tickets 等摘要。
+      operationId: getAssetTimeline
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            maximum: 365
+          description: 查询窗口（天）默认 30，最大 365
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 200
+            maximum: 1000
+          description: 事件数上限，默认 200，最大 1000
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticTimeline'
+        '400':
+          description: 请求参数错误
+        '404':
+          description: 资产不存在
+
 components:
   securitySchemes:
     BearerAuth:
@@ -713,6 +757,102 @@ components:
       bearerFormat: JWT
 
   schemas:
+    # ==================== 资产诊断 ====================
+    TimelineEvent:
+      type: object
+      properties:
+        ts:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum: [alert, ticket, status_change, link_change]
+        sub_kind:
+          type: string
+        severity:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        ref_id:
+          type: string
+          format: uuid
+        ref_table:
+          type: string
+    DiagnosticAsset:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        asset_tag:
+          type: string
+        asset_type:
+          type: string
+        brand:
+          type: string
+        model:
+          type: string
+        status:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+        site_name:
+          type: string
+        rack_id:
+          type: string
+          format: uuid
+        rack_name:
+          type: string
+    DiagnosticSummary:
+      type: object
+      properties:
+        alert_count:
+          type: integer
+        ticket_count:
+          type: integer
+        open_alerts:
+          type: integer
+        open_tickets:
+          type: integer
+        last_offline:
+          type: string
+          format: date-time
+        last_online:
+          type: string
+          format: date-time
+        mttr_seconds:
+          type: integer
+          nullable: true
+        link_down_count:
+          type: integer
+        window_days:
+          type: integer
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        asset_id:
+          type: string
+          format: uuid
+    DiagnosticTimeline:
+      type: object
+      properties:
+        asset:
+          $ref: '#/components/schemas/DiagnosticAsset'
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+        summary:
+          $ref: '#/components/schemas/DiagnosticSummary'
+
     # ==================== 通用 ====================
     Error:
       type: object

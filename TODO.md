@@ -78,7 +78,7 @@
 ## 6. 优化路线图（详见 [docs/优化路线图.md](docs/优化路线图.md)）
 
 ### P0 - 立即做
-- [ ] **P0-1 诊断时间线** (2-3h) — `GET /api/v1/diagnostics/{asset_id}/timeline` + 前端 Timeline 页
+- [x] **P0-1 诊断时间线** (2-3h) ✅ — `GET /api/v1/diagnostics/assets/:id/timeline` 聚合 alerts/tickets/asset_networks 4 张表 + MTTR 摘要 + 前端 Antd Timeline 渲染。Service 10 test + Handler 7 test + Routes 3 test + 前端 3 test = **23 new tests**。文档：`docs/优化路线图.md`。
 - [ ] **P0-2 抑制规则引擎** (4-6h) — 5min 同 host 合并 + 阈值匹配 + TTL 过期
 
 ### P1 - 本月内

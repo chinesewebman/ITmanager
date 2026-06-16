@@ -438,10 +438,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/diagnostics/assets/{id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 获取资产时间线（用于故障诊断）
+         * @description 聚合 alerts / tickets / assets / asset_networks 四张表，按时间倒序返回事件流。
+         *     含 MTTR (平均恢复时间)、open_alerts、open_tickets 等摘要。
+         */
+        get: operations["getAssetTimeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        TimelineEvent: {
+            /** Format: date-time */
+            ts?: string;
+            /** @enum {string} */
+            kind?: "alert" | "ticket" | "status_change" | "link_change";
+            sub_kind?: string;
+            severity?: number;
+            title?: string;
+            description?: string;
+            /** Format: uuid */
+            ref_id?: string;
+            ref_table?: string;
+        };
+        DiagnosticAsset: {
+            /** Format: uuid */
+            id?: string;
+            name?: string;
+            asset_tag?: string;
+            asset_type?: string;
+            brand?: string;
+            model?: string;
+            status?: string;
+            /** Format: uuid */
+            site_id?: string;
+            site_name?: string;
+            /** Format: uuid */
+            rack_id?: string;
+            rack_name?: string;
+        };
+        DiagnosticSummary: {
+            alert_count?: number;
+            ticket_count?: number;
+            open_alerts?: number;
+            open_tickets?: number;
+            /** Format: date-time */
+            last_offline?: string;
+            /** Format: date-time */
+            last_online?: string;
+            mttr_seconds?: number | null;
+            link_down_count?: number;
+            window_days?: number;
+            /** Format: date-time */
+            window_start?: string;
+            /** Format: date-time */
+            window_end?: string;
+            /** Format: uuid */
+            asset_id?: string;
+        };
+        DiagnosticTimeline: {
+            asset?: components["schemas"]["DiagnosticAsset"];
+            events?: components["schemas"]["TimelineEvent"][];
+            summary?: components["schemas"]["DiagnosticSummary"];
+        };
         Error: {
             code?: number;
             message?: string;
@@ -1433,6 +1507,47 @@ export interface operations {
         responses: {
             /** @description 测试消息已发送 */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getAssetTimeline: {
+        parameters: {
+            query?: {
+                /** @description 查询窗口（天）默认 30，最大 365 */
+                days?: number;
+                /** @description 事件数上限，默认 200，最大 1000 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticTimeline"];
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 资产不存在 */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

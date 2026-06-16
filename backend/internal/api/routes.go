@@ -143,6 +143,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	userSvc := service.NewUserService(db)
 	dashboardSvc := service.NewDashboardService(db)
 	channelSvc := service.NewChannelService(db)
+	diagnosticSvc := service.NewDiagnosticService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -152,6 +153,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	userH := handlers.NewUserHandler(userSvc)
 	dashboardH := handlers.NewDashboardHandler(dashboardSvc)
 	channelH := handlers.NewChannelHandler(channelSvc)
+	diagnosticH := handlers.NewDiagnosticHandler(diagnosticSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -249,6 +251,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				channels.PUT("/:id", channelH.UpdateChannel)
 				channels.DELETE("/:id", channelH.DeleteChannel)
 				channels.PUT("/:id/test", channelH.TestChannel)
+			}
+
+			// 资产诊断（故障时间线）
+			diagnostics := protected.Group("/diagnostics")
+			{
+				diagnostics.GET("/assets/:id/timeline", diagnosticH.GetAssetTimeline)
 			}
 		}
 	}

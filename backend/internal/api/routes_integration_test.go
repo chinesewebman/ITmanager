@@ -346,3 +346,45 @@ func TestRoutes_OpenAPISpec_可达且合法YAML(t *testing.T) {
 	assert.Contains(t, body, "paths:")
 	assert.Contains(t, body, "components:")
 }
+
+// ==================== 资产诊断端点 (P0-1) ====================
+
+func TestRoutes_DiagnosticTimeline_无token返401(t *testing.T) {
+	r := setupTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/assets/"+uuid.New().String()+"/timeline", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestRoutes_DiagnosticTimeline_带token可访问(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+
+	// 找一个种子资产
+	var assetID string
+	require.NoError(t, database.GetDB().Raw("SELECT id FROM assets LIMIT 1").Scan(&assetID).Error)
+	if assetID == "" {
+		t.Skip("setupTestRouter 未 seed 资产，跳过")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/assets/"+assetID+"/timeline?days=30&limit=50", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.NotEqual(t, http.StatusUnauthorized, w.Code)
+	assert.NotEqual(t, http.StatusNotFound, w.Code, "路由必须注册且 asset 存在")
+	assert.Contains(t, w.Body.String(), "events", "响应应包含 events 字段")
+}
+
+func TestRoutes_DiagnosticTimeline_无效UUID返400(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/assets/not-a-uuid/timeline", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
