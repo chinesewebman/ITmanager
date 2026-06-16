@@ -322,6 +322,65 @@ paths:
         '200':
           description: 解决成功
 
+  /alerts/{id}/mark-fp:
+    post:
+      tags:
+        - 告警中心
+      summary: 标记/反标记告警为误报
+      operationId: markFalsePositive
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_false_positive]
+              properties:
+                is_false_positive:
+                  type: boolean
+                  description: true=标记为误报，false=反标记
+                note:
+                  type: string
+                  description: 误报备注（如"周期性抖动"）
+      responses:
+        '200':
+          description: 操作成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '404':
+          description: 告警不存在
+
+  /alerts/false-positives/export:
+    get:
+      tags:
+        - 告警中心
+      summary: 导出误报训练集 CSV
+      operationId: exportFalsePositives
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: 可选 RFC3339 时间，增量导出 marked_at >= since 的记录
+      responses:
+        '200':
+          description: CSV 文件流
+          content:
+            text/csv:
+              schema:
+                type: string
+
   /alerts/stats:
     get:
       tags:
@@ -1774,6 +1833,18 @@ components:
           type: string
         duration:
           type: integer
+        is_false_positive:
+          type: boolean
+          description: 是否被标记为误报（小改进 #2）
+        marked_by:
+          type: string
+          description: 标记人 username
+        marked_at:
+          type: string
+          format: date-time
+        false_positive_note:
+          type: string
+          description: 误报标记备注
 
     AlertList:
       type: object

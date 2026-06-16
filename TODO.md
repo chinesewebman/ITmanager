@@ -56,7 +56,8 @@
 - [x] **queryKeys factory** (`useApiQuery.test.ts`)
 - [x] **zustand store 单元测试** (`stores/index.test.ts`)
 - [x] **type-safe API client** (3/13 服务方法)
-- [x] **暗色模式** (zustand persist 'theme-storage' + ConfigProvider `theme.darkAlgorithm` + ThemeSwitcher 按钮 + 13 tests) — commit 7b864b8
+- [x] **暗色模式** (zustand persist 'theme-storage' + ConfigProvider `theme.darkAlgorithm` + ThemeSwitcher 按钮 + 13 tests) — commit ab05d3d
+- [x] **误报标记 + ML 训练集导出** (alerts 表加 4 字段 + `POST /alerts/:id/mark-fp` + `GET /alerts/false-positives/export` CSV + 8 backend tests + 2 frontend tests)
 - [ ] 机柜可视化增强
 - [ ] 前端 coverage 工具 (无 `--coverage` 配置)
 

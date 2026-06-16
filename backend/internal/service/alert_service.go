@@ -13,10 +13,11 @@ import (
 
 // AlertFilter 告警列表查询
 type AlertFilter struct {
-	Status   string
-	Severity int // 🐛 BUG#13: 原 string 类型与 SQL "severity >= ?" 比较会触发字符串比较；改为 int
-	HostID   string
-	Limit    int
+	Status          string
+	Severity        int // 🐛 BUG#13: 原 string 类型与 SQL "severity >= ?" 比较会触发字符串比较；改为 int
+	HostID          string
+	IsFalsePositive *bool // 小改进 #2：nil=全部 true=仅误报 false=仅非误报
+	Limit           int
 }
 
 // AlertStats 告警统计聚合结果
@@ -55,6 +56,11 @@ type AlertService interface {
 	CreateRule(ctx context.Context, rule *models.AlertRule) error
 	UpdateRule(ctx context.Context, id string, updates map[string]interface{}) (*models.AlertRule, error)
 	DeleteRule(ctx context.Context, id string) error
+	// 小改进 #2：标记误报 + ML 训练集
+	// isFP=true 标记为误报（写 marked_by/marked_at/note）；isFP=false 反标记
+	MarkFalsePositive(ctx context.Context, id, userID, note string, isFP bool) (*models.Alert, error)
+	// 列出所有被标记为误报的告警（给 ML 训练集导出用）
+	ListFalsePositives(ctx context.Context, since *time.Time) ([]models.Alert, error)
 }
 
 type alertService struct {
@@ -76,6 +82,9 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 	}
 	if f.HostID != "" {
 		q = q.Where("host_id = ?", f.HostID)
+	}
+	if f.IsFalsePositive != nil {
+		q = q.Where("is_false_positive = ?", *f.IsFalsePositive)
 	}
 
 	limit := f.Limit
@@ -312,4 +321,49 @@ func (s *alertService) UpdateRule(ctx context.Context, id string, updates map[st
 
 func (s *alertService) DeleteRule(ctx context.Context, id string) error {
 	return s.db.WithContext(ctx).Delete(&models.AlertRule{}, "id = ?", id).Error
+}
+
+// MarkFalsePositive 标记/反标记误报（小改进 #2）。
+// isFP=true  → 写 is_false_positive=1, marked_by=userID, marked_at=now, note
+// isFP=false → 清空 is_false_positive=0, marked_by=nil, marked_at=nil, note=nil
+// 返回更新后的 alert（含 FP 元数据）便于前端立即反映。
+func (s *alertService) MarkFalsePositive(ctx context.Context, id, userID, note string, isFP bool) (*models.Alert, error) {
+	alert, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	updates := map[string]interface{}{
+		"is_false_positive": isFP,
+	}
+	if isFP {
+		now := time.Now()
+		updates["marked_by"] = userID
+		updates["marked_at"] = now
+		updates["false_positive_note"] = note
+	} else {
+		updates["marked_by"] = nil
+		updates["marked_at"] = nil
+		updates["false_positive_note"] = nil
+	}
+	if err := s.db.WithContext(ctx).Model(alert).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	// 重读拿最新值
+	return s.Get(ctx, id)
+}
+
+// ListFalsePositives 列出所有被标记为误报的告警（ML 训练集导出用）。
+// since 非 nil 时只返回 marked_at >= since 的记录（增量导出）。
+func (s *alertService) ListFalsePositives(ctx context.Context, since *time.Time) ([]models.Alert, error) {
+	q := s.db.WithContext(ctx).Model(&models.Alert{}).
+		Where("is_false_positive = ?", true).
+		Order("marked_at DESC")
+	if since != nil {
+		q = q.Where("marked_at >= ?", *since)
+	}
+	var items []models.Alert
+	if err := q.Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
 }
