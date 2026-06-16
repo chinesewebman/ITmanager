@@ -1,10 +1,8 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import { ConfigProvider } from 'antd'
-import zhCN from 'antd/locale/zh_CN'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import App from './App'
-import './index.css'
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import App from "./App";
+import "./index.css";
 
 // C-P9: 全局 React Query 客户端
 // - staleTime 默认 30s（在 hook 内部调整）
@@ -18,14 +16,14 @@ const queryClient = new QueryClient({
       staleTime: 30_000,
     },
   },
-})
+});
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+// 注：ConfigProvider 已迁到 App.tsx 顶层 — 需要根据 useThemeStore.mode
+// 动态切换 theme.algorithm（dark vs default），不能在 main.tsx 静态包。
+ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ConfigProvider locale={zhCN}>
-        <App />
-      </ConfigProvider>
+      <App />
     </QueryClientProvider>
   </React.StrictMode>,
-)
+);
