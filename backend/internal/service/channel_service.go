@@ -54,15 +54,16 @@ func (s *channelService) Create(ctx context.Context, ch *models.NotificationChan
 }
 
 func (s *channelService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.NotificationChannel, error) {
-	if len(updates) == 0 {
-		return s.Get(ctx, id)
-	}
+	// 🐛 BUG#25: 原版 len==0 走 Get + 主路径 First 重复，统一 1 次
 	var ch models.NotificationChannel
 	if err := s.db.WithContext(ctx).First(&ch, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if len(updates) == 0 {
+		return &ch, nil
 	}
 	if err := s.db.WithContext(ctx).Model(&ch).Updates(updates).Error; err != nil {
 		return nil, err

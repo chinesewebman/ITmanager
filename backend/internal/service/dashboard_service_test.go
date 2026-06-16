@@ -11,33 +11,26 @@ import (
 
 // ==================== Dashboard Service 测试 ====================
 
-func TestDashboardService_Stats_5个count聚合(t *testing.T) {
+func TestDashboardService_Stats_单条聚合SQL(t *testing.T) {
+	// 🐛 BUG#27+#28: 6 次 count 串行 → 1 条聚合 SQL
 	gormDB, mock := newMockDB(t)
 	svc := NewDashboardService(gormDB)
 	ctx := context.Background()
 
-	// 5 个 Count：assets / alerts(problem) / sites / tickets(!closed)
-	// machines/networks 占位 = assets，不发额外 SQL
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "assets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(100))
-
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "alerts" WHERE status =`).
-		WithArgs("problem").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
-
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "sites"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
-
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets" WHERE`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(20))
+	// 单条 SQL 返 6 列
+	mock.ExpectQuery(`SELECT`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"assets", "machines", "networks", "alerts", "tickets", "sites",
+		}).AddRow(100, 60, 25, 5, 20, 3))
 
 	stats, err := svc.Stats(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, int64(100), stats.Assets)
+	assert.Equal(t, int64(60), stats.Machines) // 不再是 assets 占位
+	assert.Equal(t, int64(25), stats.Networks) // 不再是 assets 占位
 	assert.Equal(t, int64(5), stats.Alerts)
-	assert.Equal(t, int64(3), stats.Sites)
 	assert.Equal(t, int64(20), stats.Tickets)
-	assert.Equal(t, int64(100), stats.Machines) // 占位
+	assert.Equal(t, int64(3), stats.Sites)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

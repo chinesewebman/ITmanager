@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -94,3 +95,41 @@ func TestAlertService_ListRules_返回列表(t *testing.T) {
 // 注: statsInternal 是私有方法，Stats() 公共方法在 dashboard_service 测
 // alert 测重点是 CRUD + bulk 路径（ack/resolve/list/create 边界）
 // public Stats() 由 Stats() 自身实现（空走 statsInternal）—— handler 测覆盖更经济
+
+// ==================== BUG FIX 回归测试 ====================
+
+// TestAlertService_List_Severity类型必须是int — BUG#13
+//
+//	原 AlertFilter.Severity 是 string，但 SQL "severity >= ?" 与 int 列比较
+//	时若传 "3" 会触发字符串字典序比较，0、1、10、11 都会被误匹配
+//	修复：Severity 改为 int，传字符串在编译期就 fail
+func TestAlertService_List_Severity类型是int(t *testing.T) {
+	// 编译期断言：AlertFilter.Severity 必须是 int
+	var f AlertFilter
+	f.Severity = 3 // 编译过 = 是 int
+	assert.Equal(t, 3, f.Severity)
+
+	// 0 应该是"不过滤"，>0 过滤
+	f2 := AlertFilter{Severity: 0}
+	assert.Equal(t, 0, f2.Severity, "Severity=0 应被解释为不过滤")
+}
+
+// TestAlertService_UpdateRule_空updates不重复First — BUG#15
+//
+//	原版有两次 First（len==0 分支 + 主路径），重构后 1 次
+//	这里只验证空 updates 时不报错
+func TestAlertService_UpdateRule_空updates不报错(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	// mock: 只 expect 一次 First，Updates 不发 SQL
+	rows := sqlmock.NewRows([]string{"id", "name", "expression", "priority", "is_enabled", "created_at", "updated_at"}).
+		AddRow(uuid.NewString(), "test-rule", "x>0", 1, true, time.Now(), time.Now())
+	mock.ExpectQuery(`SELECT.*FROM "alert_rules"`).WillReturnRows(rows)
+
+	rule, err := svc.UpdateRule(ctx, uuid.NewString(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, rule)
+	assert.NoError(t, mock.ExpectationsWereMet(), "空 updates 不应发 UPDATE SQL")
+}

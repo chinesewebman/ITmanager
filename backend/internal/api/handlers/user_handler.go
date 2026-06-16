@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/service"
@@ -20,12 +21,24 @@ func NewUserHandler(svc service.UserService) *UserHandler {
 }
 
 func (h *UserHandler) ListUsers(c *gin.Context) {
-	users, err := h.svc.List(c.Request.Context())
+	// 🐛 BUG#26: 改成分页，避免全表返撑爆内存
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	users, total, err := h.svc.List(c.Request.Context(), page, pageSize)
 	if err != nil {
 		apierr.Internal(c, "获取用户列表失败", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "data": users})
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"items":     users,
+			"total":     total,
+			"page":      page,
+			"page_size": pageSize,
+		},
+	})
 }
 
 func (h *UserHandler) GetUser(c *gin.Context) {

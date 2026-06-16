@@ -24,10 +24,11 @@ func NewAlertHandler(svc service.AlertService) *AlertHandler {
 // ListAlerts 告警列表（带统计）
 func (h *AlertHandler) ListAlerts(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	severity, _ := strconv.Atoi(c.DefaultQuery("severity", "0")) // 🐛 BUG#13: severity 改 int
 
 	items, stats, err := h.svc.List(c.Request.Context(), service.AlertFilter{
 		Status:   c.Query("status"),
-		Severity: c.Query("severity"),
+		Severity: severity,
 		HostID:   c.Query("host_id"),
 		Limit:    limit,
 	})

@@ -15,6 +15,8 @@ import (
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/migrate"
+
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -37,40 +39,46 @@ func main() {
 	defer database.Close()
 
 	cmd := os.Args[1]
+	if err := runWithDeps(db, cmd); err != nil {
+		log.Fatalf("%s failed: %v", cmd, err)
+	}
+}
+
+// runWithDeps 接受外部 db 注入（生产路径仍走 main()，test 调 runWithDeps 注入 sqlite）。
+func runWithDeps(db *gorm.DB, cmd string) error {
 	switch cmd {
 	case "up":
-		if err := migrate.Up(db); err != nil {
-			log.Fatalf("up failed: %v", err)
-		}
+		return migrate.Up(db)
 	case "down":
-		if err := migrate.Down(db); err != nil {
-			log.Fatalf("down failed: %v", err)
-		}
+		return migrate.Down(db)
 	case "status":
-		if err := migrate.Status(db); err != nil {
-			log.Fatalf("status failed: %v", err)
-		}
+		return migrate.Status(db)
 	case "reset":
-		fmt.Println("⚠️  reset 将回滚全部 migration（DDL 会被撤，业务数据保留）")
-		fmt.Print("确认执行? (yes/no): ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if confirm != "yes" {
-			fmt.Println("aborted")
-			return
-		}
-		for {
-			var n int
-			row := db.Raw("SELECT COUNT(*) FROM schema_migrations").Row()
-			if err := row.Scan(&n); err != nil || n == 0 {
-				break
-			}
-			if err := migrate.Down(db); err != nil {
-				log.Fatalf("reset failed at step: %v", err)
-			}
-		}
+		return migrateReset(db)
 	default:
-		fmt.Printf("unknown command: %s\n", cmd)
-		os.Exit(1)
+		return fmt.Errorf("unknown command: %s", cmd)
 	}
+}
+
+// migrateReset 循环回滚所有 migration（生产入口会再次确认）
+func migrateReset(db *gorm.DB) error {
+	fmt.Println("⚠️  reset 将回滚全部 migration（DDL 会被撤，业务数据保留）")
+	fmt.Print("确认执行? (yes/no): ")
+	var confirm string
+	fmt.Scanln(&confirm)
+	if confirm != "yes" {
+		fmt.Println("aborted")
+		return nil
+	}
+	for {
+		var n int
+		row := db.Raw("SELECT COUNT(*) FROM schema_migrations").Row()
+		if err := row.Scan(&n); err != nil || n == 0 {
+			break
+		}
+		if err := migrate.Down(db); err != nil {
+			return fmt.Errorf("reset failed at step: %w", err)
+		}
+	}
+	return nil
 }

@@ -17,6 +17,7 @@ var (
 	ErrNotFound      = errors.New("resource not found")
 	ErrAlreadyExists = errors.New("resource already exists")
 	ErrInvalidInput  = errors.New("invalid input")
+	ErrTooManyItems  = errors.New("too many items in batch request") // 🐛 BUG#17
 )
 
 // AssetFilter 资产列表查询条件

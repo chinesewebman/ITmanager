@@ -93,15 +93,17 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 }
 
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {
-	if len(updates) == 0 {
-		return s.Get(ctx, id)
-	}
+	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，统一为 1 次 First
 	var t models.Ticket
 	if err := s.db.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	// 空 updates 直接返当前记录（不写库）
+	if len(updates) == 0 {
+		return &t, nil
 	}
 	// 关闭工单时自动写入 closed_at
 	if status, ok := updates["status"].(string); ok && status == "closed" {

@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 
-	"network-monitor-platform/internal/models"
-
 	"gorm.io/gorm"
 )
 
@@ -39,23 +37,22 @@ func NewDashboardService(db *gorm.DB) DashboardService {
 }
 
 func (s *dashboardService) Stats(ctx context.Context) (*DashboardStats, error) {
+	// 🐛 BUG#27+#28: 6 次 count 串行 → 1 条聚合 SQL（Machines/Networks 之前是
+	// 假数据 = Assets，必须按 asset_type 区分）
 	var stats DashboardStats
-	db := s.db.WithContext(ctx)
-	if err := db.Model(&models.Asset{}).Count(&stats.Assets).Error; err != nil {
+	row := s.db.WithContext(ctx).Raw(`
+		SELECT
+			(SELECT COUNT(*) FROM assets) AS assets,
+			(SELECT COUNT(*) FROM assets WHERE asset_type = 'server') AS machines,
+			(SELECT COUNT(*) FROM assets WHERE asset_type IN ('switch','router','firewall')) AS networks,
+			(SELECT COUNT(*) FROM alerts WHERE status = 'problem') AS alerts,
+			(SELECT COUNT(*) FROM tickets WHERE status != 'closed') AS tickets,
+			(SELECT COUNT(*) FROM sites) AS sites
+	`).Row()
+	if err := row.Scan(&stats.Assets, &stats.Machines, &stats.Networks,
+		&stats.Alerts, &stats.Tickets, &stats.Sites); err != nil {
 		return nil, err
 	}
-	if err := db.Model(&models.Alert{}).Where("status = ?", "problem").Count(&stats.Alerts).Error; err != nil {
-		return nil, err
-	}
-	if err := db.Model(&models.Site{}).Count(&stats.Sites).Error; err != nil {
-		return nil, err
-	}
-	if err := db.Model(&models.Ticket{}).Where("status != ?", "closed").Count(&stats.Tickets).Error; err != nil {
-		return nil, err
-	}
-	// 简化：machines/networks 占位 — 真实场景需 asset_type 区分
-	stats.Machines = stats.Assets
-	stats.Networks = stats.Assets
 	return &stats, nil
 }
 

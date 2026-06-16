@@ -190,15 +190,15 @@ func TestDashboardHandler_Trends_默认7天(t *testing.T) {
 // ==================== User Handler 测试 ====================
 
 type mockUserService struct {
-	listFunc func(ctx context.Context) ([]models.User, error)
+	listFunc func(ctx context.Context, page, pageSize int) ([]models.User, int64, error)
 	getFunc  func(ctx context.Context, id string) (*models.User, error)
 }
 
-func (m *mockUserService) List(ctx context.Context) ([]models.User, error) {
+func (m *mockUserService) List(ctx context.Context, page, pageSize int) ([]models.User, int64, error) {
 	if m.listFunc != nil {
-		return m.listFunc(ctx)
+		return m.listFunc(ctx, page, pageSize)
 	}
-	return nil, nil
+	return nil, 0, nil
 }
 func (m *mockUserService) Get(ctx context.Context, id string) (*models.User, error) {
 	if m.getFunc != nil {
@@ -218,8 +218,10 @@ func newUserTestRouter(svc service.UserService) *gin.Engine {
 
 func TestUserHandler_ListUsers_成功(t *testing.T) {
 	svc := &mockUserService{
-		listFunc: func(_ context.Context) ([]models.User, error) {
-			return []models.User{{Username: "admin"}}, nil
+		listFunc: func(_ context.Context, page, pageSize int) ([]models.User, int64, error) {
+			assert.Equal(t, 1, page)
+			assert.Equal(t, 20, pageSize)
+			return []models.User{{Username: "admin"}}, 1, nil
 		},
 	}
 	r := newUserTestRouter(svc)

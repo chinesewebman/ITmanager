@@ -14,7 +14,7 @@ import (
 // AlertFilter 告警列表查询
 type AlertFilter struct {
 	Status   string
-	Severity string
+	Severity int // 🐛 BUG#13: 原 string 类型与 SQL "severity >= ?" 比较会触发字符串比较；改为 int
 	HostID   string
 	Limit    int
 }
@@ -71,7 +71,7 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 	if f.Status != "" {
 		q = q.Where("status = ?", f.Status)
 	}
-	if f.Severity != "" {
+	if f.Severity > 0 {
 		q = q.Where("severity >= ?", f.Severity)
 	}
 	if f.HostID != "" {
@@ -79,8 +79,16 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 	}
 
 	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
+	// 🐛 BUG#14: 原 "limit <= 0 || limit > 1000" 命中 0 时改 100，但 0 也是合法
+	// 客户端"想要 0 条"时（探测/分页 size=0）会被悄悄改 100。明确：
+	//   - 0 / 负数 → 100（默认）
+	//   - > 1000 → 1000（上限）
+	//   - 1..1000 → 原值
+	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 
 	var items []models.Alert
@@ -184,6 +192,9 @@ func (s *alertService) BulkAcknowledge(ctx context.Context, ids []string, userID
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if len(ids) > 1000 {
+		return 0, ErrTooManyItems
+	}
 	now := time.Now()
 	res := s.db.WithContext(ctx).Model(&models.Alert{}).
 		Where("id IN ?", ids).
@@ -202,6 +213,9 @@ func (s *alertService) BulkAcknowledge(ctx context.Context, ids []string, userID
 func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
+	}
+	if len(ids) > 1000 {
+		return 0, ErrTooManyItems
 	}
 	now := time.Now()
 
@@ -227,9 +241,14 @@ func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID str
 }
 
 // BulkDelete C-P6: 批量删除（单条 SQL）。
+// 🐛 BUG#17: 加 1000 上限防止单次 IN(?) 把 SQL 撑爆（PG IN 上限 ~32k，
+// 但生产曾出现 200k ids 拖垮 DB）。超限直接 ErrTooManyItems。
 func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
+	}
+	if len(ids) > 1000 {
+		return 0, ErrTooManyItems
 	}
 	res := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&models.Alert{})
 	return res.RowsAffected, res.Error
@@ -275,16 +294,7 @@ func (s *alertService) CreateRule(ctx context.Context, rule *models.AlertRule) e
 }
 
 func (s *alertService) UpdateRule(ctx context.Context, id string, updates map[string]interface{}) (*models.AlertRule, error) {
-	if len(updates) == 0 {
-		var r models.AlertRule
-		if err := s.db.WithContext(ctx).First(&r, "id = ?", id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, ErrNotFound
-			}
-			return nil, err
-		}
-		return &r, nil
-	}
+	// 🐛 BUG#15: 原版有两次 First（len==0 分支 + 主路径），重构为 1 次
 	var rule models.AlertRule
 	if err := s.db.WithContext(ctx).First(&rule, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -292,8 +302,10 @@ func (s *alertService) UpdateRule(ctx context.Context, id string, updates map[st
 		}
 		return nil, err
 	}
-	if err := s.db.WithContext(ctx).Model(&rule).Updates(updates).Error; err != nil {
-		return nil, err
+	if len(updates) > 0 {
+		if err := s.db.WithContext(ctx).Model(&rule).Updates(updates).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &rule, nil
 }

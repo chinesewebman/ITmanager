@@ -84,10 +84,8 @@ func toRackDTOs(ctx context.Context, db *gorm.DB, racks []models.Rack) []RackDTO
 
 	// 1) 收集所有 rack ID
 	rackIDs := make([]string, len(racks))
-	idToIndex := make(map[string]int, len(racks))
 	for i, r := range racks {
 		rackIDs[i] = r.ID.String()
-		idToIndex[r.ID.String()] = i
 	}
 
 	// 2) 一次 GROUP BY 查回所有 rack 的 used count
@@ -95,6 +93,8 @@ func toRackDTOs(ctx context.Context, db *gorm.DB, racks []models.Rack) []RackDTO
 		RackID string
 		Used   int64
 	}
+	// 🐛 BUG#21: 之前 idToIndex 死代码（算 idx 但不存任何地方），删了
+	usedMap := make(map[string]int, len(racks))
 	var rows []countRow
 	if err := db.WithContext(ctx).Model(&models.Asset{}).
 		Select("rack_id, COUNT(*) AS used").
@@ -102,16 +102,8 @@ func toRackDTOs(ctx context.Context, db *gorm.DB, racks []models.Rack) []RackDTO
 		Group("rack_id").
 		Scan(&rows).Error; err == nil {
 		for _, cr := range rows {
-			if idx, ok := idToIndex[cr.RackID]; ok {
-				_ = idx
-			}
+			usedMap[cr.RackID] = int(cr.Used)
 		}
-	}
-
-	// 3) 用 map 复用聚合结果
-	usedMap := make(map[string]int, len(rows))
-	for _, cr := range rows {
-		usedMap[cr.RackID] = int(cr.Used)
 	}
 
 	for _, r := range racks {

@@ -167,10 +167,13 @@ func TestUserService_List_空表返回空(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	svc := NewUserService(gormDB)
 
+	// 🐛 BUG#26: List 现在走 Count + Find 两步
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "users"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "username"}))
 
-	users, err := svc.List(context.Background())
+	users, _, err := svc.List(context.Background(), 1, 20)
 	require.NoError(t, err)
 	assert.Empty(t, users)
 	assert.NoError(t, mock.ExpectationsWereMet())
