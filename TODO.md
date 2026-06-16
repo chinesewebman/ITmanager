@@ -83,7 +83,9 @@
 - [x] **P1-1 网络拓扑** (6-8h) ✅ — `GET /api/v1/topology` 聚合 assets + asset_networks + alerts + 环形自动布局 + 虚拟节点 (connected_to 找不到时)。Service 11 test + Handler 6 test + 前端 5 test = **22 new tests**。前端 `/topology` SVG 渲染（0 依赖）+ 告警 badge + down 边高亮。
 
 ### P1 - 本月内
-- [ ] **P1-1 网络拓扑** (6-8h) — react-flow + `GET /api/v1/topology`
+- [ ] **P1-2 值班 + 升级** (8-10h) — oncall_schedules + oncall_shifts + escalation_policies
+- [ ] **P1-3 MIB 浏览器** (5-6h) — 网络设备 SNMP MIB 树浏览 → OID → 指标字典
+- [ ] **P1-4 历史快照对比** (4-5h) — 2 个时间点资产配置 diff (CDP/LLDP/VLAN 变化)
 - [ ] **P1-2 值班+升级** (8-10h) — oncall_schedules + escalation_policies
 
 ### P2 - 下个月
