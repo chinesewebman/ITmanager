@@ -13,6 +13,7 @@ import {
   UserOutlined,
   LogoutOutlined,
   BookOutlined,
+  LineChartOutlined,
 } from '@ant-design/icons'
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
 // C-P10: 路由级 code-splitting（每个 page 独立 chunk，首屏只下载用到的）
@@ -27,6 +28,7 @@ const AlertSuppressions = lazy(() => import('./pages/AlertSuppressions'))
 const Topology = lazy(() => import('./pages/Topology'))
 const Oncall = lazy(() => import('./pages/Oncall'))
 const Runbook = lazy(() => import('./pages/Runbook'))
+const MetricSnapshot = lazy(() => import('./pages/MetricSnapshot'))
 import Login from './pages/Login' // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { authApi } from './services/api'
@@ -67,6 +69,7 @@ function AppLayout() {
     { key: '/topology', icon: <ShareAltOutlined />, label: '网络拓扑' },
     { key: '/oncall', icon: <UserOutlined />, label: '值班管理' },
     { key: '/runbooks', icon: <BookOutlined />, label: '故障 Runbook' },
+    { key: '/metric-snapshots', icon: <LineChartOutlined />, label: '指标快照' },
     { key: '/tickets', icon: <BuildOutlined />, label: '工单管理' },
     { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
   ]
@@ -161,6 +164,7 @@ function AppLayout() {
                 <Route path="/topology" element={<ErrorBoundary pageName="网络拓扑"><Topology /></ErrorBoundary>} />
                 <Route path="/oncall" element={<ErrorBoundary pageName="值班管理"><Oncall /></ErrorBoundary>} />
                 <Route path="/runbooks" element={<ErrorBoundary pageName="故障 Runbook"><Runbook /></ErrorBoundary>} />
+                <Route path="/metric-snapshots" element={<ErrorBoundary pageName="指标快照"><MetricSnapshot /></ErrorBoundary>} />
                 <Route path="/tickets" element={<ErrorBoundary pageName="工单管理"><Tickets /></ErrorBoundary>} />
                 <Route path="/settings" element={<ErrorBoundary pageName="系统设置"><Settings /></ErrorBoundary>} />
                 <Route path="*" element={<Navigate to="/" replace />} />

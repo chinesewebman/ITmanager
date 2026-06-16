@@ -1179,6 +1179,76 @@ paths:
         '204': { description: 成功 }
         '404': { description: 不存在 }
 
+  # ==================== 指标快照（P2-2）====================
+  /metric-snapshots:
+    get:
+      tags: [指标快照]
+      summary: 时序查询
+      operationId: queryMetricSnapshots
+      parameters:
+        - name: asset_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: key
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 1000 }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MetricSnapshot' }
+    post:
+      tags: [指标快照]
+      summary: 批量插入
+      operationId: bulkInsertMetricSnapshots
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/MetricSnapshot' }
+      responses:
+        '201': { description: 插入成功 }
+        '400': { description: 参数错误 }
+  /metric-snapshots/latest:
+    get:
+      tags: [指标快照]
+      summary: 取 asset+key 最新 N 个点
+      operationId: latestMetricSnapshots
+      parameters:
+        - name: asset_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: key
+          in: query
+          required: true
+          schema: { type: string }
+        - name: n
+          in: query
+          schema: { type: integer, default: 60 }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MetricSnapshot' }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -2029,3 +2099,13 @@ components:
         enabled: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    MetricSnapshot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        asset_id: { type: string, format: uuid }
+        key: { type: string }
+        value: { type: number, format: double }
+        ts: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }

@@ -148,6 +148,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	topologySvc := service.NewTopologyService(db)
 	oncallSvc := service.NewOncallService(db)
 	runbookSvc := service.NewRunbookService(db)
+	metricSvc := service.NewMetricSnapshotService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
@@ -162,6 +163,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	topologyH := handlers.NewTopologyHandler(topologySvc)
 	oncallH := handlers.NewOncallHandler(oncallSvc)
 	runbookH := handlers.NewRunbookHandler(runbookSvc)
+	metricH := handlers.NewMetricSnapshotHandler(metricSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 
 	api := r.Group("/api")
@@ -310,6 +312,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				runbooks.GET("/:id", runbookH.Get)
 				runbooks.PUT("/:id", runbookH.Update)
 				runbooks.DELETE("/:id", runbookH.Delete)
+			}
+
+			// 指标快照（P2-2 Zabbix 兜底）
+			metrics := protected.Group("/metric-snapshots")
+			{
+				metrics.POST("", metricH.BulkInsert)
+				metrics.GET("", metricH.Query)
+				metrics.GET("/latest", metricH.Latest)
 			}
 		}
 	}
