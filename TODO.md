@@ -58,6 +58,7 @@
 - [x] **type-safe API client** (3/13 服务方法)
 - [x] **暗色模式** (zustand persist 'theme-storage' + ConfigProvider `theme.darkAlgorithm` + ThemeSwitcher 按钮 + 13 tests) — commit ab05d3d
 - [x] **误报标记 + ML 训练集导出** (alerts 表加 4 字段 + `POST /alerts/:id/mark-fp` + `GET /alerts/false-positives/export` CSV + 8 backend tests + 2 frontend tests)
+- [x] **全局搜索 Cmd+K** (Antd Modal + 自写 fuzzy 子序列匹配 + useGlobalHotkey hook + 3 资源跨搜资产/告警/工单 + 18 frontend tests)
 - [ ] 机柜可视化增强
 - [ ] 前端 coverage 工具 (无 `--coverage` 配置)
 

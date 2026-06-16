@@ -48,6 +48,7 @@ const MetricSnapshot = lazy(() => import("./pages/MetricSnapshot"));
 import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ThemeSwitcher } from "./components/ThemeSwitcher";
+import { CommandPalette } from "./components/CommandPalette";
 import { useThemeStore } from "./stores";
 import { authApi } from "./services/api";
 
@@ -326,6 +327,8 @@ function App() {
           themeMode === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
       }}
     >
+      {/* 小改进 #3：Cmd/Ctrl+K 全局搜索面板（登录前后均可用） */}
+      <CommandPalette />
       <BrowserRouter>
         <Routes>
           <Route
