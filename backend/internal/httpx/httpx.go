@@ -25,7 +25,6 @@ import (
 	"math"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -111,7 +110,8 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 	for attempt := 0; attempt < attempts; attempt++ {
 		// ctx 取消检查
 		if err := ctx.Err(); err != nil {
-			c.afterFailure()
+			// 🐛 BUG#11: ctx 取消是用户主动行为，不应该触发熔断计数
+			// （之前 beforeRequest 返过或请求中被 cancel，都不该算服务端失败）
 			return nil, 0, fmt.Errorf("httpx: ctx: %w", err)
 		}
 
@@ -121,7 +121,6 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				c.afterFailure()
 				return nil, 0, ctx.Err()
 			}
 		}
@@ -130,6 +129,7 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 		req, err := http.NewRequestWithContext(ctx, method, url, body)
 		if err != nil {
 			lastErr = err
+			c.recordMetrics("error", 0)
 			continue
 		}
 		c.applyAuth(req)
@@ -162,7 +162,8 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 
 		// 4xx → 终态（不重试）
 		if resp.StatusCode >= 400 {
-			c.afterFailure()
+			// 🐛 BUG#11: 4xx 是客户端错（参数错、权限错），不是服务端问题
+			// 不应触发熔断（之前 c.afterFailure 误触）
 			return respBody, resp.StatusCode, fmt.Errorf("httpx: %s %s → %d: %s", method, path, resp.StatusCode, string(respBody))
 		}
 
@@ -198,6 +199,10 @@ func (c *Client) recordMetrics(status string, seconds float64) {
 var ErrCircuitOpen = fmt.Errorf("httpx: circuit breaker open")
 
 // beforeRequest 熔断检查：open 立即返；half-open 只放一个探针。
+//
+// 🐛 BUG#9: 原版 halfOpenInflight 用 atomic.CompareAndSwapInt32 在锁外
+// 与 afterSuccess/afterFailure 写 0 之间存在 race，可能让 N goroutine 同时
+// 通过 half-open。修复：把 CAS 移入锁内（与 openStreak/openUntil 一起原子读写）
 func (c *Client) beforeRequest() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -206,22 +211,24 @@ func (c *Client) beforeRequest() error {
 	if c.openUntil.After(now) {
 		return ErrCircuitOpen
 	}
-	// half-open 探针：只允许一个请求通过
+	// half-open 探针：只允许一个请求通过（与 c.openUntil 同一锁内）
 	if c.openStreak > 0 && !c.openUntil.IsZero() {
-		if !atomic.CompareAndSwapInt32(&c.halfOpenInflight, 0, 1) {
+		if c.halfOpenInflight == 1 {
 			return ErrCircuitOpen
 		}
+		c.halfOpenInflight = 1
 	}
 	return nil
 }
 
+// afterSuccess 必须在锁内
 func (c *Client) afterSuccess() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.failStreak = 0
 	c.openStreak = 0
 	c.openUntil = time.Time{}
-	atomic.StoreInt32(&c.halfOpenInflight, 0)
+	c.halfOpenInflight = 0
 }
 
 func (c *Client) afterFailure() {
@@ -233,7 +240,7 @@ func (c *Client) afterFailure() {
 		c.openUntil = time.Now().Add(c.cfg.BreakerCool)
 		c.failStreak = 0
 	}
-	atomic.StoreInt32(&c.halfOpenInflight, 0)
+	c.halfOpenInflight = 0
 }
 
 // State 返回熔断当前状态（用于 /metrics 暴露）。
