@@ -33,6 +33,12 @@ type Alert struct {
 	ResolveTime *time.Time `json:"resolve_time"`
 	ResolveUser string     `json:"resolve_user" gorm:"size:100"`
 
+	// 误报标记（小改进 #2：标记误报 + ML 训练集导出）
+	IsFalsePositive   bool       `json:"is_false_positive" gorm:"default:false;index"`
+	MarkedBy          *string    `json:"marked_by" gorm:"size:100"`
+	MarkedAt          *time.Time `json:"marked_at"`
+	FalsePositiveNote *string    `json:"false_positive_note" gorm:"type:text"`
+
 	// 关联
 	TicketID *uuid.UUID `json:"ticket_id" gorm:"type:uuid"` // GLPI 工单
 	AssetID  *uuid.UUID `json:"asset_id" gorm:"type:uuid;index"`

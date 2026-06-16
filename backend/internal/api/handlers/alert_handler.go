@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"encoding/csv"
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/models"
@@ -266,4 +268,106 @@ func (h *AlertHandler) BulkDelete(c *gin.Context) {
 		"code": 0,
 		"data": gin.H{"affected": affected},
 	})
+}
+
+// MarkFalsePositiveRequest 标记/反标记误报请求体
+// is_false_positive=true  标记为误报（写 marked_by/marked_at/note）
+// is_false_positive=false 反标记（清空 FP 元数据）
+type MarkFalsePositiveRequest struct {
+	IsFalsePositive bool   `json:"is_false_positive"`
+	Note            string `json:"note"` // 备注（仅标记时生效，反标记忽略）
+}
+
+// MarkFalsePositive POST /alerts/:id/mark-fp
+// 标记或反标记指定告警为误报。返回更新后的 alert。
+func (h *AlertHandler) MarkFalsePositive(c *gin.Context) {
+	userID := c.GetString("username")
+	if userID == "" {
+		userID = "unknown"
+	}
+	var req MarkFalsePositiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apierr.BadRequest(c, "请求参数错误")
+		return
+	}
+	alert, err := h.svc.MarkFalsePositive(c.Request.Context(), c.Param("id"), userID, req.Note, req.IsFalsePositive)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "告警不存在")
+			return
+		}
+		apierr.Internal(c, "标记误报失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "操作成功",
+		"data":    alert,
+	})
+}
+
+// ExportFalsePositives GET /alerts/false-positives/export
+// 导出被标记为误报的告警为 CSV 格式（ML 训练集）。
+// query `since`（RFC3339）可选：增量导出 marked_at >= since 的记录。
+// 复用 asset_handler 的 safeCSV 防 Excel 公式注入。
+func (h *AlertHandler) ExportFalsePositives(c *gin.Context) {
+	var since *time.Time
+	if sinceStr := c.Query("since"); sinceStr != "" {
+		t, err := time.Parse(time.RFC3339, sinceStr)
+		if err != nil {
+			apierr.BadRequest(c, "since 格式错误（需 RFC3339）")
+			return
+		}
+		since = &t
+	}
+	items, err := h.svc.ListFalsePositives(c.Request.Context(), since)
+	if err != nil {
+		apierr.Internal(c, "导出误报失败", err)
+		return
+	}
+
+	// C-F7: 复用 safeCSV 防 Excel DDE 公式注入
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="false_positives.csv"`)
+	c.Header("X-Content-Type-Options", "nosniff")
+
+	w := csv.NewWriter(c.Writer)
+	defer w.Flush()
+
+	// 表头：ML 训练常用特征
+	_ = w.Write([]string{
+		"alert_id", "host_name", "host_ip", "trigger_name", "trigger_id",
+		"severity", "severity_name", "problem", "problem_start", "duration_seconds",
+		"is_false_positive", "marked_by", "marked_at", "false_positive_note",
+	})
+	for _, a := range items {
+		markedBy := ""
+		if a.MarkedBy != nil {
+			markedBy = *a.MarkedBy
+		}
+		markedAt := ""
+		if a.MarkedAt != nil {
+			markedAt = a.MarkedAt.UTC().Format(time.RFC3339)
+		}
+		note := ""
+		if a.FalsePositiveNote != nil {
+			note = *a.FalsePositiveNote
+		}
+		_ = w.Write([]string{
+			safeCSV(a.AlertID),
+			safeCSV(a.HostName),
+			safeCSV(a.HostIP),
+			safeCSV(a.TriggerName),
+			safeCSV(a.TriggerID),
+			strconv.Itoa(a.Severity),
+			safeCSV(a.SeverityName),
+			safeCSV(a.Problem),
+			a.ProblemStart.UTC().Format(time.RFC3339),
+			strconv.Itoa(a.Duration),
+			"1", // is_false_positive 全为 1
+			safeCSV(markedBy),
+			markedAt,
+			safeCSV(note),
+		})
+	}
 }

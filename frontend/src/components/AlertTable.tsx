@@ -1,83 +1,135 @@
-import { Button, Space, Table } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
-import { StatusTag } from './StatusTag'
+import { Button, Space, Table } from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { StatusTag } from "./StatusTag";
 
 export interface Alert {
-  id: string
-  host: string
-  message: string
-  severity: number
-  severity_name: string
-  status: 'problem' | 'acknowledged' | 'resolved' | string
-  created_at: string
-  ack_time?: string
+  id: string;
+  host: string;
+  message: string;
+  severity: number;
+  severity_name: string;
+  status: "problem" | "acknowledged" | "resolved" | string;
+  created_at: string;
+  ack_time?: string;
+  // 小改进 #2：误报标记
+  is_false_positive?: boolean;
+  marked_by?: string | null;
+  marked_at?: string | null;
+  false_positive_note?: string | null;
 }
 
 export interface AlertTableProps {
-  data: Alert[]
-  loading: boolean
-  onAck: (id: string) => Promise<void> | void
-  onResolve: (id: string) => Promise<void> | void
+  data: Alert[];
+  loading: boolean;
+  onAck: (id: string) => Promise<void> | void;
+  onResolve: (id: string) => Promise<void> | void;
+  // 小改进 #2：标记/反标记误报
+  onMarkFP?: (id: string, isFP: boolean) => void;
   // C-P6: 批量勾选（undefined 时不开启）
-  selectedIds?: string[]
-  onSelectionChange?: (ids: string[]) => void
+  selectedIds?: string[];
+  onSelectionChange?: (ids: string[]) => void;
 }
 
 const SEVERITY_COLOR: Record<number, string> = {
-  5: 'red',
-  4: 'orange',
-  3: 'yellow',
-  2: 'blue',
-  1: 'default',
-}
+  5: "red",
+  4: "orange",
+  3: "yellow",
+  2: "blue",
+  1: "default",
+};
 
-export function AlertTable({ data, loading, onAck, onResolve, selectedIds, onSelectionChange }: AlertTableProps) {
+export function AlertTable({
+  data,
+  loading,
+  onAck,
+  onResolve,
+  onMarkFP,
+  selectedIds,
+  onSelectionChange,
+}: AlertTableProps) {
   const columns: ColumnsType<Alert> = [
-    { title: '主机', dataIndex: 'host', key: 'host', width: 150 },
-    { title: '告警信息', dataIndex: 'message', key: 'message' },
+    { title: "主机", dataIndex: "host", key: "host", width: 150 },
+    { title: "告警信息", dataIndex: "message", key: "message" },
     {
-      title: '级别',
-      dataIndex: 'severity_name',
-      key: 'severity_name',
+      title: "级别",
+      dataIndex: "severity_name",
+      key: "severity_name",
       width: 80,
       render: (name: string, record: Alert) => (
-        <StatusTag value={String(record.severity)} color={SEVERITY_COLOR[record.severity]} label={name} />
+        <StatusTag
+          value={String(record.severity)}
+          color={SEVERITY_COLOR[record.severity]}
+          label={name}
+        />
       ),
     },
     {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
       width: 80,
       render: (s: string) => <StatusTag value={s} />,
     },
-    { title: '触发时间', dataIndex: 'created_at', key: 'created_at', width: 160 },
     {
-      title: '操作',
-      key: 'action',
-      width: 200,
-      fixed: 'right',
+      title: "触发时间",
+      dataIndex: "created_at",
+      key: "created_at",
+      width: 160,
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 280,
+      fixed: "right",
       render: (_, record) => (
         <Space>
-          {record.status === 'problem' && (
+          {record.status === "problem" && (
             <>
               <Button type="link" size="small" onClick={() => onAck(record.id)}>
                 确认
               </Button>
-              <Button type="link" size="small" onClick={() => onResolve(record.id)}>
+              <Button
+                type="link"
+                size="small"
+                onClick={() => onResolve(record.id)}
+              >
                 解决
               </Button>
             </>
           )}
-          {record.status === 'acknowledged' && (
-            <Button type="link" size="small" onClick={() => onResolve(record.id)}>
+          {record.status === "acknowledged" && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => onResolve(record.id)}
+            >
               解决
+            </Button>
+          )}
+          {/* 小改进 #2：误报标记 */}
+          {onMarkFP && !record.is_false_positive && (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => onMarkFP(record.id, true)}
+            >
+              标记误报
+            </Button>
+          )}
+          {onMarkFP && record.is_false_positive && (
+            <Button
+              type="link"
+              size="small"
+              danger
+              onClick={() => onMarkFP(record.id, false)}
+            >
+              取消误报
             </Button>
           )}
         </Space>
       ),
     },
-  ]
+  ];
 
   return (
     <Table<Alert>
@@ -96,7 +148,7 @@ export function AlertTable({ data, loading, onAck, onResolve, selectedIds, onSel
           : undefined
       }
     />
-  )
+  );
 }
 
-export default AlertTable
+export default AlertTable;

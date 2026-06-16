@@ -214,17 +214,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			}
 
 			alerts := protected.Group("/alerts")
-			{
-				alerts.GET("", alertH.ListAlerts)
-				alerts.GET("/stats", alertH.GetAlertStats) // 静态段必须早于 /:id，否则 /stats 被当成 :id
-				// C-P6: 批量端点（静态段，挂在 :id 之前）
-				alerts.POST("/bulk-ack", alertH.BulkAcknowledge)
-				alerts.POST("/bulk-resolve", alertH.BulkResolve)
-				alerts.POST("/bulk-delete", alertH.BulkDelete)
-				alerts.GET("/:id", alertH.GetAlert)
-				alerts.PUT("/:id/ack", alertH.AcknowledgeAlert)
-				alerts.PUT("/:id/resolve", alertH.ResolveAlert)
-			}
+
+			alerts.GET("", alertH.ListAlerts)
+			alerts.GET("/stats", alertH.GetAlertStats)                         // 静态段必须早于 /:id，否则 /stats 被当成 :id
+			alerts.GET("/false-positives/export", alertH.ExportFalsePositives) // 同理：静态段早于 /:id
+			alerts.POST("/bulk-ack", alertH.BulkAcknowledge)
+			alerts.POST("/bulk-resolve", alertH.BulkResolve)
+			alerts.POST("/bulk-delete", alertH.BulkDelete)
+			alerts.GET("/:id", alertH.GetAlert)
+			alerts.PUT("/:id/ack", alertH.AcknowledgeAlert)
+			alerts.PUT("/:id/resolve", alertH.ResolveAlert)
+			alerts.POST("/:id/mark-fp", alertH.MarkFalsePositive) // 小改进 #2：标记/反标记误报
 
 			rules := protected.Group("/alert-rules")
 			{
