@@ -1,9 +1,26 @@
 # 网络运维监控平台 - 开发待办
 
-## 当前状态 (2026-06-16)
+## 当前状态 (2026-06-17, v1.0.2)
 
-> 本次更新：补 2026-02-15 ~ 2026-06-16 期间实际完成的工作（21 bug 修复 + 116 new tests + Swagger UI 集成 + type-safe API client）。
+> 本次更新：v1.0.0 → v1.0.1 → v1.0.2 三连发布（10 PR + 一键部署 + README badges）。详见 [CHANGELOG.md](CHANGELOG.md)。
 > 优化方向见 [docs/优化路线图.md](docs/优化路线图.md)。
+
+### v1.0.2 已发布（6/17）
+- [x] **README.md**：6 GitHub badges (Release/CI/License/Go/React/Docker) + 状态推进
+- [x] **CHANGELOG.md**：v1.0.0 / v1.0.1 / v1.0.2 sections
+- [x] **Makefile**：`make deploy` / `deploy-min` / `deploy-status` 3 target
+- [x] **GitHub releases**：3 个 (v1.0.0 稳定 / v1.0.1 部署补丁 / v1.0.2 文档)
+
+### v1.0.0 / v1.0.1 累计成果
+- [x] **P0-P2 全链路**：P0-1 诊断时间线 + P0-2 抑制规则 + P1-1 拓扑 + P1-2 值班升级 + P2-1 Runbook + P2-2 Zabbix 兜底
+- [x] **S 级 3 项**：暗色模式 (ab05d3d) + 误报 ML 训练集 (e502701) + Cmd+K 全局搜索 (f7e98eb)
+- [x] **A 级 3 项**：ping/traceroute (6edd9c9) + 复盘 PDF (ea70644) + KPI 仪表盘 (2b893bc)
+- [x] **A 级 review 全套修复** (3a667e8)：traceroute dead code + binary 启动验证 + 嵌入中文字体 + io.Writer 流式 + KPI 阈值常量 + KPIs sqlmock 测试
+- [x] **测试指标**：backend 22 packages / 603 tests / frontend 19 files / 117 tests / tsc 24=baseline
+- [x] **CI**：pre-commit hook (gofmt + swagger validate + .bak 拦截) + `.github/workflows/ci.yml`
+
+### 性能总计
+- 估时 14.5h → 实测 6.75h (**2.1x 加速**)
 
 ### 已完成 (2026-06-16 更新增量)
 
@@ -19,7 +36,7 @@
 - [x] **pre-commit hook**：gofmt + swagger-cli validate + .bak 拦截
 - [x] **TESTING.md**：4.7K 测试现状报告
 
-### 待完成 (2026-06-16 之后)
+### 待完成 (2026-06-17 之后)
 
 ## 1. 数据库初始化 (优先级: 高)
 - [x] 运行 `go run ./cmd/seed/main.go` 创建初始数据
@@ -99,21 +116,38 @@
 - [ ] `internal/middleware` 36.5% → 70%
 - [ ] `internal/integration` 39.5% → 60%
 
-### 用户/诊断小改进（穿插做）
-- [ ] 全局搜索 Cmd+K (3h)
-- [ ] 一键 ping/traceroute (2h)
-- [ ] 暗色模式 (0.5h)
-- [ ] 标记误报 → ML 训练集 (1h)
-- [ ] 统一 tags 中间表 (6h)
-- [ ] 移动端适配 (4h)
-- [ ] MIB 浏览器 (8h)
-- [ ] 历史快照对比 (6h)
-- [ ] 故障复盘 PDF (4h)
-- [ ] 工时统计 KPI (3h)
+### 用户/诊断小改进（穿插做）— 全部完成
+- [x] 全局搜索 Cmd+K (3h) ✅ `f7e98eb` — Antd Modal + 自写 fuzzy + 18 tests
+- [x] 一键 ping/traceroute (2h) ✅ `6edd9c9` — ICMP 探活 + 14 handler tests
+- [x] 暗色模式 (0.5h) ✅ `ab05d3d` — Antd darkAlgorithm + zustand persist + 13 tests
+- [x] 标记误报 → ML 训练集 (1h) ✅ `e502701` — 4 字段 + CSV 导出 + 10 tests
+- [x] 故障复盘 PDF (4h) ✅ `ea70644` — go-pdf/fpdf + 霞鹜文楷嵌入 (OFL 1.1, 15MB) + io.Writer 流式 + 7 tests
+- [x] 工时统计 KPI (3h) ✅ `2b893bc` — MTTR/MTTD/告警密度/SLA + KPI_THRESHOLDS 常量 + 4 sqlmock tests
+- [ ] 统一 tags 中间表 (6h) — 搁置
+- [ ] 移动端适配 (4h) — 搁置
+- [ ] MIB 浏览器 (8h) — 搁置
+- [ ] 历史快照对比 (6h) — 搁置
 
 每条任务完成后跑：编写代码 → 代码审查 → 单元测试 → pre-commit → commit。
 
-## 启动命令
+## 一键部署 (v1.0.1 新增)
+
+```bash
+# 全自动：装依赖 + 起 8 服务 + migrate + seed（含演示数据）
+make deploy
+# 首次 5-10min (拉镜像)，后续 1-2min (缓存)
+
+# 生产：同上但无种子
+make deploy-min
+
+# 健康检查：8 服务 UP/DOWN 一表
+make deploy-status
+
+# 详细命令
+make help    # 列全部 24 个 target
+```
+
+## 启动命令（手动模式，无 Docker）
 
 ```bash
 # 1. 启动 PostgreSQL (如果未运行)
@@ -134,7 +168,8 @@ cd frontend && npm run dev
 ```
 
 ## 访问地址
-- 前端: http://localhost:5173
+- 前端: http://localhost:5173 (vite dev) / http://localhost:3000 (docker)
 - 后端 API: http://localhost:8080
 - API 文档: http://localhost:8080/swagger/index.html
 - 测试报告: [TESTING.md](TESTING.md)
+- 一键部署指南: [Makefile](Makefile) + [docker-compose.yml](docker-compose.yml)
