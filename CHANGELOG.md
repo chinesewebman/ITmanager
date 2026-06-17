@@ -2,6 +2,56 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.4.0] - 2026-06-17
+
+🔒 **次版本** — 后端稳定性 + 性能 + 可观测性 (rate limit / 通知 worker / 缓存 / 审计日志)
+
+### 新增 Middleware / Service
+
+- **rate limit middleware** (`internal/middleware/rate_limit.go`) — 滑窗限流
+  - per-IP + per-path 维度, 内存 store (留 Redis 后端接口 v2.0)
+  - 标准 headers: `X-RateLimit-Limit` / `Remaining` / `Reset` / `Retry-After` (429)
+  - 路由级策略: login 5/min, password reset 3/min, protected 100/min
+  - 18 routes 在 protected group 接入
+- **notification worker** (`internal/notification/sender.go` + `worker.go`) — 异步真发
+  - 三种 Sender: DingTalk / Email (SMTP+TLS) / Webhook
+  - 5s tick 拉 pending 消息 (IN 查询避免 N+1), 30s per-msg 超时
+  - stale-while-error: worker 挂掉不会丢消息, 启动时自动捞 pending
+  - `channel_service.Test` 移除 stub, 走 Sender interface 真发
+- **cache LRU** (`internal/cache/cache.go`) — 进程内缓存
+  - `Cache interface` (Get/Set/Delete/GetOrLoad/Stats/Clear), 30s TTL
+  - `GetOrLoad` stale-while-error: load 失败回 fallback, 命中走缓存
+  - LRU 淘汰 + 并发安全
+  - `NewDashboardServiceWithCache` 注入, dashboard stats 30s TTL
+- **audit log middleware** (`internal/middleware/audit_log.go`) — 审计落库
+  - 异步落 `models.AuditLog` (user_id / action / resource / status_code / ip / user_agent)
+  - `SkipPaths` 跳过探针 (/healthz /metrics), `SkipMethods` 跳过 GET (可配置)
+  - 写失败不影响业务响应 (fire-and-forget)
+  - gorm `Session{SkipDefaultTransaction: true}` 避免无谓事务
+
+### 测试
+
+- 新增 81 tests:
+  - rate limit: 11 (sliding window / headers / KeyFunc / 并发 / GC)
+  - notification: 20 (HTTP 集成 / 错误路径 / worker 3 路径)
+  - cache: 16 (TTL / LRU 淘汰 / GetOrLoad 5 场景)
+  - audit log: 9 (落库 / 跳过 / 失败重试 / 状态码捕获)
+  - database: +7 (autoMigrate / Init / 错误路径 / DSN)
+  - middleware 辅助: 18 (split path / build entry / custom action)
+- backend go test: 621 → **702** PASS (+81)
+- vitest: 147 (未动)
+- **总**: 768 → **849** tests
+- **database 覆盖率**: 21.1% → **55.3%** (+34.2%)
+- tsc: 0 errors (维持)
+
+### 估时 vs 实测
+
+| | 估时 | 实测 | 加速 |
+|---|---|---|---|
+| Batch 1 (3 项) | 13h | ~4.5h | 2.9x |
+| Batch 2 (2 项) | 5h | ~1.5h | 3.3x |
+| **v1.4 总** | **18h** | **~6h** | **3x** |
+
 ## [v1.3.0] - 2026-06-17
 
 🎨 **次版本** — 中优先级 UX 改进 (路由元信息 + 状态展示一致性 + 响应式)

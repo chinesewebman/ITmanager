@@ -1,6 +1,6 @@
 # ADR-001: Rate Limit 归属
 
-**状态**: 待决策 (v1.1)
+**状态**: ✅ 已落地 (v1.4.0, commit `0f65854`)
 **日期**: 2026-06-17
 **关联审计**: M1-P2 (代码审计 v1.0.3, 2026-06-17)
 
@@ -44,6 +44,22 @@ M1 internal/middleware 审计发现一个待决策项: **Rate Limit 应该放在
 
 本 ADR 留作参考。Rate limit 实现本身估时 ~2h (含测试)，
 **不在 v1.1 范围内** — 等 v1.1 tag 后单独排期。
+
+## 落地结果 (v1.4.0)
+
+- ✅ 选 C (per-route middleware via `IRoutes.Use`), 实现于 `internal/middleware/rate_limit.go`
+- ✅ 18 routes 在 protected group 接入 (`backend/internal/router/routes.go`)
+- ✅ 滑窗算法 + 内存 store, per-IP + per-path
+- ✅ 路由级策略: login 5/min, password reset 3/min, protected 100/min
+- ✅ 标准 headers: `X-RateLimit-Limit` / `Remaining` / `Reset` / `Retry-After`
+- ✅ 11 tests PASS (sliding window / 超限 429 / 不同 IP 独立 / 窗口过期 / KeyFunc / 并发 / GC)
+- ✅ D 升级路径保留: 未引 `ulule/limiter` / `go-redis`, 内存 store 可换 Redis 后端 (v2.0)
+
+### 决策复盘
+
+- 估时 3h (审计报告) → 实测 ~1.5h (2x 加速)
+- 与 ADR 推荐完全一致, 无意外
+- 中间件抽象足够灵活, v2.0 换 Redis 后端无需改业务代码
 
 ## 关联
 
