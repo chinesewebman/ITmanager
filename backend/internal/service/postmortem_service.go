@@ -7,11 +7,17 @@ import (
 	"io"
 	"time"
 
+	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/postmortem"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// TimelineFetcher 是 GetTimeline 的最小接口（解耦 PostmortemService → DiagnosticService，方便单测 mock）
+type TimelineFetcher interface {
+	GetTimeline(ctx context.Context, assetID uuid.UUID, filter DiagnosticFilter) (*models.DiagnosticTimeline, error)
+}
 
 // PostmortemService 资产复盘报告 service
 //
@@ -22,12 +28,13 @@ import (
 //   - ctx 透传
 type PostmortemService struct {
 	db       *gorm.DB
-	diag     *DiagnosticService
+	diag     TimelineFetcher
 	renderer postmortem.Renderer
 }
 
 // NewPostmortemService 构造 PostmortemService
-func NewPostmortemService(db *gorm.DB, diag *DiagnosticService) *PostmortemService {
+// diag 接受 *DiagnosticService 或 mock impl（实现 TimelineFetcher 即可）
+func NewPostmortemService(db *gorm.DB, diag TimelineFetcher) *PostmortemService {
 	return &PostmortemService{
 		db:       db,
 		diag:     diag,
@@ -91,8 +98,8 @@ func (s *PostmortemService) GenerateReport(ctx context.Context, w io.Writer, ass
 // 资产可能有多个网卡，取第一个非空的 IPv4，否则第一个 IPv6
 func (s *PostmortemService) fetchIP(ctx context.Context, assetID uuid.UUID) (string, error) {
 	type ipRow struct {
-		IPv4Address string
-		IPv6Address string
+		IPv4Address string `gorm:"column:ipv4_address"`
+		IPv6Address string `gorm:"column:ipv_address"` // 真实列名是 ipv_address (见 models.AssetNetwork)
 	}
 	var rows []ipRow
 	if err := s.db.WithContext(ctx).
