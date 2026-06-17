@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"network-monitor-platform/internal/models"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -169,11 +171,16 @@ func (s *alertService) Acknowledge(ctx context.Context, id, userID string) error
 	if err != nil {
 		return err
 	}
-	return s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
+	if err := s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
 		"status":   "acknowledged",
 		"ack_time": time.Now(),
 		"ack_user": userID,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	// v1.1: 状态变更触发通知 trigger — 落 notification_logs (pending)
+	// 实际发送 (dingtalk/email) 由 v1.2 异步 worker 消费
+	return s.writeNotificationTrigger(ctx, alert.ID, "acknowledged", userID)
 }
 
 func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
@@ -186,13 +193,16 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 	if !alert.ProblemStart.IsZero() {
 		duration = int(now.Sub(alert.ProblemStart).Seconds())
 	}
-	return s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
+	if err := s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
 		"status":       "resolved",
 		"resolve_time": now,
 		"resolve_user": userID,
 		"problem_end":  now,
 		"duration":     duration,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	return s.writeNotificationTrigger(ctx, alert.ID, "resolved", userID)
 }
 
 // BulkAcknowledge C-P6: 批量确认告警（单条 SQL）。
@@ -288,6 +298,46 @@ func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, err
 		return nil
 	})
 	return affected, err
+}
+
+// writeNotificationTrigger v1.1 P2-B-3: 告警状态变更 → 落 notification_logs (pending)。
+// 实际发送 (dingtalk/email) 是 v1.2 异步 worker 的事，这里只做 trigger + 落库。
+// 失败仅 log，不影响主流程 — 主调用方 (Acknowledge/Resolve) 已成功改 status。
+func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uuid.UUID, newStatus, userID string) error {
+	// 拿所有启用的 channel (去重 by ID)，给每个 channel 落一行 pending log
+	var channels []models.NotificationChannel
+	if err := s.db.WithContext(ctx).
+		Where("is_enabled = ?", true).
+		Find(&channels).Error; err != nil {
+		// 不致命 — log 后继续
+		gin.DefaultErrorWriter.Write([]byte(
+			"[WARN] notification trigger: query channels failed: " + err.Error() + "\n",
+		))
+		return nil
+	}
+	if len(channels) == 0 {
+		return nil
+	}
+	now := time.Now()
+	logs := make([]models.NotificationLog, 0, len(channels))
+	content := fmt.Sprintf("Alert %s → %s by user %s", alertID, newStatus, userID)
+	for _, ch := range channels {
+		logs = append(logs, models.NotificationLog{
+			AlertID:     alertID,
+			ChannelID:   ch.ID,
+			ChannelName: ch.Name,
+			Content:     content,
+			Status:      "pending",
+			SentAt:      now,
+		})
+	}
+	if err := s.db.WithContext(ctx).Create(&logs).Error; err != nil {
+		gin.DefaultErrorWriter.Write([]byte(
+			"[WARN] notification trigger: insert logs failed: " + err.Error() + "\n",
+		))
+		return nil
+	}
+	return nil
 }
 
 func (s *alertService) Stats(ctx context.Context) ([]SeverityStat, []HourlyStat, error) {
