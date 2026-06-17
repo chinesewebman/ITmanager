@@ -91,6 +91,10 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Create(c.Request.Context(), &asset); err != nil {
+		if errors.Is(err, service.ErrAlreadyExists) {
+			apierr.Conflict(c, "资产已存在")
+			return
+		}
 		if errors.Is(err, service.ErrInvalidInput) {
 			apierr.BadRequest(c, "资产名称不能为空")
 			return

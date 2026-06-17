@@ -58,6 +58,9 @@ func (s *AlertSuppressionService) Create(ctx context.Context, rule *models.Alert
 		rule.ID = uuid.New()
 	}
 	if err := s.db.WithContext(ctx).Create(rule).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrAlreadyExists
+		}
 		return err
 	}
 	return nil

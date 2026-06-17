@@ -105,7 +105,13 @@ func (s *assetService) Create(ctx context.Context, asset *models.Asset) error {
 	if asset == nil || strings.TrimSpace(asset.Name) == "" {
 		return ErrInvalidInput
 	}
-	return s.db.WithContext(ctx).Create(asset).Error
+	if err := s.db.WithContext(ctx).Create(asset).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *assetService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error) {

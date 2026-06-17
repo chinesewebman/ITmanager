@@ -33,6 +33,10 @@ func (h *RunbookHandler) Create(c *gin.Context) {
 	}
 	rb.ID = uuid.New()
 	if err := h.svc.Create(c.Request.Context(), &rb); err != nil {
+		if errors.Is(err, service.ErrAlreadyExists) {
+			apierr.Conflict(c, "Runbook 已存在")
+			return
+		}
 		if errors.Is(err, service.ErrInvalidInput) {
 			apierr.BadRequest(c, err.Error())
 			return

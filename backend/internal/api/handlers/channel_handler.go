@@ -36,6 +36,10 @@ func (h *ChannelHandler) CreateChannel(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Create(c.Request.Context(), &ch); err != nil {
+		if errors.Is(err, service.ErrAlreadyExists) {
+			apierr.Conflict(c, "渠道已存在")
+			return
+		}
 		if errors.Is(err, service.ErrInvalidInput) {
 			apierr.BadRequest(c, "渠道名称不能为空")
 			return

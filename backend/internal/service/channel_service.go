@@ -50,7 +50,13 @@ func (s *channelService) Create(ctx context.Context, ch *models.NotificationChan
 	if ch == nil || ch.Name == "" {
 		return ErrInvalidInput
 	}
-	return s.db.WithContext(ctx).Create(ch).Error
+	if err := s.db.WithContext(ctx).Create(ch).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *channelService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.NotificationChannel, error) {

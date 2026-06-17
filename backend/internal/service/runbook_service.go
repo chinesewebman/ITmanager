@@ -43,6 +43,9 @@ func (s *RunbookService) Create(ctx context.Context, rb *models.Runbook) error {
 	rb.CreatedAt = now
 	rb.UpdatedAt = now
 	if err := s.db.WithContext(ctx).Create(rb).Error; err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("create runbook: %w", ErrAlreadyExists)
+		}
 		return fmt.Errorf("create runbook: %w", err)
 	}
 	return nil

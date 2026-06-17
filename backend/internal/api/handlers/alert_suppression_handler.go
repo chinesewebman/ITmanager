@@ -56,6 +56,10 @@ func (h *AlertSuppressionHandler) CreateAlertSuppression(c *gin.Context) {
 	// 这里显式让 DB 生成
 	rule.ID = uuid.Nil
 	if err := h.svc.Create(c.Request.Context(), &rule); err != nil {
+		if errors.Is(err, service.ErrAlreadyExists) {
+			apierr.Conflict(c, "抑制规则已存在")
+			return
+		}
 		apierr.BadRequest(c, "创建失败: "+err.Error())
 		return
 	}

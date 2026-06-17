@@ -89,7 +89,13 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	if t.Tags == "" {
 		t.Tags = "[]"
 	}
-	return s.db.WithContext(ctx).Create(t).Error
+	if err := s.db.WithContext(ctx).Create(t).Error; err != nil {
+		if isUniqueViolation(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {

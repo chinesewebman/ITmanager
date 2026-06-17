@@ -66,6 +66,10 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Create(c.Request.Context(), &ticket); err != nil {
+		if errors.Is(err, service.ErrAlreadyExists) {
+			apierr.Conflict(c, "工单已存在")
+			return
+		}
 		if errors.Is(err, service.ErrInvalidInput) {
 			apierr.BadRequest(c, "工单标题不能为空")
 			return
