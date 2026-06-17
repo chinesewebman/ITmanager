@@ -1,10 +1,17 @@
 # Network Monitor Platform
 
+[![Release](https://img.shields.io/github/v/release/chinesewebman/ITmanager)](https://github.com/chinesewebman/ITmanager/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/chinesewebman/ITmanager/ci.yml?branch=main)](https://github.com/chinesewebman/ITmanager/actions)
+[![License](https://img.shields.io/github/license/chinesewebman/ITmanager)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](backend/go.mod)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](frontend/package.json)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+
 网络运维监控平台 - 集成 NetBox + Zabbix + GLPI
 
 ---
 
-> **2026-06-17 状态**: v1.0.1 已发布 — 10 PR 落地 (P0-P2 + S 级 3 + A 级 3) + 一键部署
+> **2026-06-17 状态**: v1.0.2 已发布 — 10 PR 落地 (P0-P2 + S 级 3 + A 级 3) + 一键部署 + GitHub badges
 >
 > - **测试**: backend 603 passed / frontend 117 passed / tsc 24 = baseline / 61.2% 覆盖率
 > - **一键部署**: `make deploy` (install + docker-up + db-migrate + db-seed)

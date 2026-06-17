@@ -2,6 +2,19 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.0.2] - 2026-06-17
+
+🐛 **补丁版** — 文档改进
+
+### 改进
+
+- **README.md**: 加 6 个 GitHub badges
+  - Release / CI / License / Go / React / Docker
+  - 顶部状态从 6/16 推进到 6/17 v1.0.2
+- 快速开始章节用 `make deploy` 重写（替代旧 `make run` 路径）
+
+[v1.0.2]: https://github.com/chinesewebman/ITmanager/releases/tag/v1.0.2
+
 ## [v1.0.1] - 2026-06-17
 
 🐛 **补丁版** — 一键部署便利性
