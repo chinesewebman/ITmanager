@@ -51,6 +51,7 @@ import { ThemeSwitcher } from "./components/ThemeSwitcher";
 import { CommandPalette } from "./components/CommandPalette";
 import { useThemeStore } from "./stores";
 import { authApi } from "./services/api";
+import { AUTH_LOGOUT_EVENT, type AuthLogoutDetail } from "./services/authEvents";
 
 const { Header, Sider, Content } = Layout;
 
@@ -78,6 +79,21 @@ function AppLayout() {
       setUserInfo(JSON.parse(userStr));
     }
   }, []);
+
+  // P1-审计: 监听 axios 401 触发的全局登出事件
+  // 不用 window.location.href（丢路由 state + 滚动位置）
+  // 改用 React Router navigate 保留跳转
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<AuthLogoutDetail>).detail ?? {}
+      // 已经在 /login 不重复跳转
+      if (location.pathname === "/login") return
+      // state.from 传给 Login 页，登录后跳回原页面
+      navigate("/login", { state: { from: detail.pathname ?? location.pathname } })
+    }
+    window.addEventListener(AUTH_LOGOUT_EVENT, handler)
+    return () => window.removeEventListener(AUTH_LOGOUT_EVENT, handler)
+  }, [navigate, location.pathname])
 
   const menuItems = [
     { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },

@@ -5,6 +5,7 @@ import type {
   AlertListParams,
   LoginRequest,
 } from "./apiClient";
+import { dispatchAuthLogout } from "./authEvents";
 
 // 创建 axios 实例（C-F5：用 httpOnly cookie 替代 localStorage 存 token）
 const api: AxiosInstance = axios.create({
@@ -40,9 +41,10 @@ api.interceptors.response.use(
     if (error.response) {
       switch (error.response.status) {
         case 401:
+          // C-F5: cookie 由后端 /api/auth/logout 清；前端通过事件让 Router 跳转
+          // P1-审计: 不用 window.location.href，保留 React Router state (from URL)
           message.error("登录已过期，请重新登录");
-          // C-F5: cookie 由后端 /api/auth/logout 清；前端仅跳转
-          window.location.href = "/login";
+          dispatchAuthLogout({ reason: "401" });
           break;
         case 403:
           message.error("没有权限访问");

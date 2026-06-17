@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -230,27 +231,37 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 	return len(toUpsert), nil
 }
 
-// SyncAll 同步所有数据（C-P7：每个调用都有 ctx 透传，整体 timeout 兜底）。
+// SyncAll 同步所有数据（P1-审计：返回 errors.Join 合并所有失败，不再静默吞错）
+//   - 行为变更：v1.0.3 之前只 log，现在返回合并 error 给调用方
+//   - 调用方 SyncFromNetBox/Zabbix/GLPI 任一失败都会被记到 errors.Join
+//   - 成功的同步条目数仍写到 results map
 func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error) {
 	results := make(map[string]int)
+	var errs []error
 
 	if n, err := s.SyncFromNetBox(ctx); err != nil {
 		log.Printf("NetBox 同步失败: %v", err)
+		errs = append(errs, fmt.Errorf("netbox: %w", err))
 	} else {
 		results["netbox"] = n
 	}
 
 	if n, err := s.SyncFromZabbix(ctx); err != nil {
 		log.Printf("Zabbix 同步失败: %v", err)
+		errs = append(errs, fmt.Errorf("zabbix: %w", err))
 	} else {
 		results["zabbix"] = n
 	}
 
 	if n, err := s.SyncFromGLPI(ctx); err != nil {
 		log.Printf("GLPI 同步失败: %v", err)
+		errs = append(errs, fmt.Errorf("glpi: %w", err))
 	} else {
 		results["glpi"] = n
 	}
 
+	if len(errs) > 0 {
+		return results, errors.Join(errs...)
+	}
 	return results, nil
 }

@@ -55,19 +55,50 @@ type NetBoxDevice struct {
 	Comments     string `json:"comments"`
 }
 
-// SyncDevices C-P7：ctx 透传。
+// NetBoxPagination NetBox API 分页响应
+type NetBoxPagination struct {
+	Count    int `json:"count"`
+	Next     any `json:"next"`
+	Previous any `json:"previous"`
+}
+
+// SyncDevices C-P7：ctx 透传。P1-审计：分页循环直到拉完（NetBox 默认 page_size=50）
 func (c *NetBoxClient) SyncDevices(ctx context.Context) ([]NetBoxDevice, error) {
-	body, _, err := c.c.Do(ctx, "GET", "/api/dcim/devices/", nil)
-	if err != nil {
-		return nil, fmt.Errorf("NetBox SyncDevices: %w", err)
+	const pageSize = 100 // 单页 100 条，平衡 QPS 和 DB 写放大
+	var all []NetBoxDevice
+	offset := 0
+
+	for {
+		// NetBox 分页参数: ?limit=N&offset=N
+		path := fmt.Sprintf("/api/dcim/devices/?limit=%d&offset=%d", pageSize, offset)
+		body, _, err := c.c.Do(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("NetBox SyncDevices (offset=%d): %w", offset, err)
+		}
+		var result struct {
+			Count   int            `json:"count"`
+			Next    string         `json:"next"`
+			Results []NetBoxDevice `json:"results"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("NetBox 解析失败 (offset=%d): %w", offset, err)
+		}
+
+		all = append(all, result.Results...)
+
+		// 终止条件：当前页不足 pageSize 或累计达 count
+		if len(result.Results) < pageSize || len(all) >= result.Count {
+			break
+		}
+		offset += pageSize
+
+		// 安全护栏：避免死循环（NetBox 异常返回）
+		if offset > 100000 {
+			return nil, fmt.Errorf("NetBox 分页异常：offset=%d > 100000", offset)
+		}
 	}
-	var result struct {
-		Results []NetBoxDevice `json:"results"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("NetBox 解析失败: %w", err)
-	}
-	return result.Results, nil
+
+	return all, nil
 }
 
 // NetBoxAsset 将 NetBox 设备转换为资产

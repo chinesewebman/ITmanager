@@ -160,8 +160,10 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 		}
 	}
 
-	// Update last used time
-	database.DB.Model(&key).Update("last_used_at", time.Now())
+	// Update last used time (P1-审计: 异步批量写，避免每次 API key 调用都同步写 DB)
+	// 写放大问题：高 QPS API key 调用会产生 N 次 UPDATE，拖慢主请求路径
+	// 改用 in-memory buffer + background flush（30s 间隔或 100 条阈值）
+	apiKeyTracker.Track(key.ID)
 
 	// Get user info
 	var user models.User
