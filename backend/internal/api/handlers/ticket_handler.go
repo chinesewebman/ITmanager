@@ -6,10 +6,12 @@ import (
 	"strconv"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/cursor"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // TicketHandler 工单 HTTP handler
@@ -25,25 +27,40 @@ func (h *TicketHandler) ListTickets(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 
-	items, total, err := h.svc.List(c.Request.Context(), service.TicketFilter{
+	filter := service.TicketFilter{
 		Status:   c.Query("status"),
 		Priority: c.Query("priority"),
 		Page:     page,
 		PageSize: pageSize,
-	})
+	}
+	// v2.0 cursor 分页: 优先级高于 page/size
+	if cursorStr := c.Query("cursor"); cursorStr != "" {
+		ts, id, err := cursor.Decode(cursorStr)
+		if err == nil {
+			filter.CursorTS = ts
+			filter.CursorID = id
+			filter.Page = 0     // cursor 模式不跑 offset
+			filter.PageSize = 0 // 强制走 default 20
+		}
+	}
+
+	items, total, err := h.svc.List(c.Request.Context(), filter)
 	if err != nil {
 		apierr.Internal(c, "获取工单列表失败", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"items": items,
-			"total": total,
-			"page":  page,
-			"size":  pageSize,
-		},
-	})
+	resp := gin.H{
+		"items": items,
+		"total": total,
+		"page":  page,
+		"size":  pageSize,
+	}
+	// v2.0: cursor 模式返 next_cursor
+	if filter.CursorID != uuid.Nil && len(items) > 0 {
+		last := items[len(items)-1]
+		resp["next_cursor"] = cursor.Encode(last.CreatedAt, last.ID)
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": resp})
 }
 
 func (h *TicketHandler) GetTicket(c *gin.Context) {

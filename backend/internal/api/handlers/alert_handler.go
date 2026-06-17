@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/cursor"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
@@ -23,29 +24,44 @@ func NewAlertHandler(svc service.AlertService) *AlertHandler {
 	return &AlertHandler{svc: svc}
 }
 
-// ListAlerts 告警列表（带统计）
+// ListAlerts 告警列表（带统计, v2.0 支持 cursor 分页）
 func (h *AlertHandler) ListAlerts(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 	severity, _ := strconv.Atoi(c.DefaultQuery("severity", "0")) // 🐛 BUG#13: severity 改 int
 
-	items, stats, err := h.svc.List(c.Request.Context(), service.AlertFilter{
+	filter := service.AlertFilter{
 		Status:   c.Query("status"),
 		Severity: severity,
 		HostID:   c.Query("host_id"),
 		Limit:    limit,
-	})
+	}
+	// v2.0 cursor 分页: ?cursor=xxx (从 response.next_cursor 拿)
+	if cursorStr := c.Query("cursor"); cursorStr != "" {
+		ts, id, err := cursor.Decode(cursorStr)
+		if err == nil {
+			filter.CursorTS = ts
+			filter.CursorID = id
+		}
+		// err 时降级到 v1.x 行为 (忽略 cursor)
+	}
+
+	items, stats, err := h.svc.List(c.Request.Context(), filter)
 	if err != nil {
 		apierr.Internal(c, "获取告警列表失败", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"items": items,
-			"stats": stats,
-		},
-	})
+	resp := gin.H{
+		"items": items,
+		"stats": stats,
+	}
+	// v2.0: 返 next_cursor (用最后一条 item 的 created_at + id)
+	if len(items) == limit && !items[len(items)-1].CreatedAt.IsZero() {
+		last := items[len(items)-1]
+		resp["next_cursor"] = cursor.Encode(last.CreatedAt, last.ID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": resp})
 }
 
 // GetAlert 告警详情

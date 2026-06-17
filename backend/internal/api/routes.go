@@ -141,6 +141,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	rackSvc := service.NewRackService(db)
 	ticketSvc := service.NewTicketService(db)
 	userSvc := service.NewUserService(db)
+	auditSvc := service.NewAuditService(db) // v2.0: 审计日志查询接口
 	dashboardSvc := service.NewDashboardService(db)
 	channelSvc := service.NewChannelService(db)
 	diagnosticSvc := service.NewDiagnosticService(db)
@@ -163,6 +164,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	suppressionH := handlers.NewAlertSuppressionHandler(suppressionSvc)
 	topologyH := handlers.NewTopologyHandler(topologySvc)
 	oncallH := handlers.NewOncallHandler(oncallSvc)
+	auditH := handlers.NewAuditHandler(auditSvc) // v2.0: 审计日志查询
 	runbookH := handlers.NewRunbookHandler(runbookSvc)
 	metricH := handlers.NewMetricSnapshotHandler(metricSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
@@ -189,11 +191,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware())
-		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100))) // v1.4 默认 100 req/min per IP+path
+		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100)))      // v1.4 默认 100 req/min per IP+path
 		protected.Use(middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()})) // v1.4 审计日志
 		{
 			protected.POST("/integrations/sync", integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
+
+			// v2.0: 审计日志查询端点
+			protected.GET("/audit-logs", auditH.ListAuditLogs)
 
 			assets := protected.Group("/assets")
 			{

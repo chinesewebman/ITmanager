@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/notification"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -70,13 +72,32 @@ type AlertService interface {
 }
 
 type alertService struct {
-	db *gorm.DB
+	db  *gorm.DB
+	bus eventbus.Bus // v2.0: 可选, nil 时跳过 Publish (兼容老测试)
 }
 
+// NewAlertService 创建 AlertService
 func NewAlertService(db *gorm.DB) AlertService {
 	return &alertService{db: db}
 }
 
+// WithBus 注入事件总线 (v2.0, main.go 启动时调用)
+// bus=nil 时 service 不发事件 (单元测试不依赖 bus)
+func (s *alertService) WithBus(bus eventbus.Bus) {
+	s.bus = bus
+}
+
+// publish 内部辅助: bus 为 nil 时静默跳过
+func (s *alertService) publish(topic string, payload any) {
+	if s.bus == nil {
+		return
+	}
+	if err := s.bus.Publish(topic, payload); err != nil {
+		// Publish 失败不应阻塞主业务, 只 log
+		// (用 slog 后续可注入, 现在 fmt 占位)
+		_ = err
+	}
+}
 func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert, AlertStats, error) {
 	q := s.db.WithContext(ctx).Model(&models.Alert{})
 
@@ -211,6 +232,15 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 	}).Error; err != nil {
 		return err
 	}
+	// v2.0: 发 alert.resolved 事件给 event bus (通知 worker subscriber)
+	s.publish(eventbus.TopicAlertResolved, notification.AlertEventPayload{
+		AlertID:   alert.ID.String(),
+		HostName:  alert.HostName,
+		Severity:  alert.Severity,
+		Trigger:   alert.TriggerName,
+		Status:    "resolved",
+		EventType: "resolved",
+	})
 	return s.writeNotificationTrigger(ctx, alert.ID, "resolved", userID)
 }
 
