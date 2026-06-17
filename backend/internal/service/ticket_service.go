@@ -7,6 +7,7 @@ import (
 
 	"network-monitor-platform/internal/models"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -16,6 +17,10 @@ type TicketFilter struct {
 	Priority string
 	Page     int
 	PageSize int
+	// v2.0 cursor 分页: 非空时走 (created_at, id) 二元组 < 翻页, O(log N)
+	// 为空时走 v1.x 行为 (Page/PageSize offset 翻页)
+	CursorTS time.Time
+	CursorID uuid.UUID
 }
 
 // TicketService 工单业务接口
@@ -58,8 +63,18 @@ func (s *ticketService) List(ctx context.Context, f TicketFilter) ([]models.Tick
 		pageSize = 500
 	}
 	var items []models.Ticket
-	if err := q.Offset((page - 1) * pageSize).Limit(pageSize).
-		Order("created_at DESC").Find(&items).Error; err != nil {
+	q = q.Order("created_at DESC, id DESC") // v2.0 cursor: 二元组排序
+	// v2.0 cursor 分页: 二元组 < 走联合索引, O(log N)
+	if !f.CursorTS.IsZero() && f.CursorID != uuid.Nil {
+		q = q.Where("(created_at, id) < (?, ?)", f.CursorTS, f.CursorID)
+		// cursor 模式不跑 Count (cursor 翻页用 hasMore 检测)
+		if err := q.Limit(pageSize).Find(&items).Error; err != nil {
+			return nil, 0, err
+		}
+		return items, 0, nil
+	}
+	// v1.x 兼容: page/size offset 翻页
+	if err := q.Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil

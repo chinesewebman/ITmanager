@@ -20,6 +20,10 @@ type AlertFilter struct {
 	HostID          string
 	IsFalsePositive *bool // 小改进 #2：nil=全部 true=仅误报 false=仅非误报
 	Limit           int
+	// v2.0 cursor 分页: 非空时, 返回 (created_at, id) < (CursorTS, CursorID) 的记录
+	// 为空时走 v1.x 行为 (Limit only, no offset)
+	CursorTS time.Time
+	CursorID uuid.UUID
 }
 
 // AlertStats 告警统计聚合结果
@@ -103,7 +107,12 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 	}
 
 	var items []models.Alert
-	if err := q.Order("created_at DESC").Limit(limit).Find(&items).Error; err != nil {
+	q = q.Order("created_at DESC, id DESC") // v2.0 cursor: 二元组排序
+	// v2.0 cursor 分页: 二元组 < (ts, id) 走 (created_at, id) 联合索引, O(log N)
+	if !f.CursorTS.IsZero() && f.CursorID != uuid.Nil {
+		q = q.Where("(created_at, id) < (?, ?)", f.CursorTS, f.CursorID)
+	}
+	if err := q.Limit(limit).Find(&items).Error; err != nil {
 		return nil, AlertStats{}, err
 	}
 
