@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package alert.v1;
+
+option go_package = "network-monitor-platform/api/proto/alert/v1;alertv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Alert severity (mirrors internal/model)
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO        = 1;
+  SEVERITY_WARNING     = 2;
+  SEVERITY_ERROR       = 3;
+  SEVERITY_CRITICAL    = 4;
+}
+
+enum AlertStatus {
+  ALERT_STATUS_UNSPECIFIED = 0;
+  ALERT_STATUS_PENDING     = 1;
+  ALERT_STATUS_ACKED       = 2;
+  ALERT_STATUS_RESOLVED    = 3;
+}
+
+message Alert {
+  string   id                  = 1;
+  string   source              = 2;  // host, network, service
+  string   source_id           = 3;
+  Severity severity            = 4;
+  AlertStatus status           = 5;
+  string   title               = 6;
+  string   description         = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp resolved_at = 9;
+  string   resolved_by         = 10;
+  string   rule_id             = 11;
+  map<string, string> labels   = 12;
+}
+
+message ListAlertsRequest {
+  // 游标分页 (v2.0+): cursor 来自上次的 next_cursor
+  string cursor = 1;
+  uint32 limit  = 2;  // 默认 50, 上限 200
+  // 老接口兼容 (v1.x): page/size 二选一
+  uint32 page = 3;
+  uint32 size = 4;
+  // 过滤
+  Severity min_severity = 5;
+  AlertStatus status    = 6;
+  string source         = 7;
+}
+
+message ListAlertsResponse {
+  repeated Alert alerts      = 1;
+  string next_cursor         = 2;
+  uint32 total               = 3;  // 当前页条目数
+}
+
+message GetAlertRequest {
+  string id = 1;
+}
+
+message AckAlertRequest {
+  string id      = 1;
+  string user_id = 2;
+  string note    = 3;
+}
+
+message ResolveAlertRequest {
+  string id      = 1;
+  string user_id = 2;
+  string note    = 3;
+}
+
+message ResolveAlertResponse {
+  Alert alert = 1;
+}
+
+service AlertService {
+  // List 游标或 page 二选一. 返 next_cursor (有下一页) 或 "" (最后一页)
+  rpc ListAlerts(ListAlertsRequest) returns (ListAlertsResponse);
+  rpc GetAlert(GetAlertRequest) returns (Alert);
+  rpc AckAlert(AckAlertRequest) returns (Alert);
+  rpc ResolveAlert(ResolveAlertRequest) returns (ResolveAlertResponse);
+}

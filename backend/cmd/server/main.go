@@ -17,6 +17,7 @@ import (
 	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/notification"
+	"network-monitor-platform/internal/service"
 	"network-monitor-platform/pkg/logger"
 )
 
@@ -52,6 +53,15 @@ func main() {
 	notifWorker.Start(context.Background())
 	defer notifWorker.Stop()
 	logger.Info("📨 通知 worker 已启动 (5s tick)")
+
+	// v2.0.1: 启动 gRPC server (端口 50051, AlertService 内部 s2s)
+	alertSvc := service.NewAlertService(db)
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "50051"
+	}
+	go startGRPCServer(grpcPort, alertSvc)
+	logger.Infof("🔌 gRPC server 已启动", "port", grpcPort)
 
 	// v2.0: 启动事件总线 (in-process pub/sub) + 通知 subscriber
 	bus := eventbus.New(db, eventbus.Config{
