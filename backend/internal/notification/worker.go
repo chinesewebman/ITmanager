@@ -2,10 +2,12 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
 
+	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/models"
 
 	"github.com/google/uuid"
@@ -82,7 +84,113 @@ func (w *Worker) Stop() {
 	w.wg.Wait()
 }
 
-// tickOnce 单次拉 pending, 逐条发送
+// SubscribeToBus 把 Worker 注册为事件总线 subscriber (v2.0)
+// 处理 alert.created / alert.resolved 事件, 同步调通知 channel 真发
+// (保留老 tick 路径处理 notification_logs, 双轨并行)
+func (w *Worker) SubscribeToBus(bus eventbus.Bus) error {
+	if err := bus.Subscribe(eventbus.TopicAlertCreated, w.handleAlertEvent); err != nil {
+		return err
+	}
+	if err := bus.Subscribe(eventbus.TopicAlertResolved, w.handleAlertEvent); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AlertEventPayload 事件 payload (alert.created/resolved)
+// service 层 publish 时序列化此结构
+type AlertEventPayload struct {
+	AlertID   string `json:"alert_id"`
+	HostName  string `json:"host_name"`
+	Severity  int    `json:"severity"`
+	Trigger   string `json:"trigger"`
+	Status    string `json:"status"` // "problem" 或 "resolved"
+	EventType string `json:"event_type"` // "created" 或 "resolved"
+}
+
+// handleAlertEvent 处理 alert 事件, 真发通知
+func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
+	var p AlertEventPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return err // 返 err → bus 自动重试 → DLQ
+	}
+	// 加载所有启用的 channel
+	var channels []models.NotificationChannel
+	if err := w.db.WithContext(ctx).Where("is_enabled = ?", true).Find(&channels).Error; err != nil {
+		return err
+	}
+	if len(channels) == 0 {
+		return nil // 没 channel 配, 不算错
+	}
+	// 构造消息内容
+	verb := "告警"
+	if p.EventType == "resolved" {
+		verb = "告警恢复"
+	}
+	content := "[ITmanager " + verb + "] " + p.Trigger +
+		"\n主机: " + p.HostName +
+		"\n级别: " + severityName(p.Severity) +
+		"\n时间: " + time.Now().Format("2006-01-02 15:04:05")
+
+	// 逐 channel 发 (无中间表, 失败返 err → 重试 → DLQ)
+	for i := range channels {
+		ch := &channels[i]
+		// 从 Config JSON 解析 recipient (webhook URL / email / chat_id)
+		recipient, _ := recipientFromConfig(ch.Config, ch.Type)
+		if recipient == "" {
+			log.Printf("[notification subscriber] channel %s: no recipient in config", ch.Name)
+			continue
+		}
+		sender, err := w.resolver(ch)
+		if err != nil {
+			log.Printf("[notification subscriber] resolver err for channel %s: %v", ch.Name, err)
+			continue
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = sender.Send(sendCtx, recipient, content)
+		cancel()
+		if err != nil {
+			log.Printf("[notification subscriber] send err for channel %s: %v", ch.Name, err)
+		}
+	}
+	return nil
+}
+
+// recipientFromConfig 从 channel.Config JSON 提取 recipient
+// 各种渠道字段不统一, 这里取常用的几个 key
+func recipientFromConfig(configJSON, channelType string) (string, error) {
+	if configJSON == "" {
+		return "", nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return "", err
+	}
+	// 优先 keys
+	for _, key := range []string{"recipient", "webhook_url", "url", "to", "email", "chat_id"} {
+		if v, ok := cfg[key].(string); ok && v != "" {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+func severityName(sev int) string {
+	switch sev {
+	case 5:
+		return "灾难"
+	case 4:
+		return "高"
+	case 3:
+		return "中"
+	case 2:
+		return "低"
+	case 1:
+		return "信息"
+	default:
+		return "未知"
+	}
+}
 func (w *Worker) tickOnce(ctx context.Context) error {
 	var logs []models.NotificationLog
 	if err := w.db.WithContext(ctx).
