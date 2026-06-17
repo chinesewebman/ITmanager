@@ -1,17 +1,64 @@
 // Assets page smoke test
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import Assets from './Assets'
 
 const mockAssets = [
   { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
   { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.11', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
+  { id: '3', name: 'no-ip-asset', asset_type: 'server', ip_address: '', status: 'active', site_name: '机房A', rack_name: 'Rack-03' },
 ]
 
 vi.mock('../hooks/useApiQuery', () => ({
   useApiQuery: () => ({ data: mockAssets, isLoading: false, refetch: vi.fn() }),
   useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
   queryKeys: { assets: { list: () => ['assets', 'list'] } },
+}))
+
+// mock diagnosticApi（ping/traceroute）
+const mockPing = vi.fn().mockResolvedValue({
+  data: {
+    code: 0,
+    data: {
+      host: '192.168.1.10',
+      count: 4,
+      transmitted: 4,
+      received: 4,
+      loss_percent: 0,
+      min_ms: 0.1,
+      avg_ms: 0.2,
+      max_ms: 0.3,
+      stddev_ms: 0.05,
+      duration_ms: 2100,
+    },
+  },
+})
+const mockTrace = vi.fn().mockResolvedValue({
+  data: {
+    code: 0,
+    data: {
+      host: '192.168.1.10',
+      max_hops: 20,
+      reached: true,
+      duration_ms: 3000,
+      hops: [
+        { hop: 1, host: 'gateway', ip: '192.168.1.1', rtts: ['1ms', '2ms', '1ms'], lossed: false },
+      ],
+    },
+  },
+})
+
+vi.mock('../services/api', () => ({
+  assetApi: {
+    list: () => Promise.resolve({ data: { data: { items: [] } } }),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+  },
+  diagnosticApi: {
+    ping: (...args: any[]) => mockPing(...args),
+    traceroute: (...args: any[]) => mockTrace(...args),
+  },
 }))
 
 describe('Assets page', () => {
@@ -27,5 +74,31 @@ describe('Assets page', () => {
 
   it('不 crash 渲染', () => {
     expect(() => render(<Assets />)).not.toThrow()
+  })
+
+  it('每行显示 Ping/Trace 按钮', () => {
+    render(<Assets />)
+    const pings = screen.getAllByText('Ping')
+    const traces = screen.getAllByText('Trace')
+    // 2 个有 IP 的资产都应该有按钮
+    expect(pings.length).toBeGreaterThanOrEqual(2)
+    expect(traces.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('点击 Ping 按钮触发诊断 modal 并调用 API', async () => {
+    mockPing.mockClear()
+    render(<Assets />)
+    const pings = screen.getAllByText('Ping')
+    fireEvent.click(pings[0])
+
+    await waitFor(() => {
+      expect(mockPing).toHaveBeenCalledWith('192.168.1.10', 4)
+    })
+    // modal 标题
+    expect(screen.getByText(/Ping 探活/)).toBeTruthy()
+    // 结果展示
+    await waitFor(() => {
+      expect(screen.getByText(/min 0.1 ms/)).toBeTruthy()
+    })
   })
 })

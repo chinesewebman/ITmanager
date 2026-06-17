@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"network-monitor-platform/internal/diagnostic"
 	"network-monitor-platform/internal/models"
 
 	"github.com/google/uuid"
@@ -317,6 +318,61 @@ func (s *DiagnosticService) summary(ctx context.Context, assetID uuid.UUID, star
 	}
 
 	return summary, nil
+}
+
+// PingAsset 探测资产可达性（调用系统 ping）
+//
+// 责任：
+//   - 校验参数（host 合法性、count 上限）
+//   - 调用 internal/diagnostic.Ping 执行
+//   - ctx 透传：调用方超时即取消
+//
+// 返回：
+//   - ErrInvalidInput 当 host 非法或 count 越界（已包 errors.Is）
+//   - 非 nil error 当 ping 执行失败
+func (s *DiagnosticService) PingAsset(ctx context.Context, host string, count int) (*diagnostic.PingResult, error) {
+	if count <= 0 {
+		count = 4
+	}
+	if count > diagnostic.MaxPingCount {
+		return nil, fmt.Errorf("%w: count 上限 %d", ErrInvalidInput, diagnostic.MaxPingCount)
+	}
+	res, err := diagnostic.Ping(ctx, host, count)
+	if err != nil {
+		// 把 host 非法/参数越界 wrap 到 service 层，让 handler 用 errors.Is 判别
+		if errors.Is(err, diagnostic.ErrInvalidHost) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		return nil, err
+	}
+	return res, nil
+}
+
+// TracerouteAsset 跟踪资产网络路径（调用系统 traceroute）
+//
+// 责任：
+//   - 校验参数（host 合法性、maxHops 上限）
+//   - 调用 internal/diagnostic.Traceroute 执行
+//   - ctx 透传
+//
+// 返回：
+//   - ErrInvalidInput 当 host 非法或 maxHops 越界
+//   - 非 nil error 当 traceroute 执行失败
+func (s *DiagnosticService) TracerouteAsset(ctx context.Context, host string, maxHops int) (*diagnostic.TracerouteResult, error) {
+	if maxHops <= 0 {
+		maxHops = 30
+	}
+	if maxHops > diagnostic.MaxTracerouteHops {
+		return nil, fmt.Errorf("%w: maxHops 上限 %d", ErrInvalidInput, diagnostic.MaxTracerouteHops)
+	}
+	res, err := diagnostic.Traceroute(ctx, host, maxHops)
+	if err != nil {
+		if errors.Is(err, diagnostic.ErrInvalidHost) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 // severityDesc 构造告警 sub_title 兼容 severity 名字缺失场景

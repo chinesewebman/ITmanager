@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,8 @@ func setupDiagRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	h := NewDiagnosticHandler(svc)
 	r := gin.New()
 	r.GET("/api/v1/diagnostics/assets/:id/timeline", h.GetAssetTimeline)
+	r.GET("/api/v1/diagnostics/ping", h.PingAsset)
+	r.GET("/api/v1/diagnostics/traceroute", h.TracerouteAsset)
 	return r, db
 }
 
@@ -191,4 +194,79 @@ func TestDiagnosticHandler_返回内容是JSON(t *testing.T) {
 	if !strings.HasPrefix(ct, "application/json") && ct != "" {
 		t.Errorf("expected application/json, got %q", ct)
 	}
+}
+
+// ==================== PingAsset handler 测试 ====================
+
+func TestDiagnosticHandler_PingAsset_缺host(t *testing.T) {
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/ping", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "host 必传")
+}
+
+func TestDiagnosticHandler_PingAsset_count非法(t *testing.T) {
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/ping?host=127.0.0.1&count=abc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "count 必须是正整数")
+}
+
+func TestDiagnosticHandler_PingAsset_host非法字符(t *testing.T) {
+	r, _ := setupDiagRouter(t)
+	// 含分号 → service 拒绝
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/ping?host=host%3Bbad&count=2", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDiagnosticHandler_PingAsset_成功(t *testing.T) {
+	if _, err := exec.LookPath("ping"); err != nil {
+		t.Skip("ping binary not available")
+	}
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/ping?host=127.0.0.1&count=2", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"transmitted":`, "应包含 transmitted 字段")
+	assert.Contains(t, body, `"received":`, "应包含 received 字段")
+}
+
+// ==================== TracerouteAsset handler 测试 ====================
+
+func TestDiagnosticHandler_TracerouteAsset_缺host(t *testing.T) {
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/traceroute", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "host 必传")
+}
+
+func TestDiagnosticHandler_TracerouteAsset_maxHops非法(t *testing.T) {
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/traceroute?host=127.0.0.1&maxHops=0", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDiagnosticHandler_TracerouteAsset_成功(t *testing.T) {
+	if _, err := exec.LookPath("traceroute"); err != nil {
+		t.Skip("traceroute binary not available")
+	}
+	r, _ := setupDiagRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/diagnostics/traceroute?host=127.0.0.1&maxHops=3", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"hops":`, "应包含 hops 数组")
 }

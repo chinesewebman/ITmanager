@@ -157,3 +157,48 @@ export const notificationApi = {
   deleteChannel: (id: string) => api.delete(`/notification-channels/${id}`),
   testChannel: (id: string) => api.put(`/notification-channels/${id}/test`),
 };
+
+// ==================== 网络诊断 ====================
+// A-1: ICMP ping + traceroute 探活
+
+export interface PingResult {
+  host: string
+  count: number
+  transmitted: number
+  received: number
+  loss_percent: number
+  min_ms?: number
+  avg_ms?: number
+  max_ms?: number
+  stddev_ms?: number
+  duration_ms: number
+  raw_output?: string
+}
+
+export interface TracerouteHop {
+  hop: number
+  host?: string
+  ip?: string
+  rtts?: string[]
+  lossed: boolean
+}
+
+export interface TracerouteResult {
+  host: string
+  max_hops: number
+  reached: boolean
+  duration_ms: number
+  hops: TracerouteHop[]
+  raw_output?: string
+}
+
+export const diagnosticApi = {
+  ping: (host: string, count = 4) =>
+    api.get<{ code: number; data: PingResult }>("/diagnostics/ping", {
+      params: { host, count },
+    }),
+  traceroute: (host: string, maxHops = 30) =>
+    api.get<{ code: number; data: TracerouteResult }>("/diagnostics/traceroute", {
+      params: { host, maxHops },
+    }),
+};

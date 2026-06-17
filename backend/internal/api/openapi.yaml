@@ -808,6 +808,78 @@ paths:
         '404':
           description: 资产不存在
 
+  /diagnostics/ping:
+    get:
+      tags:
+        - 资产诊断
+      summary: 资产 ICMP ping 探活
+      description: |
+        调用系统 ping 工具探测资产 IP 的可达性。
+        count 默认 4，上限 20。响应包含 transmitted/received/loss/min/avg/max ms。
+      operationId: pingAsset
+      parameters:
+        - name: host
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 目标 host（IP 或 hostname）
+        - name: count
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 4
+            maximum: 20
+          description: ping 次数，默认 4，上限 20
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PingResult'
+        '400':
+          description: 请求参数错误
+        '500':
+          description: ping 执行失败
+
+  /diagnostics/traceroute:
+    get:
+      tags:
+        - 资产诊断
+      summary: 资产 traceroute 网络路径
+      description: |
+        调用系统 traceroute 跟踪资产 IP 的网络路径。
+        maxHops 默认 30，上限 64。
+      operationId: tracerouteAsset
+      parameters:
+        - name: host
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 目标 host（IP 或 hostname）
+        - name: maxHops
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            maximum: 64
+          description: 最大跳数，默认 30，上限 64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TracerouteResult'
+        '400':
+          description: 请求参数错误
+        '500':
+          description: traceroute 执行失败
+
   /alert-suppressions:
     get:
       tags:
@@ -1411,6 +1483,64 @@ components:
             $ref: '#/components/schemas/TimelineEvent'
         summary:
           $ref: '#/components/schemas/DiagnosticSummary'
+
+    PingResult:
+      type: object
+      properties:
+        host:
+          type: string
+        count:
+          type: integer
+        transmitted:
+          type: integer
+        received:
+          type: integer
+        loss_percent:
+          type: number
+        min_ms:
+          type: number
+        avg_ms:
+          type: number
+        max_ms:
+          type: number
+        stddev_ms:
+          type: number
+        duration_ms:
+          type: integer
+          format: int64
+
+    TracerouteResult:
+      type: object
+      properties:
+        host:
+          type: string
+        max_hops:
+          type: integer
+        reached:
+          type: boolean
+        duration_ms:
+          type: integer
+          format: int64
+        hops:
+          type: array
+          items:
+            $ref: '#/components/schemas/TracerouteHop'
+
+    TracerouteHop:
+      type: object
+      properties:
+        hop:
+          type: integer
+        host:
+          type: string
+        ip:
+          type: string
+        rtts:
+          type: array
+          items:
+            type: string
+        lossed:
+          type: boolean
 
     # ==================== 告警抑制 ====================
     AlertSuppression:

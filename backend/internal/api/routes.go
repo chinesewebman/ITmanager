@@ -263,10 +263,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				channels.PUT("/:id/test", channelH.TestChannel)
 			}
 
-			// 资产诊断（故障时间线）
+			// 资产诊断（故障时间线 + ping/traceroute 探活）
 			diagnostics := protected.Group("/diagnostics")
 			{
 				diagnostics.GET("/assets/:id/timeline", diagnosticH.GetAssetTimeline)
+				// ping/traceroute 是静态段，无 :id 冲突；放 group 末尾便于阅读
+				diagnostics.GET("/ping", diagnosticH.PingAsset)
+				diagnostics.GET("/traceroute", diagnosticH.TracerouteAsset)
 			}
 
 			// 告警抑制规则（P0-2）

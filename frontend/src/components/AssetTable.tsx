@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Table, Button, Space, Popconfirm, message } from 'antd'
-import { EditOutlined, DeleteOutlined } from '@ant-design/icons'
+import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { assetApi } from '../services/api'
 import { StatusTag } from './StatusTag'
@@ -20,6 +20,7 @@ export interface AssetTableProps {
   loading: boolean
   onEdit: (asset: Asset) => void
   onChanged: () => void
+  onDiagnose?: (asset: Asset, kind: 'ping' | 'traceroute') => void
   rowSelection?: {
     selectedRowKeys: React.Key[]
     onChange: (keys: React.Key[]) => void
@@ -30,7 +31,7 @@ export interface AssetTableProps {
  * AssetTable - 资产列表展示 + 行内编辑/删除。
  * 父组件持有数据状态和表单弹窗状态。
  */
-export function AssetTable({ data, loading, onEdit, onChanged, rowSelection }: AssetTableProps) {
+export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, rowSelection }: AssetTableProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const handleDelete = async (id: string) => {
@@ -68,13 +69,37 @@ export function AssetTable({ data, loading, onEdit, onChanged, rowSelection }: A
     {
       title: '操作',
       key: 'actions',
-      width: 160,
+      width: 280,
       fixed: 'right',
       render: (_, record) => (
         <Space>
           <Button type="link" size="small" icon={<EditOutlined />} onClick={() => onEdit(record)}>
             编辑
           </Button>
+          {onDiagnose && (
+            <>
+              <Button
+                type="link"
+                size="small"
+                icon={<ApiOutlined />}
+                onClick={() => onDiagnose(record, 'ping')}
+                disabled={!record.ip_address}
+                title={!record.ip_address ? '无 IP 地址' : 'Ping 探活'}
+              >
+                Ping
+              </Button>
+              <Button
+                type="link"
+                size="small"
+                icon={<AimOutlined />}
+                onClick={() => onDiagnose(record, 'traceroute')}
+                disabled={!record.ip_address}
+                title={!record.ip_address ? '无 IP 地址' : 'Traceroute 网络路径'}
+              >
+                Trace
+              </Button>
+            </>
+          )}
           <Popconfirm
             title="确认删除该资产？"
             okText="删除"
