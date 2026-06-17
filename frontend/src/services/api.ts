@@ -17,16 +17,6 @@ const api: AxiosInstance = axios.create({
   withCredentials: true, // C-F5: 浏览器自动带上 auth_token cookie
 });
 
-// 请求拦截器（C-F5：删除 localStorage token 读取，全部走 cookie）
-api.interceptors.request.use(
-  (config) => {
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  },
-);
-
 // 响应拦截器 - 统一错误处理
 api.interceptors.response.use(
   (response) => {
