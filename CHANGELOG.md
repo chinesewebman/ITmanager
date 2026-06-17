@@ -2,6 +2,21 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.0.1] - 2026-06-17
+
+🐛 **补丁版** — 一键部署便利性
+
+### 改进
+
+- **Makefile**: 新增 3 个一键部署 target
+  - `make deploy` — install + docker-up + db-migrate + db-seed（含演示数据）
+  - `make deploy-min` — 同上但无种子（生产环境首次部署）
+  - `make deploy-status` — 8 服务健康检查（PG/Redis/API/Web/NetBox/Zabbix/GLPI/Graylog）
+- 私有 `_wait_for_pg` target 轮询 PG 60s（防 migrate 抢跑）
+- 链式依赖自动按序，**任一失败立即停下**
+
+[v1.0.1]: https://github.com/chinesewebman/ITmanager/releases/tag/v1.0.1
+
 ## [v1.0.0] - 2026-06-17
 
 🎉 **首个稳定版本** — 10 个 PR 落地，覆盖 P0-P2 全链路
