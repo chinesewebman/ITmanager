@@ -8,6 +8,7 @@ import { TicketDetailModal } from '../components/TicketDetailModal'
 import { TicketStatsCards } from '../components/TicketStatsCards'
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { useState } from 'react'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const MOCK_TICKETS: Ticket[] = [
   { id: '1', title: '服务器磁盘空间不足', priority: 'high', status: 'open', requester: '张三', assignee: '李四', created_at: '2026-02-14 10:00:00', updated_at: '2026-02-14 11:00:00' },
@@ -26,6 +27,8 @@ function Tickets() {
 
   // C-P9: filter 变化走 queryKey 隔离缓存
   const filters = { status: statusFilter, priority: priorityFilter }
+
+  useDocumentTitle('工单管理')
   const { data, isLoading, refetch } = useApiQuery<Ticket[]>(
     queryKeys.tickets.list(filters),
     async () => {

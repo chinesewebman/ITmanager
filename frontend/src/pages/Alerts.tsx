@@ -1,4 +1,4 @@
-import { Button, Select, Space, message } from "antd";
+import { Button, Modal, Progress, Select, Space, message } from "antd";
 import {
   SyncOutlined,
   CheckOutlined,
@@ -15,6 +15,7 @@ import {
 } from "../components/AlertStatsCards";
 import { useApiMutation, useApiQuery, queryKeys } from "../hooks/useApiQuery";
 import { useState } from "react";
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const MOCK_ALERTS: Alert[] = [
   {
@@ -75,6 +76,8 @@ function Alerts() {
 
   // C-P9: 列表 + stats 合并到 React Query，filter 变化走 queryKey 隔离缓存
   const filters = { status: statusFilter, severity: severityFilter };
+
+  useDocumentTitle('告警中心')
   const { data, isLoading, refetch } = useApiQuery<AlertsResp>(
     queryKeys.alerts.list(filters),
     async () => {
@@ -110,31 +113,58 @@ function Alerts() {
     onError: () => message.error("解决失败"),
   });
 
-  // C-P6: 批量写操作
+  // C-P6: 批量写操作 (v1.3: 改逐条 ack/resolve 以显示 progress modal)
+  const [bulkProgress, setBulkProgress] = useState<{
+    open: boolean
+    kind: "ack" | "resolve"
+    total: number
+    done: number
+    failed: number
+  } | null>(null)
+
+  // 工具: 逐条执行, 实时更新进度
+  async function runBulk(
+    ids: string[],
+    kind: "ack" | "resolve",
+    action: (id: string) => Promise<unknown>,
+  ) {
+    setBulkProgress({ open: true, kind, total: ids.length, done: 0, failed: 0 })
+    let done = 0
+    let failed = 0
+    for (const id of ids) {
+      try {
+        await action(id)
+        done++
+      } catch {
+        failed++
+      }
+      setBulkProgress((p) => (p ? { ...p, done, failed } : null))
+    }
+    setBulkProgress((p) => (p ? { ...p, open: false } : null))
+    const label = kind === "ack" ? "确认" : "解决"
+    message.success(`批量${label}完成: 成功 ${done}, 失败 ${failed}`)
+    setSelectedIds([])
+    refetch()
+  }
+
   const bulkAckMut = useApiMutation(
-    (ids: string[]) =>
-      alertApi.bulkAcknowledge(ids).then((r) => ({ r, count: ids.length })),
+    (ids: string[]) => runBulk(ids, "ack", (id) => alertApi.acknowledge(id)),
     {
-      onSuccess: ({ count }) => {
-        message.success(`已批量确认 ${count} 条告警`);
-        setSelectedIds([]);
-        refetch();
+      onError: () => {
+        setBulkProgress(null)
+        message.error("批量确认失败")
       },
-      onError: () => message.error("批量确认失败"),
     },
-  );
+  )
   const bulkResolveMut = useApiMutation(
-    (ids: string[]) =>
-      alertApi.bulkResolve(ids).then((r) => ({ r, count: ids.length })),
+    (ids: string[]) => runBulk(ids, "resolve", (id) => alertApi.resolve(id)),
     {
-      onSuccess: ({ count }) => {
-        message.success(`已批量解决 ${count} 条告警`);
-        setSelectedIds([]);
-        refetch();
+      onError: () => {
+        setBulkProgress(null)
+        message.error("批量解决失败")
       },
-      onError: () => message.error("批量解决失败"),
     },
-  );
+  )
 
   // 小改进 #2：标记/反标记误报
   const markFPMut = useApiMutation(
@@ -254,6 +284,30 @@ function Alerts() {
         selectedIds={selectedIds}
         onSelectionChange={setSelectedIds}
       />
+
+      {/* v1.3 批量操作进度 modal */}
+      {bulkProgress && (
+        <Modal
+          open={bulkProgress.open}
+          title={bulkProgress.kind === "ack" ? "批量确认告警" : "批量解决告警"}
+          footer={null}
+          closable={false}
+          maskClosable={false}
+        >
+          <Progress
+            percent={Math.round(((bulkProgress.done + bulkProgress.failed) / bulkProgress.total) * 100)}
+            status="active"
+          />
+          <div style={{ marginTop: 12, color: "var(--ant-color-text-secondary)" }}>
+            进度: {bulkProgress.done + bulkProgress.failed} / {bulkProgress.total}
+            {bulkProgress.failed > 0 && (
+              <span style={{ marginLeft: 12, color: "var(--ant-color-error)" }}>
+                失败 {bulkProgress.failed} 条
+              </span>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

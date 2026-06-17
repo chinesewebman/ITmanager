@@ -7,6 +7,8 @@ import {
 import { PlusOutlined, BookOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { EmptyState } from '../components/EmptyState'
+import { SeverityTag } from '../components/SeverityTag'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text, Paragraph } = Typography
 
@@ -55,6 +57,8 @@ async function apiSend<T>(method: string, path: string, body?: any): Promise<T> 
 
 function RunbookList() {
   const [filter, setFilter] = useState<{ asset_type?: string; severity?: number }>({})
+
+  useDocumentTitle('故障 Runbook')
   const [editing, setEditing] = useState<Runbook | null>(null)
   const [creating, setCreating] = useState(false)
   const [viewing, setViewing] = useState<Runbook | null>(null)
@@ -162,7 +166,7 @@ function RunbookList() {
           { title: '类型', dataIndex: 'asset_type', key: 'asset_type', width: 100,
             render: v => <Tag color="blue">{v}</Tag> },
           { title: '严重度', dataIndex: 'severity', key: 'severity', width: 80,
-            render: v => v > 0 ? <Tag color={v >= 4 ? 'red' : 'orange'}>P{v}</Tag> : <Tag>全部</Tag> },
+            render: v => v > 0 ? <SeverityTag severity={v} /> : <Tag>全部</Tag> },
           { title: '标签', dataIndex: 'tags', key: 'tags',
             render: v => v ? v.split(',').map((t: string) => <Tag key={t}>{t}</Tag>) : null },
           { title: '启用', dataIndex: 'enabled', key: 'enabled', width: 80,

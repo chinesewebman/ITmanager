@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Divider } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined } from '@ant-design/icons'
 import { notificationApi } from '../services/api'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface NotificationChannel {
   id: string
@@ -15,6 +16,9 @@ function Settings() {
   const [channels, setChannels] = useState<NotificationChannel[]>([])
   const [loading, setLoading] = useState(false)
   const [channelModal, setChannelModal] = useState<{ open: boolean; data?: NotificationChannel }>({ open: false })
+
+  useDocumentTitle('系统设置')
+
   const [form] = Form.useForm()
 
   const fetchChannels = async () => {

@@ -5,6 +5,7 @@ import {
 } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
 
@@ -51,6 +52,7 @@ async function apiSend<T>(method: string, path: string, body?: any): Promise<T> 
 }
 
 export function Oncall() {
+  useDocumentTitle('值班管理')
   return (
     <Tabs
       items={[

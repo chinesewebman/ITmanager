@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button, Card, Form, Input, InputNumber, Space, Table, Tag, Typography, message } from 'antd'
 import { LineChartOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text, Paragraph } = Typography
 
@@ -37,6 +38,7 @@ export function MetricSnapshotList() {
   const [n, setN] = useState(20)
   const [searchParams, setSearchParams] = useState<{ assetId: string; key: string; n: number } | null>(null)
 
+  useDocumentTitle('指标快照')
   const { data, isLoading, refetch } = useApiQuery(
     ['metric-snapshots', 'latest', searchParams],
     () => {

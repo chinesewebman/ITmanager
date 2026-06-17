@@ -5,6 +5,7 @@ import { RackGrid, type Rack } from '../components/RackGrid'
 import { RackDeviceList, type RackDevice } from '../components/RackDeviceList'
 import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { useState } from 'react'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface Site {
   id: string
@@ -36,9 +37,9 @@ function mockDevices(): RackDevice[] {
 }
 
 function Racks() {
+  useDocumentTitle('机房机柜')
   const [selectedSite, setSelectedSite] = useState<string>('')
   const [selectedRack, setSelectedRack] = useState<Rack | null>(null)
-
   // C-P9: 站点列表用 React Query（极少变化，缓存 5min）
   const { data: sitesData } = useApiQuery<Site[]>(
     queryKeys.racks.all,

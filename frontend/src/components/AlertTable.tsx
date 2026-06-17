@@ -2,6 +2,7 @@ import { Button, Space, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { StatusTag } from "./StatusTag";
 import { EmptyState } from "./EmptyState";
+import { SeverityTag } from "./SeverityTag";
 
 export interface Alert {
   id: string;
@@ -31,14 +32,6 @@ export interface AlertTableProps {
   onSelectionChange?: (ids: string[]) => void;
 }
 
-const SEVERITY_COLOR: Record<number, string> = {
-  5: "red",
-  4: "orange",
-  3: "yellow",
-  2: "blue",
-  1: "default",
-};
-
 export function AlertTable({
   data,
   loading,
@@ -57,11 +50,7 @@ export function AlertTable({
       key: "severity_name",
       width: 80,
       render: (name: string, record: Alert) => (
-        <StatusTag
-          value={String(record.severity)}
-          color={SEVERITY_COLOR[record.severity]}
-          label={name}
-        />
+        <SeverityTag severity={record.severity} label={name} />
       ),
     },
     {

@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CommandPalette } from "./index";
+import { CommandPalette, useCommandPaletteStore } from "./index";
 
 // 共享 QueryClient 实例（避免每个 test 重建）
 const testQueryClient = new QueryClient({
@@ -71,6 +71,8 @@ const renderPalette = () =>
 describe("CommandPalette", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 重置 zustand store (v1.3: open 移到 store, 避免 test 残留)
+    useCommandPaletteStore.setState({ open: false });
   });
 
   it("初始不渲染 modal（Cmd+K 才开）", () => {

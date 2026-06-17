@@ -48,8 +48,9 @@ const MetricSnapshot = lazy(() => import("./pages/MetricSnapshot"));
 import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ThemeSwitcher } from "./components/ThemeSwitcher";
-import { CommandPalette } from "./components/CommandPalette";
+import { CommandPalette, CommandPaletteTrigger } from "./components/CommandPalette";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { AppBreadcrumb } from "./components/AppBreadcrumb";
 import { useThemeStore } from "./stores";
 import { authApi } from "./services/api";
 import { AUTH_LOGOUT_EVENT, type AuthLogoutDetail } from "./services/authEvents";
@@ -193,6 +194,7 @@ function AppLayout() {
             gap: 12,
           }}
         >
+          <CommandPaletteTrigger />
           <ThemeSwitcher />
           <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
             <Space style={{ cursor: "pointer" }}>
@@ -212,6 +214,7 @@ function AppLayout() {
               borderRadius: borderRadiusLG,
             }}
           >
+            <AppBreadcrumb />
             <Suspense
               fallback={<LoadingSkeleton variant="table" rows={6} />}
             >

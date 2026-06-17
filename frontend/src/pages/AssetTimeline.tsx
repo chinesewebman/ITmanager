@@ -15,6 +15,7 @@ import { useParams, Link } from 'react-router-dom'
 import { Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tag, Timeline, Typography } from 'antd'
 import { ClockCircleOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
 
@@ -139,6 +140,8 @@ interface TimelineResponse {
 
 export function AssetTimeline() {
   const { id } = useParams<{ id: string }>()
+
+  useDocumentTitle('资产诊断')
   const [days] = useState(30)
 
   const { data, isLoading } = useApiQuery<TimelineResponse>(

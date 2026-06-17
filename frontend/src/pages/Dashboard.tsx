@@ -5,6 +5,7 @@ import { DashboardCards, type DashboardCardsStats } from '../components/Dashboar
 import { AlertTrendChart, type AlertTrend } from '../components/AlertTrendChart'
 import { KpiCards, type KPI } from '../components/KpiCards'
 import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const MOCK_STATS: DashboardCardsStats = {
   assets: 156,
@@ -41,6 +42,7 @@ const MOCK_RECENT: RecentAlert[] = [
 ]
 
 function Dashboard() {
+  useDocumentTitle('仪表盘')
   // C-P9: stats + trends 走 React Query（1min 缓存）
   const { data: stats } = useApiQuery<DashboardCardsStats>(
     queryKeys.dashboard.stats(),

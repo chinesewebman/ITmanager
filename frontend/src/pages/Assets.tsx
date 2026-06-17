@@ -4,9 +4,11 @@ import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
 import { AssetFormModal, type AssetFormValues } from '../components/AssetFormModal'
+import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
 import { PageHeader } from '../components/PageHeader'
 import { useState, useMemo } from 'react'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // 资产类型筛选项
 const TYPE_OPTIONS = [
@@ -30,6 +32,9 @@ function Assets() {
   const [editing, setEditing] = useState<Asset | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [filter, setFilter] = useState({ keyword: '', assetType: '' })
+
+  useDocumentTitle('资产管理')
+  const { isMobile } = useResponsiveTable()
   // 诊断 modal 状态
   const [diagOpen, setDiagOpen] = useState(false)
   const [diagAsset, setDiagAsset] = useState<Asset | null>(null)
@@ -190,14 +195,36 @@ function Assets() {
       <div style={{ marginBottom: 16 }}>
         <AssetFilterBar value={filter} onChange={setFilter} typeOptions={TYPE_OPTIONS} />
       </div>
-      <AssetTable
-        data={filtered}
-        loading={isLoading}
-        onEdit={handleEdit}
-        onChanged={() => refetch()}
-        onDiagnose={handleDiagnose}
-        onPostmortem={handlePostmortem}
-      />
+      {isMobile ? (
+        <MobileCardList
+          data={filtered}
+          loading={isLoading}
+          renderCard={(asset: Asset) => (
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 16 }}>{asset.name}</div>
+              <div style={{ color: 'var(--ant-color-text-secondary)', fontSize: 12, marginTop: 4 }}>
+                {asset.asset_type} · {asset.ip_address}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <Tag color={asset.status === 'active' ? 'green' : 'red'}>
+                  {asset.status === 'active' ? '在线' : '离线'}
+                </Tag>
+                {asset.site_name && <Tag>{asset.site_name}</Tag>}
+                {asset.rack_name && <Tag>{asset.rack_name}</Tag>}
+              </div>
+            </div>
+          )}
+        />
+      ) : (
+        <AssetTable
+          data={filtered}
+          loading={isLoading}
+          onEdit={handleEdit}
+          onChanged={() => refetch()}
+          onDiagnose={handleDiagnose}
+          onPostmortem={handlePostmortem}
+        />
+      )}
       <AssetFormModal
         open={modalOpen}
         editing={editing}

@@ -37,8 +37,9 @@ describe('Runbook', () => {
   it('显示资产类型 tag + 严重度 tag', () => {
     render(<MemoryRouter><RunbookList /></MemoryRouter>)
     expect(screen.getAllByText('server').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('P4').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('P5').length).toBeGreaterThan(0)
+    // SeverityTag 默认显示 'P4 严重' / 'P5 灾难', 用 regex 匹配
+    expect(screen.getAllByText(/P4/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/P5/).length).toBeGreaterThan(0)
   })
 
   it('推荐面板显示 mock 推荐项', () => {

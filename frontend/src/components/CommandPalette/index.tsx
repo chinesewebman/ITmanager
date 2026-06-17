@@ -1,10 +1,15 @@
+import { create } from "zustand";
 import { useEffect, useMemo, useState } from "react";
 import { Modal, Input, List, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
+import { Button, Tooltip, Typography } from "antd";
+import { SearchOutlined } from "@ant-design/icons";
 import { assetApi, alertApi, ticketApi } from "../../services/api";
 import { useApiQuery, queryKeys } from "../../hooks/useApiQuery";
 import { fuzzySearch } from "./fuzzy";
 import { useGlobalHotkey } from "../../hooks/useGlobalHotkey";
+
+const { Text } = Typography;
 
 // 跨资源搜索项（小改进 #3：Cmd+K 全局搜索）
 // 4 资源：assets / alerts / tickets / runbooks
@@ -50,6 +55,69 @@ const TYPE_LABELS: Record<SearchType, string> = {
 
 const TYPE_PLACEHOLDER = "搜索资产 / 告警 / 工单 (⌘K / Ctrl+K)";
 
+// zustand store: 共享 CommandPalette 开关状态 (Header 按钮和 Modal 共享)
+interface CommandPaletteState {
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  toggle: () => void;
+}
+const useCommandPaletteStore = create<CommandPaletteState>((set) => ({
+  open: false,
+  setOpen: (v) => set({ open: v }),
+  toggle: () => set((s) => ({ open: !s.open })),
+}));
+
+// 暴露给 test 重置用
+export { useCommandPaletteStore };
+
+/** 暴露给 Header 触发按钮 */
+export function useCommandPalette() {
+  return useCommandPaletteStore((s) => ({ open: s.open, setOpen: s.setOpen, toggle: s.toggle }));
+}
+
+/**
+ * Header 触发按钮 (小改进 v1.3: 快捷键提示)
+ *
+ * 设计要点：
+ *   - 显示 "搜索..." 文字 + ⌘K 快捷键提示
+ *   - 触发时调 useCommandPalette 的 toggle
+ *   - 暗色模式边框自动适配
+ */
+export function CommandPaletteTrigger() {
+  const { toggle } = useCommandPalette()
+  return (
+    <Tooltip title="全局搜索 (⌘K / Ctrl+K)">
+      <Button
+        type="default"
+        icon={<SearchOutlined />}
+        onClick={toggle}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "0 12px",
+          height: 32,
+        }}
+      >
+        <span style={{ color: "var(--ant-color-text-secondary)" }}>搜索</span>
+        <Text
+          type="secondary"
+          style={{
+            fontSize: 11,
+            padding: "1px 6px",
+            border: "1px solid var(--ant-color-border)",
+            borderRadius: 4,
+            fontFamily: "monospace",
+            lineHeight: 1.4,
+          }}
+        >
+          ⌘K
+        </Text>
+      </Button>
+    </Tooltip>
+  )
+}
+
 /**
  * 全局搜索面板（Cmd+K / Ctrl+K 触发）
  * - 打开时并行 fetch 3 资源列表（asset / alert / ticket），失败时降级为空
@@ -58,16 +126,18 @@ const TYPE_PLACEHOLDER = "搜索资产 / 告警 / 工单 (⌘K / Ctrl+K)";
  * - 选中后跳对应详情页
  */
 export function CommandPalette() {
-  const [open, setOpen] = useState(false);
+  const { open, setOpen } = useCommandPalette();
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const navigate = useNavigate();
 
-  // Cmd/Ctrl+K 打开
+  // Cmd/Ctrl+K 打开 (重复按 toggle)
+  // 注: 从 store 用 getState() 读最新值, 避免 closure 捕获 stale state
   useGlobalHotkey("k", () => {
-    setOpen((v) => !v); // toggle，支持重复按关闭
-    setQuery("");
-    setActiveIdx(0);
+    const cur = useCommandPaletteStore.getState()
+    cur.toggle()
+    setQuery("")
+    setActiveIdx(0)
   });
 
   // Esc 关闭（全局监听，Modal 没暴露 onEsc prop 在 onCancel 里处理）
@@ -78,7 +148,7 @@ export function CommandPalette() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, setOpen]);
 
   // 小改进 #3 review 修复：改用 React Query 复用 cache
   // 替代原本"打开时 fetch 3 API"，避免每次 Cmd+K 重复请求

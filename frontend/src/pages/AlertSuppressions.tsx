@@ -7,6 +7,7 @@ import {
 import { PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { EmptyState } from '../components/EmptyState'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
 
@@ -66,6 +67,7 @@ export function AlertSuppressions() {
   const [previewResult, setPreviewResult] = useState<SuppressionMatchResult | null>(null)
   const [previewHost, setPreviewHost] = useState({ severity: 3, host_id: '', host_name: '' })
 
+  useDocumentTitle('告警抑制')
   // mock 优先：网络断也展示
   const { data: rules = MOCK_RULES, refetch } = useApiQuery<AlertSuppression[]>(
     ['alert-suppressions'] as const,

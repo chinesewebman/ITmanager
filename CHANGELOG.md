@@ -2,6 +2,45 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.3.0] - 2026-06-17
+
+🎨 **次版本** — 中优先级 UX 改进 (路由元信息 + 状态展示一致性 + 响应式)
+
+### 新增组件 / Hook
+
+- **`useDocumentTitle`** (`src/hooks/useDocumentTitle.ts`) — 路由级 title 同步
+  - 格式: `document.title = 'ITmanager - {page}'`
+  - 卸载时还原 base, 避免 SPA 切换残留
+  - 12 个 page 接入: 资产管理 / 告警中心 / 工单管理 / 仪表盘 / 故障 Runbook / 值班管理 / 系统设置 / 告警抑制 / 指标快照 / 资产诊断 / 机房机柜 / 网络拓扑
+- **`SeverityTag`** (`src/components/SeverityTag.tsx`) — 严重度统一展示
+  - P0-P5 六档配色 (gray/blue/gold/orange/red/magenta), 圆角 + 图标
+  - AlertTable / Runbook 两处接入, 删除冗余 `SEVERITY_COLOR` map
+- **`AppBreadcrumb`** (`src/components/AppBreadcrumb.tsx`) — 自动面包屑
+  - 解析 `useLocation().pathname` + 路由表生成面包屑
+  - 详情页 `:id` 参数转 `ID: <name>` (读 `useParams` + 资源 cache)
+- **`useResponsiveTable`** (`src/hooks/useResponsiveTable.tsx`) — 响应式断点 hook
+  - 用 AntD `Grid.useBreakpoint` 检 `{ xs }`, mobile (xs) 时表格 → 卡片列表
+  - 配 `MobileCardList` 组件 (Stack + Card, 不引 antd-mobile 15MB 冗余)
+  - 资产页接入, mobile 视口避免横向溢出
+- **`CommandPaletteTrigger`** — Header 触发按钮 (🔍 搜索 ⌘K)
+  - 配合 `useCommandPaletteStore` (zustand) 跨组件共享 open 状态
+  - `useGlobalHotkey` 用 `useCommandPaletteStore.getState()` 防 stale closure
+
+### 改进
+
+- **批量操作进度** — Alerts 的批量 ack/resolve 从单次 API 改逐条 await
+  - 后端 bulk endpoint 不可见进度, 改前端循环可显示 X/Y
+  - 加 `Modal` + `<Progress percent={Math.round(done/total*100)}>` + 失败计数
+  - trade-off: 网络请求 N 倍, N<100 可接受
+- **键盘可达性** — Progress modal `closable={false}` 避免 Esc 中断后台进程
+
+### 测试
+
+- 新增 15 tests: useDocumentTitle 4 / SeverityTag 6 / AppBreadcrumb 5
+- vitest: 128 → **147** PASS (+19)
+- tsc: 0 errors (维持 v1.2.0 成果)
+- backend go test: 621/621 (未动)
+
 ## [v1.2.0] - 2026-06-17
 
 ✨ **次版本** — UI/UX 易用性改进

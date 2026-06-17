@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { Card, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { EmptyState } from '../components/EmptyState'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
 
@@ -69,6 +70,7 @@ function nodeColor(n: TopologyNode): string {
 }
 
 export function Topology() {
+  useDocumentTitle('网络拓扑')
   const [onlyWithAlerts, setOnlyWithAlerts] = useState(false)
 
   const { data, isLoading } = useApiQuery<TopologyGraph>(
