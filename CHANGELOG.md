@@ -2,6 +2,51 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v2.0.1] - 2026-06-17
+
+🔌 **gRPC 内部通信** — AlertService s2s + proto contract
+
+### 新增
+
+- **gRPC server** (`internal/grpcserver/alert_server.go`) — 内部服务间通信
+  - 端口 `:50051` (env `GRPC_PORT` 覆盖)
+  - 启动: `cmd/server/grpc.go` (独立 `startGRPCServer` 函数)
+- **proto 定义** (`api/proto/alert/v1/alert.proto`)
+  - `AlertService` 4 RPC: `ListAlerts` / `GetAlert` / `AckAlert` / `ResolveAlert`
+  - 支持 v2.0 cursor 分页 + v1.x `page/size` 兼容
+  - 完整 Severity / AlertStatus enum (1-4 / pending/acked/resolved)
+- **生成代码**: `alert.pb.go` (771 行) + `alert_grpc.pb.go` (237 行)
+- **模型适配**: `TriggerName/Problem/HostID/HostIP/TriggerID/ResolveTime/ResolveUser` → proto
+- **10 单元测试** (`alert_server_test.go` + `test_helpers_test.go`)
+  - cursor 满页/部分页 + 非法 cursor
+  - severity/status 转换 (int↔enum, string↔enum)
+  - id 必填校验
+
+### 依赖
+
+- `google.golang.org/grpc@v1.81.1` + `google.golang.org/protobuf@v1.36.11`
+- `protoc-gen-go` + `protoc-gen-go-grpc` 安装路径: `~/go/bin/`
+
+### 兼容性
+
+- ✅ 不破坏既有 AlertService interface (gRPC 仅消费)
+- ✅ 不破坏 REST API (gRPC 是新增, 不是替代)
+- ✅ v2.0 cursor / v1.x page 模式同 RPC 内支持
+
+### 客户端使用
+
+```go
+conn, _ := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+client := alertv1.NewAlertServiceClient(conn)
+resp, _ := client.ListAlerts(ctx, &alertv1.ListAlertsRequest{Limit: 50})
+```
+
+### 明确不做 (单机 + 内部)
+
+- ❌ gRPC-gateway (REST 已有, 重复)
+- ❌ TLS/mTLS (单机内部, 127.0.0.1 only)
+- ❌ 反射服务 (生产不暴露)
+
 ## [v2.0.0] - 2026-06-17
 
 🚀 **主版本** — 性能与解耦 (cursor 分页 + event bus)
