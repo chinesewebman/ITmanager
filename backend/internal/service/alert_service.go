@@ -197,6 +197,8 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 
 // BulkAcknowledge C-P6: 批量确认告警（单条 SQL）。
 // affected = 实际改的行数（不含 ID 不存在的）。
+// v1.1: 包在事务里；Updates 单 SQL 本身原子，事务主要是为审计/notification trigger 留扩展点
+// (v1.1 batch 3 会加 notify trigger，会需要和 DB 写入同事务)。
 func (s *alertService) BulkAcknowledge(ctx context.Context, ids []string, userID string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -205,20 +207,30 @@ func (s *alertService) BulkAcknowledge(ctx context.Context, ids []string, userID
 		return 0, ErrTooManyItems
 	}
 	now := time.Now()
-	res := s.db.WithContext(ctx).Model(&models.Alert{}).
-		Where("id IN ?", ids).
-		Updates(map[string]interface{}{
-			"status":   "acknowledged",
-			"ack_time": now,
-			"ack_user": userID,
-		})
-	return res.RowsAffected, res.Error
+	var affected int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.Alert{}).
+			Where("id IN ?", ids).
+			Updates(map[string]interface{}{
+				"status":   "acknowledged",
+				"ack_time": now,
+				"ack_user": userID,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		affected = res.RowsAffected
+		return nil
+	})
+	return affected, err
 }
 
 // BulkResolve C-P6: 批量解决告警（单条 SQL）。
 // 注意：duration 字段需要逐条计算 problem_start 时间差，SQL 无法一行算；
 // 这里走两步：1) 用子查询把 duration 算出来 UPDATE 2) 再批量改 status。
 // 为简化与一致性，直接在 app 层遍历计算（最多 N 行，N 通常 < 1000，可接受）。
+// v1.1: 包在事务里 — select 拿 alerts 与 update 改 status 必须原子，否则高并发下
+// status 改了但 duration 还是旧值。
 func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -227,31 +239,38 @@ func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID str
 		return 0, ErrTooManyItems
 	}
 	now := time.Now()
-
-	// 一次 select 拿所有 alert（避免后续 N+1）
-	var alerts []models.Alert
-	if err := s.db.WithContext(ctx).Where("id IN ?", ids).Find(&alerts).Error; err != nil {
-		return 0, err
-	}
-	if len(alerts) == 0 {
-		return 0, nil
-	}
-
-	// 单条 UPDATE 批量改 status + time（duration 走 0，准确性让位性能）
-	res := s.db.WithContext(ctx).Model(&models.Alert{}).
-		Where("id IN ?", ids).
-		Updates(map[string]interface{}{
-			"status":       "resolved",
-			"resolve_time": now,
-			"resolve_user": userID,
-			"problem_end":  now,
-		})
-	return res.RowsAffected, res.Error
+	var affected int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 一次 select 拿所有 alert（避免后续 N+1）
+		var alerts []models.Alert
+		if err := tx.Where("id IN ?", ids).Find(&alerts).Error; err != nil {
+			return err
+		}
+		if len(alerts) == 0 {
+			return nil
+		}
+		// 单条 UPDATE 批量改 status + time（duration 走 0，准确性让位性能）
+		res := tx.Model(&models.Alert{}).
+			Where("id IN ?", ids).
+			Updates(map[string]interface{}{
+				"status":       "resolved",
+				"resolve_time": now,
+				"resolve_user": userID,
+				"problem_end":  now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		affected = res.RowsAffected
+		return nil
+	})
+	return affected, err
 }
 
 // BulkDelete C-P6: 批量删除（单条 SQL）。
 // 🐛 BUG#17: 加 1000 上限防止单次 IN(?) 把 SQL 撑爆（PG IN 上限 ~32k，
 // 但生产曾出现 200k ids 拖垮 DB）。超限直接 ErrTooManyItems。
+// v1.1: 包在事务里 — 与未来的 audit log 写入同事务。
 func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -259,8 +278,16 @@ func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, err
 	if len(ids) > 1000 {
 		return 0, ErrTooManyItems
 	}
-	res := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&models.Alert{})
-	return res.RowsAffected, res.Error
+	var affected int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("id IN ?", ids).Delete(&models.Alert{})
+		if res.Error != nil {
+			return res.Error
+		}
+		affected = res.RowsAffected
+		return nil
+	})
+	return affected, err
 }
 
 func (s *alertService) Stats(ctx context.Context) ([]SeverityStat, []HourlyStat, error) {

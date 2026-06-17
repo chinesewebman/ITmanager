@@ -18,9 +18,14 @@ type ZabbixClient struct {
 	user     string
 	password string
 
-	mu   sync.Mutex
-	auth string
+	mu        sync.Mutex
+	auth      string
+	expiresAt time.Time // v1.1: auth 过期时间，过期前 60s 自动重登
 }
+
+// zabbixAuthTTL Zabbix session 有效期保守估计为 30 分钟（Zabbix 默认
+// config 里是 1h30m，但加 session 闲置超时可能更短）。60s 提前重登。
+const zabbixAuthTTL = 30 * time.Minute
 
 // NewZabbixClient 创建 Zabbix 客户端。
 func NewZabbixClient(cfg *config.ZabbixConfig, m httpx.MetricsRecorder) *ZabbixClient {
@@ -80,6 +85,7 @@ func (z *ZabbixClient) Login(ctx context.Context) error {
 	}
 	z.mu.Lock()
 	z.auth = result.Result
+	z.expiresAt = time.Now().Add(zabbixAuthTTL)
 	z.mu.Unlock()
 	return nil
 }
@@ -87,7 +93,7 @@ func (z *ZabbixClient) Login(ctx context.Context) error {
 // GetTriggers 获取告警列表（C-P7：ctx 透传）。
 func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 	z.mu.Lock()
-	needLogin := z.auth == ""
+	needLogin := z.auth == "" || time.Now().After(z.expiresAt.Add(-60*time.Second))
 	z.mu.Unlock()
 	if needLogin {
 		if err := z.Login(ctx); err != nil {
@@ -125,6 +131,8 @@ func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 }
 
 // doRequest 走 httpx：自动 retry/熔断/metrics。
+// v1.1: 检测 Zabbix "Session terminated, re-login" (code -10002) 错误，
+// 触发自动重登一次后重试。
 func (z *ZabbixClient) doRequest(ctx context.Context, req ZabbixAPIRequest) ([]byte, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -138,6 +146,29 @@ func (z *ZabbixClient) doRequest(ctx context.Context, req ZabbixAPIRequest) ([]b
 	// 业务错误（HTTP 200 但 result.error）
 	var apiResp ZabbixAPIResponse
 	if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
+		// v1.1: session 过期 (-10002) → 重登一次再重试
+		if apiResp.Error.Code == -10002 {
+			z.mu.Lock()
+			z.auth = ""
+			z.expiresAt = time.Time{}
+			z.mu.Unlock()
+			if err := z.Login(ctx); err != nil {
+				return nil, fmt.Errorf("Zabbix 自动重登失败: %w", err)
+			}
+			// 用新 auth 重试一次
+			req.Auth = z.auth
+			body2, _ := json.Marshal(req)
+			respBody2, _, err := z.c.DoWithHeaders(ctx, "POST", "/api_jsonrpc.php", bytes.NewReader(body2),
+				map[string]string{"Content-Type": "application/json"})
+			if err != nil {
+				return nil, err
+			}
+			var apiResp2 ZabbixAPIResponse
+			if err := json.Unmarshal(respBody2, &apiResp2); err == nil && apiResp2.Error != nil {
+				return nil, fmt.Errorf("Zabbix API 错 %d (重登后): %s", apiResp2.Error.Code, apiResp2.Error.Message)
+			}
+			return respBody2, nil
+		}
 		return nil, fmt.Errorf("Zabbix API 错 %d: %s", apiResp.Error.Code, apiResp.Error.Message)
 	}
 	return respBody, nil
