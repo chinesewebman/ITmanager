@@ -190,6 +190,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware())
 		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100))) // v1.4 默认 100 req/min per IP+path
+		protected.Use(middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()})) // v1.4 审计日志
 		{
 			protected.POST("/integrations/sync", integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
