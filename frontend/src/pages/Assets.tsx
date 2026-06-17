@@ -1,7 +1,7 @@
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { Button, message, Modal, Table, Tag } from 'antd'
 import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
-import { assetApi, diagnosticApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
+import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
 import { AssetFormModal, type AssetFormValues } from '../components/AssetFormModal'
 import { AssetFilterBar } from '../components/AssetFilterBar'
@@ -96,6 +96,28 @@ function Assets() {
     }
   }
 
+  // A-2: 下载复盘 PDF
+  const handlePostmortem = async (asset: Asset) => {
+    try {
+      const blob = await postmortemApi.downloadReport(asset.id, 30)
+      // 从 Content-Disposition 取文件名（如果有）；fallback 用 asset.name
+      const safeName = asset.name.replace(/[^a-zA-Z0-9_\-]/g, '_') || 'asset'
+      const filename = `postmortem_${safeName}_${new Date().toISOString().slice(0, 10)}.pdf`
+      // 创建下载链接
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+      message.success('复盘报告已下载')
+    } catch (e) {
+      message.error('下载失败')
+    }
+  }
+
   // traceroute 表格列
   const traceColumns = [
     { title: '跳数', dataIndex: 'hop', key: 'hop', width: 60 },
@@ -174,6 +196,7 @@ function Assets() {
         onEdit={handleEdit}
         onChanged={() => refetch()}
         onDiagnose={handleDiagnose}
+        onPostmortem={handlePostmortem}
       />
       <AssetFormModal
         open={modalOpen}

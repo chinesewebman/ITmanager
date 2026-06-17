@@ -48,6 +48,9 @@ const mockTrace = vi.fn().mockResolvedValue({
   },
 })
 
+// A-2: mock postmortemApi
+const mockPostmortem = vi.fn().mockResolvedValue(new Blob(['%PDF-1.4 mock'], { type: 'application/pdf' }))
+
 vi.mock('../services/api', () => ({
   assetApi: {
     list: () => Promise.resolve({ data: { data: { items: [] } } }),
@@ -58,6 +61,9 @@ vi.mock('../services/api', () => ({
   diagnosticApi: {
     ping: (...args: any[]) => mockPing(...args),
     traceroute: (...args: any[]) => mockTrace(...args),
+  },
+  postmortemApi: {
+    downloadReport: (...args: any[]) => mockPostmortem(...args),
   },
 }))
 
@@ -99,6 +105,23 @@ describe('Assets page', () => {
     // 结果展示
     await waitFor(() => {
       expect(screen.getByText(/min 0.1 ms/)).toBeTruthy()
+    })
+  })
+
+  it('每行显示复盘按钮', () => {
+    render(<Assets />)
+    // 3 个资产 → 3 个复盘按钮
+    expect(screen.getAllByText('复盘').length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('点击复盘按钮调用下载 API', async () => {
+    mockPostmortem.mockClear()
+    render(<Assets />)
+    const btns = screen.getAllByText('复盘')
+    fireEvent.click(btns[0])
+
+    await waitFor(() => {
+      expect(mockPostmortem).toHaveBeenCalledWith(expect.any(String), 30)
     })
   })
 })

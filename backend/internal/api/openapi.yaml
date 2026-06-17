@@ -880,6 +880,54 @@ paths:
         '500':
           description: traceroute 执行失败
 
+  /postmortem/assets/{id}/report:
+    get:
+      tags:
+        - 资产复盘
+      summary: 下载资产复盘 PDF 报告
+      description: |
+        聚合 alerts / tickets / status 历史生成 1-2 页 PDF 复盘报告。
+        报告含：资产概要、可靠性指标（MTTR/告警密度）、事件时间线、Top 5 告警。
+        days 默认 30，上限 365。
+      operationId: downloadPostmortemReport
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+            maximum: 365
+          description: 查询窗口（天）默认 30，最大 365
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 200
+            maximum: 1000
+          description: 事件数上限，默认 200，最大 1000
+      responses:
+        '200':
+          description: PDF 文件流
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: 请求参数错误
+        '404':
+          description: 资产不存在
+        '500':
+          description: 报告生成失败
+
   /alert-suppressions:
     get:
       tags:

@@ -150,6 +150,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	runbookSvc := service.NewRunbookService(db)
 	metricSvc := service.NewMetricSnapshotService(db)
 	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
+	postmortemSvc := service.NewPostmortemService(db, diagnosticSvc)
 
 	assetH := handlers.NewAssetHandler(assetSvc)
 	alertH := handlers.NewAlertHandler(alertSvc)
@@ -165,6 +166,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	runbookH := handlers.NewRunbookHandler(runbookSvc)
 	metricH := handlers.NewMetricSnapshotHandler(metricSvc)
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
+	postmortemH := handlers.NewPostmortemHandler(postmortemSvc)
 
 	api := r.Group("/api")
 	{
@@ -270,6 +272,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				// ping/traceroute 是静态段，无 :id 冲突；放 group 末尾便于阅读
 				diagnostics.GET("/ping", diagnosticH.PingAsset)
 				diagnostics.GET("/traceroute", diagnosticH.TracerouteAsset)
+			}
+
+			// 资产复盘 PDF 报告
+			postmortem := protected.Group("/postmortem")
+			{
+				postmortem.GET("/assets/:id/report", postmortemH.DownloadReport)
 			}
 
 			// 告警抑制规则（P0-2）

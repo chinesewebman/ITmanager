@@ -202,3 +202,17 @@ export const diagnosticApi = {
       params: { host, maxHops },
     }),
 };
+
+// ==================== 资产复盘 PDF 报告 ====================
+// A-2: 复盘报告下载
+
+export const postmortemApi = {
+  // 返回 Blob（PDF 文件流）
+  downloadReport: async (assetId: string, days = 30): Promise<Blob> => {
+    const res = await api.get(`/postmortem/assets/${assetId}/report`, {
+      params: { days },
+      responseType: 'blob',
+    })
+    return res.data
+  },
+};

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Table, Button, Space, Popconfirm, message } from 'antd'
-import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
+import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { assetApi } from '../services/api'
 import { StatusTag } from './StatusTag'
@@ -21,6 +21,7 @@ export interface AssetTableProps {
   onEdit: (asset: Asset) => void
   onChanged: () => void
   onDiagnose?: (asset: Asset, kind: 'ping' | 'traceroute') => void
+  onPostmortem?: (asset: Asset) => void
   rowSelection?: {
     selectedRowKeys: React.Key[]
     onChange: (keys: React.Key[]) => void
@@ -31,7 +32,7 @@ export interface AssetTableProps {
  * AssetTable - 资产列表展示 + 行内编辑/删除。
  * 父组件持有数据状态和表单弹窗状态。
  */
-export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, rowSelection }: AssetTableProps) {
+export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, rowSelection }: AssetTableProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const handleDelete = async (id: string) => {
@@ -69,7 +70,7 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, rowSe
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 360,
       fixed: 'right',
       render: (_, record) => (
         <Space>
@@ -99,6 +100,17 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, rowSe
                 Trace
               </Button>
             </>
+          )}
+          {onPostmortem && (
+            <Button
+              type="link"
+              size="small"
+              icon={<FilePdfOutlined />}
+              onClick={() => onPostmortem(record)}
+              title="下载资产复盘 PDF 报告"
+            >
+              复盘
+            </Button>
           )}
           <Popconfirm
             title="确认删除该资产？"
