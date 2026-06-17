@@ -1,6 +1,7 @@
 import { Button, Space, Table } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { StatusTag } from './StatusTag'
+import { EmptyState } from './EmptyState'
 
 export interface Ticket {
   id: string
@@ -75,6 +76,15 @@ export function TicketTable({ data, loading, onView }: TicketTableProps) {
       dataSource={data}
       loading={loading}
       pagination={{ pageSize: 10, showSizeChanger: true }}
+      locale={{
+        emptyText: (
+          <EmptyState
+            title="暂无工单"
+            description="当前没有待处理的工单"
+            compact
+          />
+        ),
+      }}
     />
   )
 }

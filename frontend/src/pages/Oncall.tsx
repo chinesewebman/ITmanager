@@ -137,7 +137,8 @@ function PoliciesTab() {
 
   async function onSubmit() {
     try {
-      const v = await form.validateFields()
+      // levelsJson 是 Form.Item 字段, 接口层 EscalationPolicy 不含, 这里 cast
+      const v = await form.validateFields() as EscalationPolicy & { levelsJson?: string }
       // levels 是 form 里的 JSON 字符串
       const levels = JSON.parse(v.levelsJson || '[]')
       await apiSend('POST', '/oncall/policies', { name: v.name, enabled: v.enabled, levels })

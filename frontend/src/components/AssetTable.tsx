@@ -4,6 +4,7 @@ import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined
 import type { ColumnsType } from 'antd/es/table'
 import { assetApi } from '../services/api'
 import { StatusTag } from './StatusTag'
+import { EmptyState } from './EmptyState'
 
 export interface Asset {
   id: string
@@ -146,6 +147,15 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
         showSizeChanger: true,
         showTotal: (t) => `共 ${t} 条`,
         pageSizeOptions: ['10', '20', '50', '100'],
+      }}
+      locale={{
+        emptyText: (
+          <EmptyState
+            title="暂无资产"
+            description="点击新建或导入，开始管理资产"
+            compact
+          />
+        ),
       }}
     />
   )

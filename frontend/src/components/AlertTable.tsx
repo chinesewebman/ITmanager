@@ -1,6 +1,7 @@
 import { Button, Space, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { StatusTag } from "./StatusTag";
+import { EmptyState } from "./EmptyState";
 
 export interface Alert {
   id: string;
@@ -139,6 +140,15 @@ export function AlertTable({
       loading={loading}
       scroll={{ x: 1000 }}
       pagination={{ showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+      locale={{
+        emptyText: (
+          <EmptyState
+            title="暂无告警"
+            description="系统当前运行平稳，没有需要处理的告警"
+            compact
+          />
+        ),
+      }}
       rowSelection={
         onSelectionChange
           ? {

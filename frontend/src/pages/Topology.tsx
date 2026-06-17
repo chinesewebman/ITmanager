@@ -3,8 +3,9 @@
 // 故障节点高亮（红色 + badge），down 边变红
 
 import { useState } from 'react'
-import { Card, Empty, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
+import { Card, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { EmptyState } from '../components/EmptyState'
 
 const { Text } = Typography
 
@@ -89,7 +90,10 @@ export function Topology() {
   if (graph.nodes.length === 0) {
     return (
       <Card title="网络拓扑">
-        <Empty description="暂无节点" />
+        <EmptyState
+          title="暂无拓扑节点"
+          description="导入资产后会自动绘制拓扑图"
+        />
       </Card>
     )
   }

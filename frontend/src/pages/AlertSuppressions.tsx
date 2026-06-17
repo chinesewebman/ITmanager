@@ -6,6 +6,7 @@ import {
 } from 'antd'
 import { PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { EmptyState } from '../components/EmptyState'
 
 const { Text } = Typography
 
@@ -139,6 +140,15 @@ export function AlertSuppressions() {
           dataSource={rules}
           rowKey={(r) => r.id ?? r.name}
           pagination={false}
+          locale={{
+            emptyText: (
+              <EmptyState
+                title="暂无抑制规则"
+                description="添加规则可在告警触发时自动抑制匹配的告警"
+                compact
+              />
+            ),
+          }}
           columns={[
             { title: '名称', dataIndex: 'name', key: 'name' },
             { title: '主机模式', dataIndex: 'host_pattern', key: 'host_pattern', render: (v: string) => <Tag color="purple">{v}</Tag> },

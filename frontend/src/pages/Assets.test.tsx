@@ -1,4 +1,5 @@
 // Assets page smoke test
+import '@testing-library/jest-dom'
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import Assets from './Assets'

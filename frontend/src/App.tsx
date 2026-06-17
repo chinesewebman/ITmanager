@@ -49,9 +49,11 @@ import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ThemeSwitcher } from "./components/ThemeSwitcher";
 import { CommandPalette } from "./components/CommandPalette";
+import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { useThemeStore } from "./stores";
 import { authApi } from "./services/api";
 import { AUTH_LOGOUT_EVENT, type AuthLogoutDetail } from "./services/authEvents";
+import { NotFoundPage } from "./pages/StatusPage";
 
 const { Header, Sider, Content } = Layout;
 
@@ -69,8 +71,12 @@ function AppLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const {
-    token: { colorBgContainer, borderRadiusLG },
+    // 暗色模式: Header 用 colorBgElevated (跟 Sider 形成反差)
+    // 浅色模式: Header 用 colorBgContainer (跟 Content 同色)
+    token: { colorBgContainer, colorBgElevated, borderRadiusLG },
   } = theme.useToken();
+  const themeMode = useThemeStore((s) => s.mode);
+  const headerBg = themeMode === "dark" ? colorBgElevated : colorBgContainer;
 
   useEffect(() => {
     // 从 localStorage 获取用户信息
@@ -180,7 +186,7 @@ function AppLayout() {
         <Header
           style={{
             padding: "0 24px",
-            background: colorBgContainer,
+            background: headerBg,
             display: "flex",
             justifyContent: "flex-end",
             alignItems: "center",
@@ -207,9 +213,7 @@ function AppLayout() {
             }}
           >
             <Suspense
-              fallback={
-                <div style={{ textAlign: "center", padding: 100 }}>加载中…</div>
-              }
+              fallback={<LoadingSkeleton variant="table" rows={6} />}
             >
               <Routes>
                 <Route
@@ -308,7 +312,7 @@ function AppLayout() {
                     </ErrorBoundary>
                   }
                 />
-                <Route path="*" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<NotFoundPage />} />
               </Routes>
             </Suspense>
           </div>

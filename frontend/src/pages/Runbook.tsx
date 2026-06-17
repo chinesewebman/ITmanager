@@ -6,6 +6,7 @@ import {
 } from 'antd'
 import { PlusOutlined, BookOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { EmptyState } from '../components/EmptyState'
 
 const { Text, Paragraph } = Typography
 
@@ -147,6 +148,15 @@ function RunbookList() {
         rowKey="id"
         dataSource={items}
         pagination={{ pageSize: 20 }}
+        locale={{
+          emptyText: (
+            <EmptyState
+              title="暂无 Runbook"
+              description={'点击右上角"新建"录入标准操作手册'}
+              compact
+            />
+          ),
+        }}
         columns={[
           { title: '标题', dataIndex: 'title', key: 'title' },
           { title: '类型', dataIndex: 'asset_type', key: 'asset_type', width: 100,

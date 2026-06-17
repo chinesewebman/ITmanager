@@ -2,6 +2,51 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.2.0] - 2026-06-17
+
+✨ **次版本** — UI/UX 易用性改进
+
+### 新增组件
+
+- **`EmptyState`** (`src/components/EmptyState.tsx`) — 统一空状态组件
+  - 5 个 preset: `no-assets` / `no-alerts` / `no-tickets` / `no-racks` / `no-search-result`
+  - 标题 + 描述 + 操作按钮三段式布局
+  - 紧凑模式 (`compact` prop) 适配表格内嵌
+  - 6 个 page 已接入: Alerts / Assets / Tickets / AlertSuppressions / Runbook / Topology
+- **`LoadingSkeleton`** (`src/components/LoadingSkeleton.tsx`) — 统一加载占位
+  - 5 个 variant: `table` / `kpi-cards` / `detail` / `chart` / `list`
+  - 用 AntD `Skeleton` active 动画，首屏不抖
+  - 路由级 `Suspense fallback` 改用 skeleton 替"加载中…"文字
+- **`StatusPage`** (`src/pages/StatusPage.tsx`) — 通用状态页
+  - 3 个导出: `NotFoundPage` (404) / `ForbiddenPage` (403) / `ServerErrorPage` (500)
+  - 提供"返回上一页"+"返回首页"两个动作
+  - 状态码色块: 4xx 蓝/紫 (用户侧), 5xx 红 (服务器侧)
+
+### 改进
+
+- **暗色模式 Header 配色** — Header 暗色模式用 `colorBgElevated`，与 Sider 形成反差（避免"中间割裂"）
+- **Login 页美化** — 大 logo + 三色渐变背景 + 渐变 logo + 圆角阴影
+  - 记住用户名 (Checkbox + localStorage)
+  - 忘记密码链接 (placeholder)
+  - 用 `useNavigate` 跳回 401 重定向目标 (替代 `window.location.href` 丢 state)
+- **404 路由** — 不再静默跳首页，渲染 `<NotFoundPage>`
+
+### 顺手修复 — 类型卫生 (24 → 0 tsc error)
+
+6 个 test 文件补 `import '@testing-library/jest-dom'`，消掉 baseline 23 个 `toBeInTheDocument` 类型错。
+`Oncall.tsx:142` `levelsJson` 字段加 cast `EscalationPolicy & { levelsJson?: string }`。
+
+### 测试
+
+- frontend: **128** / 128 pass (was 126, +2 Login 新增: 记住用户名 + 恢复)
+- backend: 621 / 621 (no change)
+- tsc: **0 errors** (was 24 baseline, -24 净消)
+
+### 性能数据
+
+- v1.2 估时 6h → 实测 **~1.5h** (4x 加速, 含 tsc 24→0 顺带改)
+- 涉及 12 文件, 净增 3 组件 + Login 改写 + 5 test 加 import
+
 ## [v1.1.0] - 2026-06-17
 
 ✨ **次版本** — 代码审计 P1+P2 修复
