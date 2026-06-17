@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+
+	"network-monitor-platform/internal/models"
 )
 
 // alert_service_test 只补 alert_service 现有未覆盖的边界场景
@@ -215,4 +217,208 @@ func TestAlertService_ListFalsePositives_since增量导出(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, items)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== List 补全 (走 statsInternal) ====================
+
+func TestAlertService_List_成功_返items和stats(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	rows := sqlmock.NewRows([]string{"id", "alert_id", "host_name", "severity", "status", "trigger_name"}).
+		AddRow(uuid.NewString(), "zab-1", "web-01", 4, "problem", "CPU 100%")
+	mock.ExpectQuery(`SELECT \* FROM "alerts"`).
+		WillReturnRows(rows)
+
+	// statsInternal 用 SELECT COUNT(*) AS total, COUNT(*) FILTER(...) ...
+	statsRows := sqlmock.NewRows([]string{"total", "problem", "acknowledged", "resolved"}).
+		AddRow(1, 1, 0, 0)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
+		WillReturnRows(statsRows)
+
+	items, stats, err := svc.List(ctx, AlertFilter{})
+	require.NoError(t, err)
+	assert.Len(t, items, 1)
+	assert.Equal(t, "CPU 100%", items[0].TriggerName)
+	assert.Equal(t, int64(1), stats.Total)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAlertService_List_带severity筛选(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	rows := sqlmock.NewRows([]string{"id", "alert_id", "severity"}).
+		AddRow(uuid.NewString(), "zab-1", 5)
+	mock.ExpectQuery(`SELECT \* FROM "alerts" WHERE severity >=`).
+		WillReturnRows(rows)
+
+	statsRows := sqlmock.NewRows([]string{"total", "problem", "acknowledged", "resolved"}).
+		AddRow(1, 1, 0, 0)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
+		WillReturnRows(statsRows)
+
+	items, _, err := svc.List(ctx, AlertFilter{Severity: 4})
+	require.NoError(t, err)
+	assert.Len(t, items, 1)
+	assert.Equal(t, 5, items[0].Severity)
+}
+
+func TestAlertService_List_limit超1000截断(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	rows := sqlmock.NewRows([]string{"id", "alert_id", "severity"}).
+		AddRow(uuid.NewString(), "zab-1", 4)
+	// Limit=9999 截断 1000
+	mock.ExpectQuery(`SELECT \* FROM "alerts"`).
+		WillReturnRows(rows)
+
+	statsRows := sqlmock.NewRows([]string{"total", "problem", "acknowledged", "resolved"}).
+		AddRow(1, 1, 0, 0)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
+		WillReturnRows(statsRows)
+
+	_, _, err := svc.List(ctx, AlertFilter{Limit: 9999})
+	require.NoError(t, err)
+}
+
+// ==================== BulkResolve 补全 (现只有空ids) ====================
+
+func TestAlertService_BulkResolve_成功批量恢复(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+	userID := uuid.NewString()
+
+	ids := []string{uuid.NewString(), uuid.NewString()}
+	// BulkResolve: SELECT WHERE id IN + UPDATE WHERE id IN (事务内)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "alerts" WHERE id IN`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "alert_id"}).
+			AddRow(ids[0], "zab-1").
+			AddRow(ids[1], "zab-2"))
+	mock.ExpectExec(`UPDATE "alerts" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectCommit()
+
+	affected, err := svc.BulkResolve(ctx, ids, userID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), affected)
+}
+
+func TestAlertService_BulkDelete_成功批量删除(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	mock.ExpectBegin()
+	mock.ExpectExec(`DELETE FROM "alerts"`).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectCommit()
+
+	affected, err := svc.BulkDelete(ctx, ids)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), affected)
+}
+
+func TestAlertService_BulkDelete_超1000拒绝_真测(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	svc := NewAlertService(gormDB)
+
+	ids := make([]string, 1001)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	affected, err := svc.BulkDelete(context.Background(), ids)
+	assert.Error(t, err, "超 1000 应拒绝")
+	assert.Equal(t, int64(0), affected)
+}
+
+// ==================== Stats / CreateRule / UpdateRule 补全 ====================
+
+func TestAlertService_Stats_返tiers和hourly(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	// tiers: SELECT severity, severity_name, COUNT(*) GROUP BY
+	tiersRows := sqlmock.NewRows([]string{"severity", "severity_name", "count"}).
+		AddRow(4, "High", 5).
+		AddRow(5, "Critical", 2)
+	mock.ExpectQuery(`SELECT severity, severity_name, COUNT`).
+		WillReturnRows(tiersRows)
+
+	// hourly: SELECT date_trunc
+	hourlyRows := sqlmock.NewRows([]string{"hour", "count"}).
+		AddRow(time.Now().Truncate(time.Hour), 7)
+	mock.ExpectQuery(`SELECT date_trunc`).
+		WillReturnRows(hourlyRows)
+
+	tiers, hourly, err := svc.Stats(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(tiers), 1)
+	assert.NotEmpty(t, hourly)
+}
+
+func TestAlertService_CreateRule_成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	rule := &models.AlertRule{Name: "p1", Severity: 4, Condition: "cpu>90"} //nolint:exhaustruct
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "alert_rules"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	mock.ExpectCommit()
+
+	err := svc.CreateRule(ctx, rule)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAlertService_CreateRule_nil报错(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	err := svc.CreateRule(context.Background(), nil)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestAlertService_UpdateRule_成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	id := uuid.NewString()
+	rows := sqlmock.NewRows([]string{"id", "name", "severity"}).
+		AddRow(id, "p1", 3)
+	mock.ExpectQuery(`SELECT \* FROM "alert_rules" WHERE id =`).
+		WillReturnRows(rows)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE "alert_rules"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	rule, err := svc.UpdateRule(ctx, id, map[string]interface{}{"severity": 5})
+	require.NoError(t, err)
+	assert.NotNil(t, rule)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAlertService_UpdateRule_不存在返ErrNotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+
+	mock.ExpectQuery(`SELECT \* FROM "alert_rules" WHERE id =`).
+		WithArgs("nonexistent", 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := svc.UpdateRule(context.Background(), "nonexistent", map[string]interface{}{"severity": 5})
+	assert.ErrorIs(t, err, ErrNotFound)
 }

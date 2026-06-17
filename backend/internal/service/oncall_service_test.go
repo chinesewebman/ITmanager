@@ -312,3 +312,131 @@ func TestSplitNonEmpty_空字符串(t *testing.T) {
 func TestSplitNonEmpty_连续逗号跳过空(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, splitNonEmpty("a,,b", ","))
 }
+
+// ==================== ListSchedules / GetSchedule / DeleteSchedule 补全 ====================
+
+func TestOncallService_ListSchedules_返回所有(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	seedSchedule(t, db, "team-a", true)
+	seedSchedule(t, db, "team-b", false)
+	seedSchedule(t, db, "team-c", true)
+
+	out, err := svc.ListSchedules(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, out, 3)
+}
+
+func TestOncallService_ListSchedules_空库返空切片(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+
+	out, err := svc.ListSchedules(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
+func TestOncallService_GetSchedule_存在返回(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedID := seedSchedule(t, db, "team-a", true)
+
+	got, err := svc.GetSchedule(context.Background(), schedID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "team-a", got.Name)
+	assert.True(t, got.Enabled)
+}
+
+func TestOncallService_GetSchedule_不存在返ErrNotFound(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	_, err := svc.GetSchedule(context.Background(), uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestOncallService_DeleteSchedule_不存在返ErrNotFound(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	err := svc.DeleteSchedule(context.Background(), uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// ==================== ListShifts / DeleteShift 补全 ====================
+
+func TestOncallService_ListShifts_按startsAt升序(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedID := seedSchedule(t, db, "team-a", true)
+	now := time.Now().UTC()
+	seedShift(t, db, schedID, uuid.New(), "alice", now.Add(2*time.Hour), now.Add(3*time.Hour))
+	seedShift(t, db, schedID, uuid.New(), "bob", now, now.Add(time.Hour))
+	seedShift(t, db, schedID, uuid.New(), "carol", now.Add(time.Hour), now.Add(2*time.Hour))
+
+	out, err := svc.ListShifts(context.Background(), schedID)
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	assert.Equal(t, "bob", out[0].UserName, "应按 starts_at 升序")
+	assert.Equal(t, "carol", out[1].UserName)
+	assert.Equal(t, "alice", out[2].UserName)
+}
+
+func TestOncallService_ListShifts_其他schedule不混入(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedA := seedSchedule(t, db, "team-a", true)
+	schedB := seedSchedule(t, db, "team-b", true)
+	now := time.Now().UTC()
+	seedShift(t, db, schedA, uuid.New(), "alice", now, now.Add(time.Hour))
+	seedShift(t, db, schedB, uuid.New(), "bob", now, now.Add(time.Hour))
+
+	out, err := svc.ListShifts(context.Background(), schedA)
+	require.NoError(t, err)
+	assert.Len(t, out, 1)
+	assert.Equal(t, "alice", out[0].UserName)
+}
+
+func TestOncallService_DeleteShift_成功(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedID := seedSchedule(t, db, "team-a", true)
+	shiftID := seedShift(t, db, schedID, uuid.New(), "alice", time.Now(), time.Now().Add(time.Hour))
+
+	err := svc.DeleteShift(context.Background(), shiftID)
+	require.NoError(t, err)
+
+	var n int64
+	db.Raw(`SELECT COUNT(*) FROM oncall_shifts WHERE id = ?`, shiftID).Scan(&n)
+	assert.Equal(t, int64(0), n)
+}
+
+func TestOncallService_DeleteShift_不存在返ErrNotFound(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	err := svc.DeleteShift(context.Background(), uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// ==================== GetPolicy 补全 ====================
+
+func TestOncallService_GetPolicy_填充levels(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	policyID := seedPolicy(t, db, "p1")
+	seedLevel(t, db, policyID, 1, "user", "u1", "email", 5)
+	seedLevel(t, db, policyID, 2, "user", "u2", "sms", 10)
+
+	got, err := svc.GetPolicy(context.Background(), policyID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "p1", got.Name)
+	assert.Len(t, got.Levels, 2, "应自动 attach levels")
+	assert.Equal(t, 1, got.Levels[0].Level)
+}
+
+func TestOncallService_GetPolicy_不存在返ErrNotFound(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	_, err := svc.GetPolicy(context.Background(), uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+}

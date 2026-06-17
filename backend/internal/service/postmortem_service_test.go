@@ -187,8 +187,8 @@ func TestFetchIP_IPv4优先(t *testing.T) {
 	db, mock := newMockDB(t)
 	assetID := uuid.New()
 	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv_address"}).
-		AddRow("", "2001:db8::1").  // IPv6 first
-		AddRow("10.0.0.5", "")        // IPv4 second, 应优先
+		AddRow("", "2001:db8::1"). // IPv6 first
+		AddRow("10.0.0.5", "")     // IPv4 second, 应优先
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnRows(rows)

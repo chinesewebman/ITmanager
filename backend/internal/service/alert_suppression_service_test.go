@@ -151,6 +151,47 @@ func TestAlertSuppression_Update_severity超界报错(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestAlertSuppression_Update_改name成功(t *testing.T) {
+	db := newSuppressionTestDB(t)
+	svc := NewAlertSuppressionService(db)
+	id := createRule(t, db, "原名", "*", 3, 60)
+
+	rule, err := svc.Update(context.Background(), id, map[string]interface{}{"name": "新名"})
+	require.NoError(t, err)
+	assert.Equal(t, "新名", rule.Name)
+}
+
+func TestAlertSuppression_Update_改window和host_pattern(t *testing.T) {
+	db := newSuppressionTestDB(t)
+	svc := NewAlertSuppressionService(db)
+	id := createRule(t, db, "r1", "*", 3, 60)
+
+	rule, err := svc.Update(context.Background(), id, map[string]interface{}{
+		"time_window_seconds": 300,
+		"host_pattern":        "web-*",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 300, rule.TimeWindowSeconds)
+	assert.Equal(t, "web-*", rule.HostPattern)
+}
+
+func TestAlertSuppression_Update_不存在ID返ErrNotFound(t *testing.T) {
+	db := newSuppressionTestDB(t)
+	svc := NewAlertSuppressionService(db)
+
+	_, err := svc.Update(context.Background(), uuid.New(), map[string]interface{}{"name": "x"})
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAlertSuppression_Update_window为0报错(t *testing.T) {
+	db := newSuppressionTestDB(t)
+	svc := NewAlertSuppressionService(db)
+	id := createRule(t, db, "r1", "*", 3, 60)
+
+	_, err := svc.Update(context.Background(), id, map[string]interface{}{"time_window_seconds": 0})
+	assert.Error(t, err)
+}
+
 func TestAlertSuppression_Delete_成功并清缓存(t *testing.T) {
 	db := newSuppressionTestDB(t)
 	svc := NewAlertSuppressionService(db)
