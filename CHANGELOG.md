@@ -2,6 +2,40 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v2.0.0] - Proposed
+
+📋 **主版本规划** — 性能与解耦 (cursor 分页 + event bus + gRPC)
+
+详见 [ADR-0002](docs/adr/0002-v2-scope.md) + [13-实施规划.md §21](13-实施规划.md)。
+
+### 范围
+
+| 模块 | 内容 | 估时 |
+|------|------|------|
+| **cursor 分页** | alerts / audit_logs / tickets / notifications 翻页 O(log N) | 6-8h |
+| **event bus** | in-process pub/sub, 通知解耦, dead-letter 队列 | 8-10h |
+| **gRPC** | 内部 s2s 通信, REST 兼容 (含 gRPC-gateway) | 12-15h |
+
+### 里程碑
+
+- **v2.0.0**: cursor 分页 + event bus
+- **v2.0.1**: gRPC 内部通信
+- **v2.0.2**: 压测 + release
+
+### 明确不做 (v2.0 scope 外)
+
+- ❌ Redis 部署 (v1.4 in-process LRU 够, 推迟 v3.0)
+- ❌ Kafka/NATS (永久不做, 单机不需要)
+- ❌ 多实例部署 (推迟 v3.0)
+- ❌ 全文搜索 ES (推迟 v3.0)
+- ❌ PWA 移动端 (推迟 v2.1)
+
+### 兼容性
+
+- v1.x 客户端继续用 `?page=N&size=M` (cursor=null 走 offset 兼容)
+- DB schema 不变
+- 部署方式不变 (单 binary + sqlite/postgres)
+
 ## [v1.4.0] - 2026-06-17
 
 🔒 **次版本** — 后端稳定性 + 性能 + 可观测性 (rate limit / 通知 worker / 缓存 / 审计日志)

@@ -11,12 +11,12 @@
 
 ---
 
-> **2026-06-17 状态**: v1.0.2 已发布 — 10 PR 落地 (P0-P2 + S 级 3 + A 级 3) + 一键部署 + GitHub badges
+> **2026-06-17 状态**: v1.4.0 已发布 — 38 commits, 8 tags. service 覆盖率 64.3%→84.1%, backend 779 / frontend 147 / tsc 0.
 >
-> - **测试**: backend 603 passed / frontend 117 passed / tsc 24 = baseline / 61.2% 覆盖率
-> - **一键部署**: `make deploy` (install + docker-up + db-migrate + db-seed)
-> - **健康检查**: `make deploy-status` (8 服务: PG/Redis/API/Web/NetBox/Zabbix/GLPI/Graylog)
+> - **v1.4.0 = Latest**: rate limit + 通知 worker + LRU 缓存 + 审计日志 + database 测试 + service 覆盖率
+> - **v2.0 规划**: [ADR-0002](docs/adr/0002-v2-scope.md) — cursor 分页 + event bus + gRPC (估 10-15h 实测)
 > - 详细变更见 [CHANGELOG.md](CHANGELOG.md)，开发任务见 [TODO.md](TODO.md) / [tasks.md](tasks.md)
+> - v2.0 路线图见 [13-实施规划.md §21](13-实施规划.md)
 
 ## 快速开始
 
