@@ -2,25 +2,51 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
-## [v2.0.0] - Proposed
+## [v2.0.0] - 2026-06-17
 
-📋 **主版本规划** — 性能与解耦 (cursor 分页 + event bus + gRPC)
+🚀 **主版本** — 性能与解耦 (cursor 分页 + event bus)
 
 详见 [ADR-0002](docs/adr/0002-v2-scope.md) + [13-实施规划.md §21](13-实施规划.md)。
 
-### 范围
+### 新增
 
-| 模块 | 内容 | 估时 |
-|------|------|------|
-| **cursor 分页** | alerts / audit_logs / tickets / notifications 翻页 O(log N) | 6-8h |
-| **event bus** | in-process pub/sub, 通知解耦, dead-letter 队列 | 8-10h |
-| **gRPC** | 内部 s2s 通信, REST 兼容 (含 gRPC-gateway) | 12-15h |
+- **cursor 分页** (`internal/cursor/cursor.go`) — 高效翻页 O(log N)
+  - base64 + NUL 分隔的紧凑编码, 包含 (timestamp, id) 二元组
+  - alert / ticket / audit 服务支持 cursor 入参
+  - handler 接受 `?cursor=` + 响应 `next_cursor`
+  - schema 加 `(created_at DESC, id DESC)` 联合索引 (alerts / tickets / audit_logs)
+  - 老 `?page=N&size=M` 接口完全兼容 (cursor=null 时走 offset 模式)
+- **event bus** (`internal/eventbus/bus.go`) — in-process pub/sub
+  - 1024 buffer, 4 dispatcher goroutine, 3 retry + 100ms 退避
+  - 5 topic: `alert.created` / `alert.resolved` / `ticket.created` / `ticket.resolved` / `user.locked`
+  - SQLite DLQ (event_dlq 表), handler 失败 3 次后落死信
+  - 优雅关闭 (Close 幂等), Stats 接口 (published / dispatched / dlq / retries / pending)
+- **notification worker 接入 bus** (`internal/notification/worker.go`)
+  - `SubscribeToBus(bus)` 注册 `alert.created` / `alert.resolved` handler
+  - 双轨并行: 5s tick 老 path + event bus 新 path
+- **AuditService 新建** (`internal/service/audit_service.go`) — 4 维过滤 + cursor
+  - 端点: `GET /api/v1/audit-logs` (admin/debug)
+- **AlertService 注入 bus** (`internal/service/alert_service.go`)
+  - `WithBus(bus)` 注入
+  - `Resolve` 调 `bus.Publish(alert.resolved)` 触发通知
 
-### 里程碑
+### 数据库迁移
 
-- **v2.0.0**: cursor 分页 + event bus
-- **v2.0.1**: gRPC 内部通信
-- **v2.0.2**: 压测 + release
+- `000010_v2_eventbus_cursor.up.sql`
+  - 新增 `event_dlq` 表 (event_bus_id / topic / payload / last_error / failed_at)
+  - `alerts` 加 `(created_at DESC, id DESC)` 联合索引
+  - `tickets` 加 `(created_at DESC, id DESC)` 联合索引
+  - `audit_logs` 加 `(created_at DESC, id DESC)` 联合索引
+
+### 兼容性
+
+- v1.x 客户端继续用 `?page=N&size=M` (cursor=null 走 offset 兼容) ✓
+- DB schema 增量迁移 (新表 + 索引, 不破坏老数据) ✓
+- 部署方式不变 (单 binary + sqlite/postgres) ✓
+
+### 推迟到 v2.0.1+ (gRPC 风险评估后)
+
+- ⏳ gRPC 内部通信 (v2.0.1, 估 12-15h, 风险评估中)
 
 ### 明确不做 (v2.0 scope 外)
 
@@ -29,12 +55,6 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
 - ❌ 多实例部署 (推迟 v3.0)
 - ❌ 全文搜索 ES (推迟 v3.0)
 - ❌ PWA 移动端 (推迟 v2.1)
-
-### 兼容性
-
-- v1.x 客户端继续用 `?page=N&size=M` (cursor=null 走 offset 兼容)
-- DB schema 不变
-- 部署方式不变 (单 binary + sqlite/postgres)
 
 ## [v1.4.0] - 2026-06-17
 
