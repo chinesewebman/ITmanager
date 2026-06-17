@@ -2,6 +2,45 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v1.1.0] - 2026-06-17
+
+✨ **次版本** — 代码审计 P1+P2 修复
+
+### 修复 (P1 — v1.0.3 已 ship, 在 v1.1 累计)
+
+- **API key `last_used_at` 异步批量写**: 1000 QPS → 1 UPDATE/30s
+- **NetBox `SyncDevices` 分页 (100/page)**: 不再漏 50+ 设备
+- **`SyncAll` `errors.Join` 合并失败**: 监控告警不再漏报
+- **401 CustomEvent + `useNavigate`**: 保留路由 state + 登录跳回
+
+### 改进 (P2)
+
+- **M3-P2-3 错误类型化**: Create 撞 unique 约束 → `service.ErrAlreadyExists` → 409
+  - 5 services + 5 handlers: asset/ticket/channel/runbook/alert_suppression
+  - `isUniqueViolation()` helper (gorm ErrDuplicatedKey + SQLSTATE 23505)
+- **M3-P2-1 分页索引**: 4 张表 `idx_*_created_at_desc` (assets/tickets/runbooks/users)
+- **M3-P2-2 Bulk 事务**: `BulkAcknowledge/Resolve/Delete` 包 `gorm.Transaction`
+- **M2-P2-1 Zabbix auth TTL + auto-relogin**: 30min TTL + 主动重登 + 检测 -10002 自动重试
+- **M3-P2-4 Notification trigger**: Acknowledge/Resolve 落 `notification_logs` (pending)
+  - 实际发送 (dingtalk/email) 由 v1.2 worker 消费
+- **M4-P2-1 拦截器清理**: `api.ts` 空壳请求拦截器删除 (since C-F5 cookie auth)
+- **M1-P2 ADR-001 rate limit 归属**: 4 方案对比，推荐 per-route middleware (v1.2 实现)
+
+### 数据库
+
+- `000008_list_pagination`: assets/tickets/runbooks/users `created_at DESC` 索引
+- `000009_notification_logs`: notification_logs 表 + 2 索引
+
+### 测试
+
+- backend: **621** / 621 pass (was 608, **+13**)
+- frontend: 126 / 126 pass (no change)
+- tsc: 24 = baseline (0 new)
+
+### 文档
+
+- `docs/adr/0001-rate-limit-归属.md`
+
 ## [v1.0.2] - 2026-06-17
 
 🐛 **补丁版** — 文档改进
