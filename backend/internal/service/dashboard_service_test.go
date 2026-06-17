@@ -7,6 +7,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"network-monitor-platform/internal/cache"
 )
 
 // ==================== Dashboard Service 测试 ====================
@@ -223,5 +225,51 @@ func TestDashboardService_KPIs_days边界(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, kpi)
 	assert.Equal(t, 90, kpi.WindowDays) // 截到 90
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// v1.4: cache 集成测试
+
+func TestDashboardService_Stats_30s缓存命中不重复查询(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewDashboardServiceWithCache(gormDB, cache.NewLRU(8))
+	ctx := context.Background()
+
+	// 只 expect 1 次 SQL (第 2 次走 cache)
+	mock.ExpectQuery(`SELECT`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"assets", "machines", "networks", "alerts", "tickets", "sites",
+		}).AddRow(10, 5, 3, 1, 2, 1))
+
+	for i := 0; i < 5; i++ {
+		stats, err := svc.Stats(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(10), stats.Assets)
+	}
+	assert.NoError(t, mock.ExpectationsWereMet(), "5 次调用应只 1 次 SQL")
+}
+
+func TestDashboardService_Stats_TTL过期后刷新(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewDashboardServiceWithCache(gormDB, cache.NewLRU(8))
+	ctx := context.Background()
+
+	mock.ExpectQuery(`SELECT`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"assets", "machines", "networks", "alerts", "tickets", "sites",
+		}).AddRow(10, 5, 3, 1, 2, 1))
+	_, err := svc.Stats(ctx)
+	require.NoError(t, err)
+
+	// 强制 cache 失效 → 下次走 DB
+	svc.(*dashboardService).cache.Delete("dashboard:stats")
+
+	mock.ExpectQuery(`SELECT`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"assets", "machines", "networks", "alerts", "tickets", "sites",
+		}).AddRow(20, 10, 5, 2, 4, 2))
+	stats, err := svc.Stats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(20), stats.Assets, "cache 失效后应读到新值")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

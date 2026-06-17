@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"network-monitor-platform/internal/cache"
+
 	"gorm.io/gorm"
 )
 
@@ -51,31 +53,51 @@ type DashboardService interface {
 }
 
 type dashboardService struct {
-	db *gorm.DB
+	db    *gorm.DB
+	cache cache.Cache
 }
 
+// dashboardCacheTTL v1.4: dashboard stats 30s 缓存, 平衡实时性 + DB 压力
+const dashboardCacheTTL = 30 * time.Second
+
+// NewDashboardService 构造 dashboard service
+// cache=nil 时降级为 no-op cache, 不影响功能
 func NewDashboardService(db *gorm.DB) DashboardService {
-	return &dashboardService{db: db}
+	return NewDashboardServiceWithCache(db, cache.NewLRU(64))
+}
+
+// NewDashboardServiceWithCache v1.4: 注入 cache (测试 / Redis 后端)
+func NewDashboardServiceWithCache(db *gorm.DB, c cache.Cache) DashboardService {
+	if c == nil {
+		c = cache.NewLRU(64)
+	}
+	return &dashboardService{db: db, cache: c}
 }
 
 func (s *dashboardService) Stats(ctx context.Context) (*DashboardStats, error) {
-	// 🐛 BUG#27+#28: 6 次 count 串行 → 1 条聚合 SQL（Machines/Networks 之前是
-	// 假数据 = Assets，必须按 asset_type 区分）
-	var stats DashboardStats
-	row := s.db.WithContext(ctx).Raw(`
-		SELECT
-			(SELECT COUNT(*) FROM assets) AS assets,
-			(SELECT COUNT(*) FROM assets WHERE asset_type = 'server') AS machines,
-			(SELECT COUNT(*) FROM assets WHERE asset_type IN ('switch','router','firewall')) AS networks,
-			(SELECT COUNT(*) FROM alerts WHERE status = 'problem') AS alerts,
-			(SELECT COUNT(*) FROM tickets WHERE status != 'closed') AS tickets,
-			(SELECT COUNT(*) FROM sites) AS sites
-	`).Row()
-	if err := row.Scan(&stats.Assets, &stats.Machines, &stats.Networks,
-		&stats.Alerts, &stats.Tickets, &stats.Sites); err != nil {
+	// v1.4: 30s 缓存 (dashboardCacheTTL), stale-while-error (DB 失败返旧值)
+	v, err := s.cache.GetOrLoad("dashboard:stats", dashboardCacheTTL, func() (any, error) {
+		// 🐛 BUG#27+#28: 6 次 count 串行 → 1 条聚合 SQL
+		var stats DashboardStats
+		row := s.db.WithContext(ctx).Raw(`
+			SELECT
+				(SELECT COUNT(*) FROM assets) AS assets,
+				(SELECT COUNT(*) FROM assets WHERE asset_type = 'server') AS machines,
+				(SELECT COUNT(*) FROM assets WHERE asset_type IN ('switch','router','firewall')) AS networks,
+				(SELECT COUNT(*) FROM alerts WHERE status = 'problem') AS alerts,
+				(SELECT COUNT(*) FROM tickets WHERE status != 'closed') AS tickets,
+				(SELECT COUNT(*) FROM sites) AS sites
+		`).Row()
+		if err := row.Scan(&stats.Assets, &stats.Machines, &stats.Networks,
+			&stats.Alerts, &stats.Tickets, &stats.Sites); err != nil {
+			return nil, err
+		}
+		return &stats, nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	return &stats, nil
+	return v.(*DashboardStats), nil
 }
 
 func (s *dashboardService) AlertTrends(ctx context.Context, days int) ([]TrendPoint, error) {
