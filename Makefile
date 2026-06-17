@@ -1,6 +1,6 @@
 # Network Monitor Platform - Makefile
 
-.PHONY: help install build run test lint format clean docker-build docker-up docker-down dev dev-frontend dev-backend
+.PHONY: help install build run test lint format clean docker-build docker-up docker-down dev dev-frontend dev-backend deploy deploy-min deploy-status
 
 # 默认目标
 help:
@@ -41,6 +41,11 @@ help:
 	@echo "=== 服务管理 ==="
 	@echo "  make server          - 启动后端服务器"
 	@echo "  make migrate-create  - 创建新的数据库迁移"
+	@echo ""
+	@echo "=== 一键部署 (v1.0) ==="
+	@echo "  make deploy          - install + docker-up + db-migrate + db-seed (含演示数据)"
+	@echo "  make deploy-min      - install + docker-up + db-migrate (无种子数据)"
+	@echo "  make deploy-status   - 检查所有服务健康状态"
 
 # 安装依赖
 install:
@@ -152,3 +157,66 @@ migrate-create:
 	@echo "=== 创建数据库迁移 ==="
 	@read -p "输入迁移名称: " name; \
 	cd backend && go run ./cmd/migrate/main.go create $$name
+
+# ==================== 一键部署 (v1.0) ====================
+
+# deploy: 全自动部署链
+#   1) install      - 装 go mod + npm 依赖
+#   2) docker-up    - 启 8 服务 (PG/Redis/api/web/NetBox/Zabbix/GLPI/Graylog+ES+Mongo)
+#   3) db-migrate   - 等 PG ready 后跑 schema 迁移
+#   4) db-seed      - 种子数据 (演示账号/资产/告警)
+#
+# 预期耗时:
+#   - 首次:  5-10min (拉镜像 + build)
+#   - 后续:  1-2min  (缓存命中)
+#
+# 失败处理: 任意一步失败立即停下，make 不吞错
+deploy: install _wait_for_pg docker-up db-migrate db-seed
+	@echo ""
+	@echo "✅ 部署完成"
+	@echo "前端:     http://localhost:3000"
+	@echo "后端 API: http://localhost:8080"
+	@echo "Swagger:  http://localhost:8080/swagger/index.html"
+	@echo "NetBox:   http://localhost:8000  (admin / admin)"
+	@echo "Zabbix:   http://localhost:8081  (Admin / zabbix)"
+	@echo "GLPI:     http://localhost:8001  (glpi / glpi)"
+	@echo "Graylog:  http://localhost:9000  (admin / admin)"
+	@echo ""
+	@echo "默认账号: admin / admin123"
+
+# deploy-min: 无种子的部署（生产环境首次部署用）
+deploy-min: install _wait_for_pg docker-up db-migrate
+	@echo ""
+	@echo "✅ 部署完成（无种子数据）"
+	@echo "前端:     http://localhost:3000"
+	@echo "后端 API: http://localhost:8080"
+	@echo "Swagger:  http://localhost:8080/swagger/index.html"
+
+# _wait_for_pg: 等 PG 健康检查通过（最多 60s）
+#   私有 target（前置下划线）— 不暴露给用户
+_wait_for_pg:
+	@echo "=== 等待 PostgreSQL 就绪 (max 60s) ==="
+	@for i in $$(seq 1 30); do \
+		if docker exec nmp-postgres pg_isready -U nmp >/dev/null 2>&1; then \
+			echo "✅ PG ready ($${i}*2s)"; \
+			exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo "❌ PG 在 60s 内未就绪"; \
+	exit 1
+
+# deploy-status: 检查所有服务健康状态
+deploy-status:
+	@echo "=== 服务健康检查 ==="
+	@echo ""
+	@printf "%-15s %-10s %s\n" "Service" "Status" "Endpoint"
+	@printf "%-15s %-10s %s\n" "-------" "------" "--------"
+	@printf "%-15s %-10s %s\n" "PostgreSQL" "$$(docker exec nmp-postgres pg_isready -U nmp >/dev/null 2>&1 && echo '✅ UP' || echo '❌ DOWN')" "5432"
+	@printf "%-15s %-10s %s\n" "Redis" "$$(docker exec nmp-redis redis-cli ping >/dev/null 2>&1 && echo '✅ UP' || echo '❌ DOWN')" "6379"
+	@printf "%-15s %-10s %s\n" "API" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health | grep -q 200 && echo '✅ UP' || echo '❌ DOWN')" "8080"
+	@printf "%-15s %-10s %s\n" "Web" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000 | grep -qE '200|301|302' && echo '✅ UP' || echo '❌ DOWN')" "3000"
+	@printf "%-15s %-10s %s\n" "NetBox" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000 | grep -qE '200|302' && echo '✅ UP' || echo '❌ DOWN')" "8000"
+	@printf "%-15s %-10s %s\n" "Zabbix" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8081 | grep -qE '200|302' && echo '✅ UP' || echo '❌ DOWN')" "8081"
+	@printf "%-15s %-10s %s\n" "GLPI" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8001 | grep -qE '200|302' && echo '✅ UP' || echo '❌ DOWN')" "8001"
+	@printf "%-15s %-10s %s\n" "Graylog" "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9000 | grep -qE '200|302' && echo '✅ UP' || echo '❌ DOWN')" "9000"
