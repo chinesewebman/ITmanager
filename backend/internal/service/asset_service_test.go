@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"network-monitor-platform/internal/models"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -191,3 +193,195 @@ func TestErrNotFound_被业务方法正确返回(t *testing.T) {
 
 // 防止编译时 unused
 var _ = sql.ErrNoRows
+
+// ==================== Asset Service 测试 (Batch B 覆盖率) ====================
+
+// 拿一个 asset 行（id/name/asset_tag/sn/status/asset_type + 6 个元数据字段，共 10 列）
+func assetSampleRows(id string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "name", "asset_tag", "sn", "status", "asset_type",
+		"created_at", "updated_at",
+	}).AddRow(id, "web-01", "AT-001", "SN-1", "active", "server", time.Now(), time.Now())
+}
+
+func TestAssetService_List_空表返回空(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	// 🐛 BUG#26: List 走 Count + Find
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "assets"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "assets"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+
+	items, total, err := svc.List(context.Background(), AssetFilter{Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	assert.Empty(t, items)
+	assert.Equal(t, int64(0), total)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_List_带keyword和status过滤(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New().String()
+	// Count 走 filter (但 gorm 先 Count 再 Find, Count 也带 WHERE)
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "assets" WHERE`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	// Find 走 keyword ILIKE + status=
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE`).
+		WithArgs("%web%", "%web%", "%web%", "active", 20).
+		WillReturnRows(assetSampleRows(id))
+
+	items, total, err := svc.List(context.Background(), AssetFilter{
+		Keyword: "web", Status: "active", Page: 1, PageSize: 20,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+	assert.Len(t, items, 1)
+	assert.Equal(t, "web-01", items[0].Name)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Get_成功返回asset和networks(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// 1) First(asset) — gorm 发 2 args (id, LIMIT 1)
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	// 2) Find(networks by asset_id)
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "asset_id", "ip_address", "ipv6_address", "mac", "interface_name", "speed_mbps",
+		}).AddRow(uuid.New(), id, "10.0.0.1", nil, "00:11:22:33:44:55", "eth0", 1000))
+
+	asset, networks, err := svc.Get(context.Background(), id.String())
+	require.NoError(t, err)
+	assert.Equal(t, "web-01", asset.Name)
+	assert.Len(t, networks, 1)
+	assert.Equal(t, "eth0", networks[0].InterfaceName)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Create_成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	// gorm Create 走 INSERT
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "assets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	asset := &models.Asset{Name: "db-01", AssetTag: "AT-002"}
+	err := svc.Create(context.Background(), asset)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Create_空name返回ErrInvalidInput(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	// 空 name 早返, 不打 DB
+	err := svc.Create(context.Background(), &models.Asset{Name: "  "})
+	assert.ErrorIs(t, err, ErrInvalidInput)
+
+	err2 := svc.Create(context.Background(), nil)
+	assert.ErrorIs(t, err2, ErrInvalidInput)
+}
+
+func TestAssetService_Update_成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// 1) First 拿 record — gorm 发 2 args (id, LIMIT 1)
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	// 2) Model.Updates 走 UPDATE
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	updates := map[string]interface{}{"status": "maintenance"}
+	asset, err := svc.Update(context.Background(), id.String(), updates)
+	require.NoError(t, err)
+	assert.NotNil(t, asset)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Update_空updates只Get不写DB(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// 空 map → 走 Get → First(asset) + Find(networks)
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{})
+	require.NoError(t, err)
+	assert.NotNil(t, asset)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Update_不存在返回ErrNotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// First 找不到 — gorm 发 2 args (id, LIMIT 1)
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 空
+
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "x"})
+	assert.Nil(t, asset)
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Delete_成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// gorm Delete 走事务
+	mock.ExpectBegin()
+	mock.ExpectExec(`DELETE FROM "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := svc.Delete(context.Background(), id.String())
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_List_PageSizeClamp_500上限(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	// PageSize=999 应被 clamp 到 500
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "assets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// Find 走 ORDER BY + OFFSET + LIMIT(500)
+	mock.ExpectQuery(`SELECT \* FROM "assets" ORDER BY created_at DESC`).
+		WithArgs(500). // 1 arg: limit only (offset 0)
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+
+	_, _, err := svc.List(context.Background(), AssetFilter{Page: 1, PageSize: 999})
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
