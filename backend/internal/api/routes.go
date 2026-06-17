@@ -175,10 +175,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		auth := api.Group("/auth")
 		{
-			auth.POST("/login", handlers.Login)
+			// v1.4 (ADR-001): login 严限 — 防爆破 5 req/min per IP
+			auth.POST("/login", middleware.RateLimit(middleware.DefaultRateLimitConfig(5)), handlers.Login)
 			auth.POST("/logout", handlers.Logout)
 			auth.GET("/me", middleware.AuthMiddleware(), handlers.GetCurrentUser)
-			auth.PUT("/password", middleware.AuthMiddleware(), handlers.ChangePassword)
+			auth.PUT("/password", middleware.AuthMiddleware(), middleware.RateLimit(middleware.DefaultRateLimitConfig(3)), handlers.ChangePassword)
 
 			auth.POST("/api-keys", middleware.AuthMiddleware(), handlers.CreateAPIKey)
 			auth.GET("/api-keys", middleware.AuthMiddleware(), handlers.ListAPIKeys)
@@ -188,6 +189,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		protected := api.Group("")
 		protected.Use(middleware.AuthMiddleware())
+		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100))) // v1.4 默认 100 req/min per IP+path
 		{
 			protected.POST("/integrations/sync", integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
