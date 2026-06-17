@@ -3,21 +3,24 @@
 // 设计原则：
 //   - 数据复用：直接调用 internal/service.DiagnosticService.GetTimeline，
 //     不重复聚合 SQL（避免数据漂移）
-//   - 中文支持：使用 unicode 字体（需嵌入 .ttf），暂用 UTF-8 转 Latin-1 兼容 fallback
-//   - 纯流式生成：handler 直接 io.Copy 到 gin.Response，避免大文件驻留内存
-//   - 可测：Renderer 接收接口而非 *fpdf.Fpdf，方便单测
+//   - 中文支持：//go:embed 嵌入霞鹜文楷 TC (SIL OFL 1.1, ~15MB)，
+//     零文件系统依赖，跨平台一致
+//   - 流式输出：Renderer 接受 io.Writer，handler 直接写入 gin.Response，
+//     避免大文件驻留内存
+//   - 可测：Renderer 接收 io.Writer + 接口注入，方便单测
 //
 // 报告内容（参考 AWS/Google SRE postmortem 模板精简版）：
 //  1. 报告头：资产名 / IP / 时间窗口 / 生成时间
 //  2. 资产概要：状态、open alerts、open tickets
-//  3. MTTR 摘要：平均恢复时间、告警密度
+//  3. 可靠性指标：MTTR (平均恢复时间)、告警密度
 //  4. 事件时间线：按时间倒序的事件流（alerts/tickets/status/link）
-//  5. Top 5 告警：按 severity 排序的 top N
+//  5. Top 5 严重告警：按 severity 排序的 top N
 package postmortem
 
 import (
-	"bytes"
+	_ "embed"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +29,15 @@ import (
 
 	"network-monitor-platform/internal/models"
 )
+
+// 嵌入霞鹜文楷 TC (SIL OFL 1.1, ~15MB) — 思源宋体衍生手写字体。
+// 详见 assets/FONT-LICENSE.txt。
+//
+//go:embed assets/LXGWWenKaiTC-Regular.ttf
+var fontCN []byte
+
+// fontName 是 fpdf 内部的字体 family 名（注册时使用，fpdf 内部存小写）
+const fontName = "lxgwwenkaitc"
 
 // ReportData 复盘报告输入（直接复用 DiagnosticTimeline）
 type ReportData struct {
@@ -37,7 +49,7 @@ type ReportData struct {
 
 // Renderer 渲染器接口（便于 mock 单测）
 type Renderer interface {
-	Render(data *ReportData) (bytes.Buffer, error)
+	Render(data *ReportData, w io.Writer) error
 }
 
 // FpdfRenderer 基于 fpdf 的标准渲染器
@@ -48,19 +60,19 @@ func NewFpdfRenderer() *FpdfRenderer {
 	return &FpdfRenderer{}
 }
 
-// Render 生成 PDF bytes.Buffer
-func (r *FpdfRenderer) Render(data *ReportData) (bytes.Buffer, error) {
-	var buf bytes.Buffer
-
+// Render 流式生成 PDF 到 w。
+// 中文支持：通过 //go:embed 嵌入思源黑体 CN Subset (SIL OFL 1.1)。
+func (r *FpdfRenderer) Render(data *ReportData, w io.Writer) error {
 	pdf := fpdf.New("P", "mm", "A4", "")
+
+	// 注册中文字体（从 embed 字节加载，零文件系统访问）
+	pdf.AddUTF8FontFromBytes(fontName, "", fontCN)
+
 	pdf.SetMargins(15, 15, 15)
 	pdf.SetAutoPageBreak(true, 15)
-
 	pdf.AddPage()
 
-	// 标题（英文 + ASCII fallback，中文需嵌入 unicode 字体才完整支持）
-	// fpdf 默认 Helvetica 只支持 Latin-1，Chinese 字符会显示为 #，但报告整体结构清晰
-	// 这是 v1 的可接受权衡（不引入字体文件以保持包轻量）
+	// 所有正文使用中文字体
 	renderHeader(pdf, data)
 	renderAssetSummary(pdf, data)
 	renderMttrSummary(pdf, data)
@@ -68,54 +80,46 @@ func (r *FpdfRenderer) Render(data *ReportData) (bytes.Buffer, error) {
 	renderTopAlerts(pdf, data)
 	renderFooter(pdf, data)
 
-	if err := pdf.Output(&buf); err != nil {
-		return buf, fmt.Errorf("PDF output: %w", err)
-	}
-	return buf, nil
+	return pdf.Output(w)
 }
 
 func renderHeader(pdf *fpdf.Fpdf, data *ReportData) {
-	pdf.SetFont("Helvetica", "B", 18)
-	pdf.Cell(0, 10, "Asset Postmortem Report")
+	pdf.SetFont(fontName, "", 18)
+	pdf.Cell(0, 10, "资产复盘报告 (Asset Postmortem)")
 	pdf.Ln(12)
 
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.SetFont(fontName, "", 10)
 	pdf.SetTextColor(100, 100, 100)
-	pdf.Cell(0, 5, fmt.Sprintf("Generated: %s", data.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC")))
+	pdf.Cell(0, 5, fmt.Sprintf("生成时间: %s", data.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC")))
 	pdf.Ln(5)
-	pdf.Cell(0, 5, fmt.Sprintf("Window: last %d days", data.WindowDays))
+	pdf.Cell(0, 5, fmt.Sprintf("时间窗口: 最近 %d 天", data.WindowDays))
 	pdf.Ln(10)
 	pdf.SetTextColor(0, 0, 0)
 }
 
 func renderAssetSummary(pdf *fpdf.Fpdf, data *ReportData) {
-	pdf.SetFont("Helvetica", "B", 13)
-	pdf.Cell(0, 8, "1. Asset Summary")
+	pdf.SetFont(fontName, "", 13)
+	pdf.Cell(0, 8, "1. 资产概要 (Asset Summary)")
 	pdf.Ln(9)
 
 	if data.Timeline == nil || data.Timeline.Asset == nil {
-		pdf.SetFont("Helvetica", "I", 10)
-		pdf.Cell(0, 5, "(no asset data)")
+		pdf.SetFont(fontName, "", 10)
+		pdf.Cell(0, 5, "(无资产数据)")
 		pdf.Ln(8)
 		return
 	}
 	a := data.Timeline.Asset
 
-	pdf.SetFont("Helvetica", "B", 10)
-	pdf.Cell(40, 6, "Name:")
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.SetFont(fontName, "", 10)
+	pdf.Cell(40, 6, "名称:")
 	pdf.Cell(0, 6, safe(a.Name))
 	pdf.Ln(6)
 
-	pdf.SetFont("Helvetica", "B", 10)
-	pdf.Cell(40, 6, "Type:")
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.Cell(40, 6, "类型:")
 	pdf.Cell(0, 6, safe(a.AssetType))
 	pdf.Ln(6)
 
-	pdf.SetFont("Helvetica", "B", 10)
-	pdf.Cell(40, 6, "IP Address:")
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.Cell(40, 6, "IP 地址:")
 	ip := data.IPAddress
 	if ip == "" {
 		ip = "-"
@@ -123,16 +127,12 @@ func renderAssetSummary(pdf *fpdf.Fpdf, data *ReportData) {
 	pdf.Cell(0, 6, safe(ip))
 	pdf.Ln(6)
 
-	pdf.SetFont("Helvetica", "B", 10)
-	pdf.Cell(40, 6, "Status:")
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.Cell(40, 6, "状态:")
 	pdf.Cell(0, 6, safe(a.Status))
 	pdf.Ln(6)
 
 	if a.SiteName != "" {
-		pdf.SetFont("Helvetica", "B", 10)
-		pdf.Cell(40, 6, "Site:")
-		pdf.SetFont("Helvetica", "", 10)
+		pdf.Cell(40, 6, "站点:")
 		pdf.Cell(0, 6, safe(a.SiteName))
 		pdf.Ln(6)
 	}
@@ -140,61 +140,61 @@ func renderAssetSummary(pdf *fpdf.Fpdf, data *ReportData) {
 }
 
 func renderMttrSummary(pdf *fpdf.Fpdf, data *ReportData) {
-	pdf.SetFont("Helvetica", "B", 13)
-	pdf.Cell(0, 8, "2. Reliability Metrics")
+	pdf.SetFont(fontName, "", 13)
+	pdf.Cell(0, 8, "2. 可靠性指标 (Reliability Metrics)")
 	pdf.Ln(9)
 
 	if data.Timeline == nil || data.Timeline.Summary == nil {
-		pdf.SetFont("Helvetica", "I", 10)
-		pdf.Cell(0, 5, "(no metrics)")
+		pdf.SetFont(fontName, "", 10)
+		pdf.Cell(0, 5, "(无指标数据)")
 		pdf.Ln(8)
 		return
 	}
 	s := data.Timeline.Summary
 
-	pdf.SetFont("Helvetica", "", 10)
-	pdf.Cell(60, 6, fmt.Sprintf("Total Alerts:    %d", s.AlertCount))
-	pdf.Cell(60, 6, fmt.Sprintf("Open Alerts:     %d", s.OpenAlerts))
+	pdf.SetFont(fontName, "", 10)
+	pdf.Cell(60, 6, fmt.Sprintf("总告警数:    %d", s.AlertCount))
+	pdf.Cell(60, 6, fmt.Sprintf("未关告警:    %d", s.OpenAlerts))
 	pdf.Ln(6)
-	pdf.Cell(60, 6, fmt.Sprintf("Total Tickets:   %d", s.TicketCount))
-	pdf.Cell(60, 6, fmt.Sprintf("Open Tickets:    %d", s.OpenTickets))
+	pdf.Cell(60, 6, fmt.Sprintf("总工单数:    %d", s.TicketCount))
+	pdf.Cell(60, 6, fmt.Sprintf("未关工单:    %d", s.OpenTickets))
 	pdf.Ln(6)
-	pdf.Cell(60, 6, fmt.Sprintf("Link Down:       %d", s.LinkDownCount))
+	pdf.Cell(60, 6, fmt.Sprintf("链路中断:    %d", s.LinkDownCount))
 	if s.MTTRSeconds != nil {
-		pdf.Cell(60, 6, fmt.Sprintf("MTTR:            %s", formatSeconds(*s.MTTRSeconds)))
+		pdf.Cell(60, 6, fmt.Sprintf("MTTR:        %s", formatSeconds(*s.MTTRSeconds)))
 	} else {
-		pdf.Cell(60, 6, "MTTR:            n/a")
+		pdf.Cell(60, 6, "MTTR:        n/a")
 	}
 	pdf.Ln(6)
 	if s.LastOffline != nil {
-		pdf.Cell(60, 6, fmt.Sprintf("Last Offline:    %s", s.LastOffline.UTC().Format("2006-01-02 15:04 UTC")))
+		pdf.Cell(60, 6, fmt.Sprintf("最近离线:    %s", s.LastOffline.UTC().Format("2006-01-02 15:04 UTC")))
 	}
 	if s.LastOnline != nil {
-		pdf.Cell(60, 6, fmt.Sprintf("Last Online:     %s", s.LastOnline.UTC().Format("2006-01-02 15:04 UTC")))
+		pdf.Cell(60, 6, fmt.Sprintf("最近恢复:    %s", s.LastOnline.UTC().Format("2006-01-02 15:04 UTC")))
 	}
 	pdf.Ln(10)
 }
 
 func renderTimeline(pdf *fpdf.Fpdf, data *ReportData) {
-	pdf.SetFont("Helvetica", "B", 13)
-	pdf.Cell(0, 8, "3. Event Timeline")
+	pdf.SetFont(fontName, "", 13)
+	pdf.Cell(0, 8, "3. 事件时间线 (Event Timeline)")
 	pdf.Ln(9)
 
 	if data.Timeline == nil || len(data.Timeline.Events) == 0 {
-		pdf.SetFont("Helvetica", "I", 10)
-		pdf.Cell(0, 5, "(no events in window)")
+		pdf.SetFont(fontName, "", 10)
+		pdf.Cell(0, 5, "(窗口内无事件)")
 		pdf.Ln(8)
 		return
 	}
 
 	// 表头
-	pdf.SetFont("Helvetica", "B", 9)
+	pdf.SetFont(fontName, "", 9)
 	pdf.SetFillColor(230, 230, 230)
-	pdf.CellFormat(35, 6, "Time", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(25, 6, "Kind", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(115, 6, "Title", "1", 1, "L", true, 0, "")
+	pdf.CellFormat(35, 6, "时间", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(25, 6, "类型", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(115, 6, "标题", "1", 1, "L", true, 0, "")
 
-	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetFont(fontName, "", 8)
 	maxRows := 50
 	events := data.Timeline.Events
 	if len(events) > maxRows {
@@ -211,8 +211,8 @@ func renderTimeline(pdf *fpdf.Fpdf, data *ReportData) {
 	}
 	if len(data.Timeline.Events) > maxRows {
 		pdf.Ln(3)
-		pdf.SetFont("Helvetica", "I", 9)
-		pdf.Cell(0, 5, fmt.Sprintf("... and %d more events (truncated)", len(data.Timeline.Events)-maxRows))
+		pdf.SetFont(fontName, "", 9)
+		pdf.Cell(0, 5, fmt.Sprintf("... 还有 %d 条事件（已截断）", len(data.Timeline.Events)-maxRows))
 	}
 	pdf.Ln(6)
 }
@@ -222,8 +222,8 @@ func renderTopAlerts(pdf *fpdf.Fpdf, data *ReportData) {
 		return
 	}
 	pdf.AddPage()
-	pdf.SetFont("Helvetica", "B", 13)
-	pdf.Cell(0, 8, "4. Top Longest Alerts")
+	pdf.SetFont(fontName, "", 13)
+	pdf.Cell(0, 8, "4. Top 严重告警 (Top Severity Alerts)")
 	pdf.Ln(9)
 
 	// 收集 alert 事件并按 severity 排序（severity 越大越严重）
@@ -234,11 +234,10 @@ func renderTopAlerts(pdf *fpdf.Fpdf, data *ReportData) {
 		}
 	}
 	if len(alerts) == 0 {
-		pdf.SetFont("Helvetica", "I", 10)
-		pdf.Cell(0, 5, "(no alerts in window)")
+		pdf.SetFont(fontName, "", 10)
+		pdf.Cell(0, 5, "(窗口内无告警)")
 		return
 	}
-	// 按 severity desc 排序
 	sort.SliceStable(alerts, func(i, j int) bool {
 		return alerts[i].Severity > alerts[j].Severity
 	})
@@ -249,14 +248,14 @@ func renderTopAlerts(pdf *fpdf.Fpdf, data *ReportData) {
 	alerts = alerts[:topN]
 
 	// 表头
-	pdf.SetFont("Helvetica", "B", 9)
+	pdf.SetFont(fontName, "", 9)
 	pdf.SetFillColor(230, 230, 230)
-	pdf.CellFormat(20, 6, "Sev", "1", 0, "C", true, 0, "")
-	pdf.CellFormat(35, 6, "Time", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(20, 6, "Kind", "1", 0, "L", true, 0, "")
-	pdf.CellFormat(100, 6, "Title", "1", 1, "L", true, 0, "")
+	pdf.CellFormat(20, 6, "严重度", "1", 0, "C", true, 0, "")
+	pdf.CellFormat(35, 6, "时间", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(20, 6, "子类型", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(100, 6, "标题", "1", 1, "L", true, 0, "")
 
-	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetFont(fontName, "", 8)
 	for _, e := range alerts {
 		pdf.CellFormat(20, 5, fmt.Sprintf("%d", e.Severity), "1", 0, "C", false, 0, "")
 		pdf.CellFormat(35, 5, e.TS.UTC().Format("01-02 15:04"), "1", 0, "L", false, 0, "")
@@ -271,26 +270,21 @@ func renderTopAlerts(pdf *fpdf.Fpdf, data *ReportData) {
 
 func renderFooter(pdf *fpdf.Fpdf, data *ReportData) {
 	pdf.Ln(10)
-	pdf.SetFont("Helvetica", "I", 8)
+	pdf.SetFont(fontName, "", 8)
 	pdf.SetTextColor(150, 150, 150)
-	pdf.Cell(0, 5, "This report is auto-generated from alerts / tickets / status history. Review with engineering team for root cause analysis.")
+	pdf.Cell(0, 5, "本报告由系统自动生成（alerts / tickets / status history），结合工程团队评审进行根因分析。")
 }
 
-// safe 字符串清洗：去除 fpdf 不支持的字符（控制字符、换行），避免 PDF 损坏
+// safe 字符串清洗：去除控制字符（fpdf 不支持），保留所有可见字符。
+// 中文支持由中文字体（fontName）保障。
 func safe(s string) string {
 	if s == "" {
 		return "-"
 	}
-	// fpdf 默认字体不支持 control char 和非 Latin-1；filter 到可打印 + 简单替换
 	var b strings.Builder
 	for _, r := range s {
 		if r < 32 {
 			b.WriteByte(' ')
-			continue
-		}
-		// Latin-1 范围之外的字符替换为 ?（v1 权衡，后续可加 unicode 字体）
-		if r > 255 {
-			b.WriteByte('?')
 			continue
 		}
 		b.WriteRune(r)

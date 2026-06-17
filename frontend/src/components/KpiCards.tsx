@@ -25,6 +25,24 @@ export interface KpiCardsProps {
 }
 
 /**
+ * KPI 阈值常量 (v1.1 可配置化)
+ *
+ * 当前值基于 IT 运维经验：
+ *   - MTTR > 1h 视为恢复慢
+ *   - MTTD > 10min 视为检测慢（告警延迟高）
+ *   - 告警密度 > 5/day 视为告警风暴
+ *   - SLA 达成率 < 90% 视为未达标
+ *
+ * 如需调整建议从环境变量/配置文件注入，避免散落硬编码。
+ */
+export const KPI_THRESHOLDS = {
+  MTTR_RED_SEC: 3600, // 1h
+  MTTD_RED_SEC: 600, // 10min
+  ALERT_DENSITY_RED: 5, // alerts/day
+  SLA_TARGET: 0.9, // 90%
+} as const
+
+/**
  * KpiCards - 关键 KPI 指标卡片
  *
  * 4 大指标:
@@ -63,7 +81,7 @@ export function KpiCards({ kpi, loading }: KpiCardsProps) {
               value={kpi.mttr_seconds != null ? formatDuration(kpi.mttr_seconds) : 'n/a'}
               prefix={<ClockCircleOutlined />}
               valueStyle={{
-                color: kpi.mttr_seconds != null && kpi.mttr_seconds > 3600 ? '#cf1322' : '#3f8600',
+                color: kpi.mttr_seconds != null && kpi.mttr_seconds > KPI_THRESHOLDS.MTTR_RED_SEC ? '#cf1322' : '#3f8600',
               }}
             />
           </Tooltip>
@@ -75,7 +93,7 @@ export function KpiCards({ kpi, loading }: KpiCardsProps) {
               value={kpi.mttd_seconds != null ? formatDuration(kpi.mttd_seconds) : 'n/a'}
               prefix={<EyeOutlined />}
               valueStyle={{
-                color: kpi.mttd_seconds != null && kpi.mttd_seconds > 600 ? '#cf1322' : '#3f8600',
+                color: kpi.mttd_seconds != null && kpi.mttd_seconds > KPI_THRESHOLDS.MTTD_RED_SEC ? '#cf1322' : '#3f8600',
               }}
             />
           </Tooltip>
@@ -87,7 +105,7 @@ export function KpiCards({ kpi, loading }: KpiCardsProps) {
               value={kpi.alert_density > 0 ? kpi.alert_density.toFixed(1) : '0'}
               suffix={kpi.alert_density > 0 ? 'alerts/day' : ''}
               prefix={<AlertOutlined />}
-              valueStyle={{ color: kpi.alert_density > 5 ? '#cf1322' : '#3f8600' }}
+              valueStyle={{ color: kpi.alert_density > KPI_THRESHOLDS.ALERT_DENSITY_RED ? '#cf1322' : '#3f8600' }}
             />
           </Tooltip>
         </Col>
@@ -105,10 +123,10 @@ export function KpiCards({ kpi, loading }: KpiCardsProps) {
               prefix={<CheckCircleOutlined />}
               valueStyle={{
                 color:
-                  kpi.sla_closed_rate != null && kpi.sla_closed_rate < 0.9 ? '#cf1322' : '#3f8600',
+                  kpi.sla_closed_rate != null && kpi.sla_closed_rate < KPI_THRESHOLDS.SLA_TARGET ? '#cf1322' : '#3f8600',
               }}
               suffix={
-                kpi.sla_closed_rate != null && kpi.sla_closed_rate < 0.9 ? (
+                kpi.sla_closed_rate != null && kpi.sla_closed_rate < KPI_THRESHOLDS.SLA_TARGET ? (
                   <Tag color="red" style={{ marginLeft: 8 }}>未达标</Tag>
                 ) : null
               }

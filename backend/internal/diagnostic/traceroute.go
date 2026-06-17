@@ -2,6 +2,7 @@ package diagnostic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -24,13 +25,17 @@ func Traceroute(ctx context.Context, host string, maxHops int) (*TracerouteResul
 
 	var args []string
 	// 平台差异：macOS -m/-w；Linux 同名
+	// -w 3：每跳等 3s（Linux traceroute 默认 5s，3s 是首跳优化，2s 容易丢包）
 	if runtime.GOOS == "darwin" {
 		args = []string{"-m", strconv.Itoa(maxHops), "-w", "2", host}
 	} else {
 		// Linux traceroute: -m max hops, -w wait seconds (default 5)
-		args = []string{"-m", strconv.Itoa(maxHops), "-w", "2", host}
+		args = []string{"-m", strconv.Itoa(maxHops), "-w", "3", host}
 	}
-	bin := "traceroute"
+	bin, err := resolveTracerouteBinary()
+	if err != nil {
+		return nil, err
+	}
 
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -39,10 +44,10 @@ func Traceroute(ctx context.Context, host string, maxHops int) (*TracerouteResul
 	raw := string(out)
 
 	if err != nil {
-		if errors_Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: 超时 (raw=%s)", ErrTracerouteFailed, truncate(raw, 200))
 		}
-		if errors_Is(ctx.Err(), context.Canceled) {
+		if errors.Is(ctx.Err(), context.Canceled) {
 			return nil, fmt.Errorf("%w: 取消", ErrTracerouteFailed)
 		}
 		// traceroute 通常所有跳都返回 0，但若没输出则硬错误
@@ -55,22 +60,6 @@ func Traceroute(ctx context.Context, host string, maxHops int) (*TracerouteResul
 	result.RawOutput = raw
 	result.DurationMs = duration.Milliseconds()
 	return result, nil
-}
-
-// errors_Is 复刻 errors.Is（避免内部包名冲突）
-func errors_Is(err, target error) bool {
-	for e := err; e != nil; {
-		if e == target {
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		if u, ok := e.(unwrapper); ok {
-			e = u.Unwrap()
-		} else {
-			return false
-		}
-	}
-	return false
 }
 
 // traceroute 行格式（macOS / Linux 类似）：
@@ -245,4 +234,22 @@ func eqFold(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// resolveTracerouteBinary 一次性解析 traceroute 路径，缓存到 package var。
+// 缺失时返回 ErrBinaryNotFound（fail fast，避免每次请求都 LookPath）。
+//
+//nolint:revive // 内部 helper
+func resolveTracerouteBinary() (string, error) {
+	tracerouteBinOnce.Do(func() {
+		path, err := exec.LookPath("traceroute")
+		if err != nil {
+			return
+		}
+		tracerouteBinPath = path
+	})
+	if tracerouteBinPath == "" {
+		return "", fmt.Errorf("%w: traceroute", ErrBinaryNotFound)
+	}
+	return tracerouteBinPath, nil
 }

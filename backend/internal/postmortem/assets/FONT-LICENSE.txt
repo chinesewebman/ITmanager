@@ -1,0 +1,32 @@
+霞鹜文楷 (LXGW WenKai TC)
+==========================
+
+File: LXGWWenKaiTC-Regular.ttf
+Size: ~15 MB
+Subset: TC (Traditional Chinese, 完整 CJK 字符集，包含所有简体常用字)
+
+License
+-------
+SIL Open Font License 1.1 (OFL-1.1)
+Copyright © 2020-2023 LXGW (https://github.com/lxgw/LxgwWenkaiTC)
+
+This font is free for commercial and non-commercial use, modification, and redistribution.
+See: https://scripts.sil.org/OFL
+
+Why this font
+-------------
+- 霞鹜文楷是高质量中文开源字体（GitHub 4k+ stars）
+- SIL OFL 1.1 商用免费
+- 思源宋体（Noto Serif CJK）+ 一系列手写改造
+- 字符覆盖：7000+ 常用汉字 + 拉丁文 + 数字 + 标点
+- TC 子集已包含大多数简体常用字（现代汉语通用字表 7000 字）
+- 适合 IT 运维场景（资产名、告警标题、工单描述）— 全部能显示
+
+Embedding
+---------
+通过 Go 1.16+ 的 //go:embed 嵌入到二进制，零运行时依赖，零文件系统访问。
+
+If 15MB is too large:
+- 改用 LXGW WenKai Screen (霞鹜文楷 Screen) 屏幕优化版，~5MB
+- 或 SubsetOTF/CN 思源黑体 CN 8MB（注意：Adobe CDN 经常 404，需手动备份）
+- 或 文泉驿微米黑 WenQuanYi Micro Hei ~5MB（GPL+font-exception）

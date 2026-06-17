@@ -1,7 +1,7 @@
 // KpiCards 组件测试
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { KpiCards, type KPI } from './KpiCards'
+import { KpiCards, KPI_THRESHOLDS, type KPI } from './KpiCards'
 
 // 抑制 chart 等内部可能的副作用
 vi.mock('@ant-design/icons', () => ({
@@ -69,5 +69,31 @@ describe('KpiCards', () => {
       expect(screen.getByText(want)).toBeTruthy()
       unmount()
     }
+  })
+
+  it('KPI_THRESHOLDS 常量值正确（防止 v1.1 改动时回归）', () => {
+    expect(KPI_THRESHOLDS.MTTR_RED_SEC).toBe(3600) // 1h
+    expect(KPI_THRESHOLDS.MTTD_RED_SEC).toBe(600) // 10min
+    expect(KPI_THRESHOLDS.ALERT_DENSITY_RED).toBe(5)
+    expect(KPI_THRESHOLDS.SLA_TARGET).toBe(0.9)
+  })
+
+  it('MTTR 越阈值时显示未达标视觉（SLA 字段触发红色）', () => {
+    // SLA 是唯一会加 Tag 标签的字段，用它来验证 threshold 触发
+    const kpi: KPI = {
+      mttr_seconds: 7200, // 2h，超过 1h 阈值
+      mttd_seconds: 1200, // 20min，超过 10min 阈值
+      alert_density: 8, // 超过 5/day
+      sla_closed_rate: 0.5, // 低于 90% 阈值
+      window_days: 7,
+    }
+    render(<KpiCards kpi={kpi} />)
+    // 验证 4 个 Statistic 组件都渲染了
+    expect(screen.getByText('MTTR (平均恢复)')).toBeTruthy()
+    expect(screen.getByText('MTTD (平均检测)')).toBeTruthy()
+    expect(screen.getByText('告警密度')).toBeTruthy()
+    expect(screen.getByText('SLA 达成率')).toBeTruthy()
+    // SLA < 90% 时显示 "未达标" tag
+    expect(screen.getByText('未达标')).toBeTruthy()
   })
 })

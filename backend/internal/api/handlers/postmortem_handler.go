@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -71,7 +70,7 @@ func (h *PostmortemHandler) DownloadReport(c *gin.Context) {
 	ctx, cancel := contextWithTimeout(c.Request.Context(), 30)
 	defer cancel()
 
-	buf, data, err := h.svc.GenerateReport(ctx, assetID, params)
+	data, err := h.svc.GenerateReport(ctx, c.Writer, assetID, params)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "资产不存在")
@@ -90,7 +89,8 @@ func (h *PostmortemHandler) DownloadReport(c *gin.Context) {
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Data(http.StatusOK, "application/pdf", buf.Bytes())
+	// 注意：PDF 已通过 c.Writer 流式写入，无需再 c.Data()
+	// gin 会在 handler return 时自动 flush
 }
 
 // contextWithTimeout 给 ctx 加超时（秒）。若 ctx 已有 Deadline 则不覆盖。

@@ -5,6 +5,8 @@
 //   - 跨平台：macOS (BSD) 与 Linux (iputils) ping 输出差异都覆盖
 //   - 安全：host 白名单 + 参数上限 + exec.CommandContext 强制超时
 //   - 可测：parse 函数纯逻辑，单测不依赖真实 binary
+//   - 启动验证：包初始化时 exec.LookPath 验证 binary 存在，
+//     缺失时 Ping/Traceroute 立即返回 ErrBinaryNotFound（fail fast）
 //
 // 使用：
 //
@@ -20,8 +22,21 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
+
+// 启动时验证 binary 是否在 PATH 中（fail fast）。
+// 缺失时返回 ErrBinaryNotFound，handler 直接 503 而不是每次请求都 LookPath。
+var (
+	pingBinaryOnce    sync.Once
+	tracerouteBinOnce sync.Once
+	pingBinaryPath    string
+	tracerouteBinPath string
+)
+
+// ErrBinaryNotFound ping/traceroute 二进制不在 PATH 中
+var ErrBinaryNotFound = errors.New("diagnostic binary not found in PATH")
 
 // PingResult 单次 ping 的结构化结果
 type PingResult struct {
@@ -113,7 +128,10 @@ func Ping(ctx context.Context, host string, count int) (*PingResult, error) {
 		// Linux iputils: -W 是秒，不是毫秒
 		args = []string{"-c", strconv.Itoa(count), "-W", "2", host}
 	}
-	bin := "ping"
+	bin, err := resolvePingBinary()
+	if err != nil {
+		return nil, err
+	}
 
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -190,4 +208,22 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// resolvePingBinary 一次性解析 ping 路径，缓存到 package var。
+// 缺失时返回 ErrBinaryNotFound（fail fast，避免每次请求都 LookPath）。
+//
+//nolint:revive // 内部 helper
+func resolvePingBinary() (string, error) {
+	pingBinaryOnce.Do(func() {
+		path, err := exec.LookPath("ping")
+		if err != nil {
+			return
+		}
+		pingBinaryPath = path
+	})
+	if pingBinaryPath == "" {
+		return "", fmt.Errorf("%w: ping", ErrBinaryNotFound)
+	}
+	return pingBinaryPath, nil
 }
