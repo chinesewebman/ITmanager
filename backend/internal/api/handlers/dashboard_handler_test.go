@@ -21,6 +21,7 @@ import (
 type mockDashboardServiceOnlyHandlerTest struct {
 	statsFunc  func(ctx context.Context) (*service.DashboardStats, error)
 	trendsFunc func(ctx context.Context, days int) ([]service.TrendPoint, error)
+	kpisFunc   func(ctx context.Context, days int) (*service.KPI, error)
 }
 
 func (m *mockDashboardServiceOnlyHandlerTest) Stats(ctx context.Context) (*service.DashboardStats, error) {
@@ -28,6 +29,12 @@ func (m *mockDashboardServiceOnlyHandlerTest) Stats(ctx context.Context) (*servi
 }
 func (m *mockDashboardServiceOnlyHandlerTest) AlertTrends(ctx context.Context, days int) ([]service.TrendPoint, error) {
 	return m.trendsFunc(ctx, days)
+}
+func (m *mockDashboardServiceOnlyHandlerTest) KPIs(ctx context.Context, days int) (*service.KPI, error) {
+	if m.kpisFunc == nil {
+		return &service.KPI{WindowDays: days}, nil
+	}
+	return m.kpisFunc(ctx, days)
 }
 
 func newDashboardTestRouterOnlyHandlerTest(svc service.DashboardService) *gin.Engine {
@@ -37,6 +44,7 @@ func newDashboardTestRouterOnlyHandlerTest(svc service.DashboardService) *gin.En
 	g := r.Group("/dashboard")
 	g.GET("/stats", h.GetDashboardStats)
 	g.GET("/trends", h.GetDashboardTrends)
+	g.GET("/kpis", h.GetKPIs)
 	return r
 }
 
@@ -193,3 +201,82 @@ func TestDashboard_ResponseCodeZeroUnified(t *testing.T) {
 
 // mock models import 防未用报错（避免删 import 后又加）
 var _ = models.Asset{}
+
+// ==================== KPI handler 测试 ====================
+
+func ptrInt64(v int64) *int64     { return &v }
+func ptrFloat(v float64) *float64 { return &v }
+
+func TestDashboardHandler_GetKPIs_默认7天(t *testing.T) {
+	mock := &mockDashboardServiceOnlyHandlerTest{
+		kpisFunc: func(ctx context.Context, days int) (*service.KPI, error) {
+			return &service.KPI{
+				MTTRSeconds:    ptrInt64(3600), // 1h
+				MTTDSeconds:    ptrInt64(300),  // 5min
+				AlertDensity:   2.5,
+				SLAClosedRate:  ptrFloat(0.95),
+				WindowDays:     days,
+				ResolvedAlerts: 5,
+				AckedAlerts:    8,
+				ClosedTickets:  20,
+				OnTimeTickets:  19,
+			}, nil
+		},
+	}
+	r := newDashboardTestRouterOnlyHandlerTest(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/kpis", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"mttr_seconds":3600`, "应返回 MTTR=3600")
+	assert.Contains(t, body, `"mttd_seconds":300`, "应返回 MTTD=300")
+	assert.Contains(t, body, `"alert_density":2.5`)
+	assert.Contains(t, body, `"sla_closed_rate":0.95`)
+}
+
+func TestDashboardHandler_GetKPIs_自定义days(t *testing.T) {
+	var gotDays int
+	mock := &mockDashboardServiceOnlyHandlerTest{
+		kpisFunc: func(ctx context.Context, days int) (*service.KPI, error) {
+			gotDays = days
+			return &service.KPI{WindowDays: days}, nil
+		},
+	}
+	r := newDashboardTestRouterOnlyHandlerTest(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/kpis?days=30", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 30, gotDays, "应透传 days=30")
+}
+
+func TestDashboardHandler_GetKPIs_days非法(t *testing.T) {
+	r := newDashboardTestRouterOnlyHandlerTest(&mockDashboardServiceOnlyHandlerTest{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/kpis?days=abc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDashboardHandler_GetKPIs_无数据字段为null(t *testing.T) {
+	mock := &mockDashboardServiceOnlyHandlerTest{
+		kpisFunc: func(ctx context.Context, days int) (*service.KPI, error) {
+			// 所有可空字段为 nil
+			return &service.KPI{WindowDays: days}, nil
+		},
+	}
+	r := newDashboardTestRouterOnlyHandlerTest(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/kpis", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"mttr_seconds":null`, "MTTR 应为 null")
+	assert.Contains(t, body, `"mttd_seconds":null`, "MTTD 应为 null")
+	assert.Contains(t, body, `"sla_closed_rate":null`, "SLA 应为 null")
+}

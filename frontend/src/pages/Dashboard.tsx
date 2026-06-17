@@ -3,6 +3,7 @@ import { dashboardApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { DashboardCards, type DashboardCardsStats } from '../components/DashboardCards'
 import { AlertTrendChart, type AlertTrend } from '../components/AlertTrendChart'
+import { KpiCards, type KPI } from '../components/KpiCards'
 import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
 
 const MOCK_STATS: DashboardCardsStats = {
@@ -58,6 +59,16 @@ function Dashboard() {
     { staleTime: 60_000 },
   )
 
+  // A-3: KPI 指标（1min 缓存）
+  const { data: kpi, isLoading: kpiLoading } = useApiQuery<KPI | null>(
+    ['dashboard', 'kpis'],
+    async () => {
+      const res: any = await dashboardApi.getKPIs()
+      return res?.data?.data ?? null
+    },
+    { staleTime: 60_000 },
+  )
+
   const safeStats = stats ?? MOCK_STATS
   const safeTrends = trends ?? MOCK_TRENDS
 
@@ -71,6 +82,9 @@ function Dashboard() {
   return (
     <div>
       <PageHeader title="仪表盘" subtitle="网络运维平台核心指标速览" />
+
+      {/* A-3: KPI 指标区（4 大关键指标） */}
+      <KpiCards kpi={kpi ?? null} loading={kpiLoading} />
 
       <DashboardCards stats={safeStats} alertTrendDelta={delta} />
 

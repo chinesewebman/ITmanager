@@ -136,6 +136,7 @@ func TestChannelHandler_TestChannel_存在返200(t *testing.T) {
 type mockDashboardService struct {
 	statsFunc       func(ctx context.Context) (*service.DashboardStats, error)
 	alertTrendsFunc func(ctx context.Context, days int) ([]service.TrendPoint, error)
+	kpisFunc        func(ctx context.Context, days int) (*service.KPI, error)
 }
 
 func (m *mockDashboardService) Stats(ctx context.Context) (*service.DashboardStats, error) {
@@ -149,6 +150,12 @@ func (m *mockDashboardService) AlertTrends(ctx context.Context, days int) ([]ser
 		return m.alertTrendsFunc(ctx, days)
 	}
 	return nil, nil
+}
+func (m *mockDashboardService) KPIs(ctx context.Context, days int) (*service.KPI, error) {
+	if m.kpisFunc != nil {
+		return m.kpisFunc(ctx, days)
+	}
+	return &service.KPI{WindowDays: days}, nil
 }
 
 func newDashboardTestRouter(svc service.DashboardService) *gin.Engine {

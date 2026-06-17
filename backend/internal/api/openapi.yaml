@@ -118,6 +118,35 @@ paths:
               schema:
                 $ref: '#/components/schemas/DashboardTrends'
 
+  /dashboard/kpis:
+    get:
+      tags:
+        - 仪表盘
+      summary: 获取关键 KPI 指标
+      description: |
+        返回 MTTR (平均恢复时间)、MTTD (平均检测时间)、告警密度、SLA 达成率。
+        days 默认 7，范围 1-90。
+      operationId: getKPIs
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 7
+            minimum: 1
+            maximum: 90
+          description: 窗口天数，默认 7，范围 1-90
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KPI'
+        '400':
+          description: 请求参数错误
+
   # ==================== 资产管理 ====================
   /assets:
     get:
@@ -1891,6 +1920,47 @@ components:
                     type: string
                   count:
                     type: integer
+
+    KPI:
+      type: object
+      properties:
+        mttr_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: 平均恢复时间（秒），无已解决告警时为 null
+        mttd_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: 平均检测时间（秒），无已确认告警时为 null
+        alert_density:
+          type: number
+          description: 窗口内每日告警数（alerts/day）
+        sla_closed_rate:
+          type: number
+          nullable: true
+          description: SLA 达成率（已关单中按时比例，0-1），无已关工单时为 null
+        window_days:
+          type: integer
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        resolved_alerts:
+          type: integer
+          format: int64
+        acked_alerts:
+          type: integer
+          format: int64
+        closed_tickets:
+          type: integer
+          format: int64
+        on_time_tickets:
+          type: integer
+          format: int64
 
     # ==================== 资产 ====================
     Asset:

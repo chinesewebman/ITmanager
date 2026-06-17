@@ -74,7 +74,8 @@ export const authApi = {
 // ==================== 仪表盘 ====================
 export const dashboardApi = {
   getStats: () => api.get("/dashboard/stats"),
-  getTrends: () => api.get("/dashboard/trends"),
+  getTrends: (days = 7) => api.get("/dashboard/trends", { params: { days } }),
+  getKPIs: (days = 7) => api.get("/dashboard/kpis", { params: { days } }),
 };
 
 // ==================== 资产管理 ====================

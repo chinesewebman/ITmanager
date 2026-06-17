@@ -249,11 +249,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 				users.GET("", userH.ListUsers)
 				users.GET("/:id", userH.GetUser)
 			}
-
+			// 仪表盘
 			dashboard := protected.Group("/dashboard")
 			{
 				dashboard.GET("/stats", dashboardH.GetDashboardStats)
 				dashboard.GET("/trends", dashboardH.GetDashboardTrends)
+				dashboard.GET("/kpis", dashboardH.GetKPIs)
 			}
 
 			channels := protected.Group("/notification-channels")
