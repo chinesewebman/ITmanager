@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/notification"
 
 	"gorm.io/gorm"
 )
@@ -16,6 +17,7 @@ type ChannelService interface {
 	Create(ctx context.Context, ch *models.NotificationChannel) error
 	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.NotificationChannel, error)
 	Delete(ctx context.Context, id string) error
+	// Test 真实调 Sender 试发, 失败返 error
 	Test(ctx context.Context, id string) error
 }
 
@@ -81,11 +83,15 @@ func (s *channelService) Delete(ctx context.Context, id string) error {
 	return s.db.WithContext(ctx).Delete(&models.NotificationChannel{}, "id = ?", id).Error
 }
 
+// Test v1.4: 真实发测试消息 (走 notification.Sender)
 func (s *channelService) Test(ctx context.Context, id string) error {
-	// 真实实现：按 channel.Type 调对应 webhook / SMTP
-	// 这里只验证存在
-	if _, err := s.Get(ctx, id); err != nil {
+	ch, err := s.Get(ctx, id)
+	if err != nil {
 		return err
 	}
-	return nil
+	sender, err := notification.Resolver(ch)
+	if err != nil {
+		return err
+	}
+	return sender.Send(ctx, "", "[ITmanager Test] 渠道连通性测试")
 }
