@@ -15,6 +15,7 @@ import (
 // GLPIClient GLPI 客户端（C-P7：走 httpx）。
 type GLPIClient struct {
 	c         *httpx.Client
+	m         httpx.MetricsRecorder // v2.2: Reload 复用 metrics
 	appToken  string
 	userToken string
 
@@ -28,9 +29,23 @@ func NewGLPIClient(cfg *config.GLPIConfig, m httpx.MetricsRecorder) *GLPIClient 
 	hcfg.Timeout = 30 * time.Second
 	return &GLPIClient{
 		c:         httpx.New(hcfg, "glpi", m),
+		m:         m,
 		appToken:  cfg.AppToken,
 		userToken: cfg.UserToken,
 	}
+}
+
+// Reload 运行时热更新 GLPI URL/token（v2.2：UI 保存后免重启）。
+// 清缓存 session 让下次 GetTickets 重新 InitSession。
+func (g *GLPIClient) Reload(cfg *config.GLPIConfig) {
+	hcfg := httpx.DefaultConfig(cfg.URL)
+	hcfg.Timeout = 30 * time.Second
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.appToken = cfg.AppToken
+	g.userToken = cfg.UserToken
+	g.session = "" // 清缓存，下次 GetTickets 重新 InitSession
+	g.c = httpx.New(hcfg, "glpi", g.m)
 }
 
 // InitSession 初始化会话（C-P7：ctx 透传）。

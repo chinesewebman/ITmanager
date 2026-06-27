@@ -22,14 +22,18 @@ import (
 func newIntegrationTestRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(gin.Recovery())                         // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
+	r.Use(gin.Recovery()) // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
 	h := handlers.NewIntegrationHandler(nil, cfg) // nil svc，Sync 路由不能实际调用
 	g := r.Group("/integrations")
 	g.POST("/sync", h.Sync)
 	g.GET("/status", h.GetIntegrationStatus)
-	// v2.2: Zabbix 配置 + 连通测试
+	// v2.2: 三个集成的配置 + 连通测试
 	g.PUT("/zabbix", h.UpdateZabbix)
 	g.POST("/zabbix/test", h.TestZabbix)
+	g.PUT("/netbox", h.UpdateNetBox)
+	g.POST("/netbox/test", h.TestNetBox)
+	g.PUT("/glpi", h.UpdateGLPI)
+	g.POST("/glpi/test", h.TestGLPI)
 	return r
 }
 
@@ -295,5 +299,146 @@ func TestTestZabbix_svcNil_返500(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	// svc.TestZabbixConnection → svc.zabbix.Login → nil pointer panic → gin.Recovery → 500
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// ==================== v2.2: NetBox/GLPI Status 字段 ====================
+
+// TestIntegrationStatus_NetBox_HasToken v2.2: netbox.has_token 正确反映。
+func TestIntegrationStatus_NetBox_HasToken(t *testing.T) {
+	cfg := minimalCfgForTest("http://netbox.local", "", "")
+	cfg.Integrations.Netbox.Token = "real-token-xyz"
+	r := newIntegrationTestRouter(cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"has_token":true`)
+	assert.NotContains(t, body, `"token":"real-token-xyz"`)
+}
+
+func TestIntegrationStatus_NetBox_NoToken(t *testing.T) {
+	cfg := minimalCfgForTest("http://netbox.local", "", "")
+	r := newIntegrationTestRouter(cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+	assert.Contains(t, w.Body.String(), `"has_token":false`)
+}
+
+// TestIntegrationStatus_GLPI_HasTokens v2.2: GLPI 双 token 各自独立反映。
+func TestIntegrationStatus_GLPI_HasTokens(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "http://glpi.local")
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "" // 只有 app
+	r := newIntegrationTestRouter(cfg)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+	body := w.Body.String()
+	assert.Contains(t, body, `"has_app_token":true`)
+	assert.Contains(t, body, `"has_user_token":false`)
+	assert.NotContains(t, body, `"app_token":"app-tok"`)
+}
+
+// ==================== v2.2: NetBox Update ====================
+
+func TestUpdateNetBox_缺URL_返400(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+	body := []byte(`{"token":"abc"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/netbox", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateNetBox_OK_内存Cfg已更新(t *testing.T) {
+	cfg := minimalCfgForTest("http://old", "", "")
+	cfg.Integrations.Netbox.Token = "old-token"
+	r := newIntegrationTestRouter(cfg)
+	body := []byte(`{"url":"http://new-netbox:8000","token":"new-token"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/netbox", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "svc=nil 应 panic → gin 转 500")
+	assert.Equal(t, "http://new-netbox:8000", cfg.Integrations.Netbox.URL)
+	assert.Equal(t, "new-token", cfg.Integrations.Netbox.Token)
+}
+
+func TestUpdateNetBox_空Token_保留旧值(t *testing.T) {
+	cfg := minimalCfgForTest("http://old", "", "")
+	cfg.Integrations.Netbox.Token = "preserved-token"
+	r := newIntegrationTestRouter(cfg)
+	body := []byte(`{"url":"http://new","token":""}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/netbox", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "preserved-token", cfg.Integrations.Netbox.Token, "空 token 必须保留旧值")
+}
+
+// ==================== v2.2: GLPI Update ====================
+
+func TestUpdateGLPI_缺URL_返400(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+	body := []byte(`{"app_token":"a","user_token":"b"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/glpi", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateGLPI_OK_内存Cfg已更新(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "http://old")
+	cfg.Integrations.GLPI.AppToken = "old-app"
+	cfg.Integrations.GLPI.UserToken = "old-user"
+	r := newIntegrationTestRouter(cfg)
+	body := []byte(`{"url":"http://new-glpi:80","app_token":"new-app","user_token":"new-user"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/glpi", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "http://new-glpi:80", cfg.Integrations.GLPI.URL)
+	assert.Equal(t, "new-app", cfg.Integrations.GLPI.AppToken)
+	assert.Equal(t, "new-user", cfg.Integrations.GLPI.UserToken)
+}
+
+func TestUpdateGLPI_空Token_各自保留旧值(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "http://old")
+	cfg.Integrations.GLPI.AppToken = "preserved-app"
+	cfg.Integrations.GLPI.UserToken = "preserved-user"
+	r := newIntegrationTestRouter(cfg)
+	// 只改 URL + app_token，user_token 留空 → 保留
+	body := []byte(`{"url":"http://new","app_token":"new-app","user_token":""}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/glpi", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "preserved-user", cfg.Integrations.GLPI.UserToken, "空 user_token 必须保留旧值")
+}
+
+// ==================== v2.2: TestNetBox/TestGLPI 连通 ====================
+
+func TestTestNetBox_svcNil_返500(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+	req := httptest.NewRequest(http.MethodPost, "/integrations/netbox/test", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestTestGLPI_svcNil_返500(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+	req := httptest.NewRequest(http.MethodPost, "/integrations/glpi/test", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

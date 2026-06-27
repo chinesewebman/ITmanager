@@ -153,13 +153,27 @@ export const notificationApi = {
 
 // ==================== 第三方集成（v2.2） ====================
 // P2-2 优化：Settings 集成页接后端 API，不再是死表单。
-// 三件套：status 读取 / 保存配置 / 测试连通 / 立即同步。
+// 每个集成三件套：status 读取 / 保存配置 / 测试连通 / 立即同步。
 export const integrationApi = {
   getStatus: () => api.get("/integrations/status"),
+
+  // Zabbix
   updateZabbix: (data: { url: string; user: string; password?: string }) =>
     api.put("/integrations/zabbix", data),
   testZabbix: () => api.post("/integrations/zabbix/test"),
   syncZabbix: () => api.post("/integrations/sync", { type: "zabbix" }),
+
+  // NetBox
+  updateNetBox: (data: { url: string; token?: string }) =>
+    api.put("/integrations/netbox", data),
+  testNetBox: () => api.post("/integrations/netbox/test"),
+  syncNetBox: () => api.post("/integrations/sync", { type: "netbox" }),
+
+  // GLPI
+  updateGLPI: (data: { url: string; app_token?: string; user_token?: string }) =>
+    api.put("/integrations/glpi", data),
+  testGLPI: () => api.post("/integrations/glpi/test"),
+  syncGLPI: () => api.post("/integrations/sync", { type: "glpi" }),
 };
 
 // ==================== 网络诊断 ====================

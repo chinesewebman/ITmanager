@@ -88,19 +88,21 @@ func (h *IntegrationHandler) GetIntegrationStatus(c *gin.Context) {
 		"code": 0,
 		"data": gin.H{
 			"netbox": gin.H{
-				"enabled": h.config.Integrations.Netbox.URL != "",
-				"url":     h.config.Integrations.Netbox.URL,
+				"enabled":    h.config.Integrations.Netbox.URL != "",
+				"url":        h.config.Integrations.Netbox.URL,
+				"has_token":  h.config.Integrations.Netbox.Token != "",
 			},
 			"zabbix": gin.H{
-				"enabled": h.config.Integrations.Zabbix.URL != "",
-				"url":     h.config.Integrations.Zabbix.URL,
-				"user":    h.config.Integrations.Zabbix.User,
-				// 不回显 password（明文）
+				"enabled":      h.config.Integrations.Zabbix.URL != "",
+				"url":          h.config.Integrations.Zabbix.URL,
+				"user":         h.config.Integrations.Zabbix.User,
 				"has_password": h.config.Integrations.Zabbix.Password != "",
 			},
 			"glpi": gin.H{
-				"enabled": h.config.Integrations.GLPI.URL != "",
-				"url":     h.config.Integrations.GLPI.URL,
+				"enabled":        h.config.Integrations.GLPI.URL != "",
+				"url":            h.config.Integrations.GLPI.URL,
+				"has_app_token":  h.config.Integrations.GLPI.AppToken != "",
+				"has_user_token": h.config.Integrations.GLPI.UserToken != "",
 			},
 		},
 	})
@@ -154,5 +156,87 @@ func (h *IntegrationHandler) UpdateZabbix(c *gin.Context) {
 			"url":  req.URL,
 			"user": req.User,
 		},
+	})
+}
+
+// ==================== v2.2: NetBox ====================
+
+// TestNetBox v2.2: 拉 1 条设备验证 NetBox URL/Token 通不通，不入 DB。
+func (h *IntegrationHandler) TestNetBox(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	if err := h.svc.TestNetBoxConnection(ctx); err != nil {
+		apierr.BadRequest(c, "NetBox 连通失败: "+err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "NetBox 连通 OK"})
+}
+
+// UpdateNetBoxRequest v2.2: NetBox URL + Token。Token 空 = 保留旧值（避免 UI 误清空）。
+type UpdateNetBoxRequest struct {
+	URL   string `json:"url" binding:"required"`
+	Token string `json:"token"`
+}
+
+// UpdateNetBox v2.2: UI 保存 → 内存 cfg + Reload client。
+func (h *IntegrationHandler) UpdateNetBox(c *gin.Context) {
+	var req UpdateNetBoxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apierr.BadRequest(c, "url 必填: "+err.Error())
+		return
+	}
+	if req.Token == "" {
+		req.Token = h.config.Integrations.Netbox.Token
+	}
+	newCfg := &config.NetboxConfig{URL: req.URL, Token: req.Token}
+	h.config.Integrations.Netbox = *newCfg
+	h.svc.ReloadNetBox(newCfg)
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "NetBox 配置已生效（运行时），重启后回到 yaml/env 值",
+		"data":    gin.H{"url": req.URL},
+	})
+}
+
+// ==================== v2.2: GLPI ====================
+
+// TestGLPI v2.2: InitSession 验证 GLPI URL + 两个 token 通不通，不入 DB。
+func (h *IntegrationHandler) TestGLPI(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	if err := h.svc.TestGLPIConnection(ctx); err != nil {
+		apierr.BadRequest(c, "GLPI 连通失败: "+err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "GLPI 连通 OK"})
+}
+
+// UpdateGLPIRequest v2.2: GLPI URL + 两个 token。两个 token 各自允许空 = 保留旧值。
+type UpdateGLPIRequest struct {
+	URL       string `json:"url" binding:"required"`
+	AppToken  string `json:"app_token"`
+	UserToken string `json:"user_token"`
+}
+
+// UpdateGLPI v2.2: UI 保存 → 内存 cfg + Reload client（清 session）。
+func (h *IntegrationHandler) UpdateGLPI(c *gin.Context) {
+	var req UpdateGLPIRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apierr.BadRequest(c, "url 必填: "+err.Error())
+		return
+	}
+	if req.AppToken == "" {
+		req.AppToken = h.config.Integrations.GLPI.AppToken
+	}
+	if req.UserToken == "" {
+		req.UserToken = h.config.Integrations.GLPI.UserToken
+	}
+	newCfg := &config.GLPIConfig{URL: req.URL, AppToken: req.AppToken, UserToken: req.UserToken}
+	h.config.Integrations.GLPI = *newCfg
+	h.svc.ReloadGLPI(newCfg)
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "GLPI 配置已生效（运行时），重启后回到 yaml/env 值",
+		"data":    gin.H{"url": req.URL},
 	})
 }

@@ -58,11 +58,141 @@ function Settings() {
           user: data.zabbix.user || '',
         })
       }
+      if (data?.netbox) {
+        netboxForm.setFieldsValue({
+          url: data.netbox.url || '',
+        })
+      }
+      if (data?.glpi) {
+        glpiForm.setFieldsValue({
+          url: data.glpi.url || '',
+        })
+      }
     } catch (error) {
       console.error('获取集成状态失败:', error)
       message.error('获取集成状态失败')
     } finally {
       setStatusLoading(false)
+    }
+  }
+
+  // v2.2: 保存 NetBox 配置 → PUT /integrations/netbox
+  const [netboxForm] = Form.useForm()
+  const [netboxSaving, setNetboxSaving] = useState(false)
+  const [netboxTesting, setNetboxTesting] = useState(false)
+  const [netboxSyncing, setNetboxSyncing] = useState(false)
+  const handleSaveNetBox = async () => {
+    try {
+      const values = await netboxForm.validateFields()
+      setNetboxSaving(true)
+      const payload: { url: string; token?: string } = { url: values.url }
+      if (values.token) payload.token = values.token
+      const res: any = await integrationApi.updateNetBox(payload)
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'NetBox 配置已生效')
+        netboxForm.setFieldValue('token', '')
+        await fetchIntegrationStatus()
+      } else {
+        message.error(res?.data?.message || '保存失败')
+      }
+    } catch (error: any) {
+      if (error?.errorFields) return
+      console.error('保存 NetBox 配置失败:', error)
+      message.error(error?.response?.data?.message || '保存失败')
+    } finally {
+      setNetboxSaving(false)
+    }
+  }
+  const handleTestNetBox = async () => {
+    setNetboxTesting(true)
+    try {
+      const res: any = await integrationApi.testNetBox()
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'NetBox 连通 OK')
+      } else {
+        message.error(res?.data?.message || '连通失败')
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '连通失败')
+    } finally {
+      setNetboxTesting(false)
+    }
+  }
+  const handleSyncNetBox = async () => {
+    setNetboxSyncing(true)
+    try {
+      const res: any = await integrationApi.syncNetBox()
+      const synced = res?.data?.data?.synced?.netbox
+      if (res?.data?.code === 0) {
+        message.success(`NetBox 同步完成，新增 ${synced ?? 0} 条资产`)
+      } else {
+        message.error(res?.data?.message || '同步失败')
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '同步失败')
+    } finally {
+      setNetboxSyncing(false)
+    }
+  }
+
+  // v2.2: 保存 GLPI 配置 → PUT /integrations/glpi
+  const [glpiForm] = Form.useForm()
+  const [glpiSaving, setGlpiSaving] = useState(false)
+  const [glpiTesting, setGlpiTesting] = useState(false)
+  const [glpiSyncing, setGlpiSyncing] = useState(false)
+  const handleSaveGLPI = async () => {
+    try {
+      const values = await glpiForm.validateFields()
+      setGlpiSaving(true)
+      const payload: { url: string; app_token?: string; user_token?: string } = { url: values.url }
+      if (values.app_token) payload.app_token = values.app_token
+      if (values.user_token) payload.user_token = values.user_token
+      const res: any = await integrationApi.updateGLPI(payload)
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'GLPI 配置已生效')
+        glpiForm.setFieldValue('app_token', '')
+        glpiForm.setFieldValue('user_token', '')
+        await fetchIntegrationStatus()
+      } else {
+        message.error(res?.data?.message || '保存失败')
+      }
+    } catch (error: any) {
+      if (error?.errorFields) return
+      console.error('保存 GLPI 配置失败:', error)
+      message.error(error?.response?.data?.message || '保存失败')
+    } finally {
+      setGlpiSaving(false)
+    }
+  }
+  const handleTestGLPI = async () => {
+    setGlpiTesting(true)
+    try {
+      const res: any = await integrationApi.testGLPI()
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'GLPI 连通 OK')
+      } else {
+        message.error(res?.data?.message || '连通失败')
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '连通失败')
+    } finally {
+      setGlpiTesting(false)
+    }
+  }
+  const handleSyncGLPI = async () => {
+    setGlpiSyncing(true)
+    try {
+      const res: any = await integrationApi.syncGLPI()
+      const synced = res?.data?.data?.synced?.glpi
+      if (res?.data?.code === 0) {
+        message.success(`GLPI 同步完成，新增 ${synced ?? 0} 条工单`)
+      } else {
+        message.error(res?.data?.message || '同步失败')
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '同步失败')
+    } finally {
+      setGlpiSyncing(false)
     }
   }
 
@@ -316,26 +446,120 @@ function Settings() {
               </Space>
             </Form>
           </Card>
-          <Card title="NetBox">
-            <Form layout="vertical">
-              <Form.Item label="URL">
-                <Input placeholder="http://localhost:8000" defaultValue="http://localhost:8000" />
+          <Card
+            title={
+              <Space>
+                <span>NetBox</span>
+                {integrationStatus?.netbox?.has_token && (
+                  <Tag color="blue">已配置 Token</Tag>
+                )}
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Form form={netboxForm} layout="vertical">
+              <Form.Item
+                label="URL"
+                name="url"
+                rules={[{ required: true, message: '请输入 NetBox URL' }]}
+              >
+                <Input placeholder="http://netbox:8000" />
               </Form.Item>
-              <Form.Item label="API Token">
-                <Input.Password placeholder="请输入API Token" defaultValue="" />
+              <Form.Item
+                label="API Token"
+                name="token"
+                extra={integrationStatus?.netbox?.has_token ? '已配置 · 留空表示不修改' : '未配置 · 请输入'}
+              >
+                <Input.Password placeholder="请输入 Token（留空保留原值）" />
               </Form.Item>
-              <Button type="primary" disabled>保存（暂未启用）</Button>
+              <Space>
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleSaveNetBox}
+                  loading={netboxSaving}
+                >
+                  保存配置
+                </Button>
+                <Button
+                  icon={<ApiFilled />}
+                  onClick={handleTestNetBox}
+                  loading={netboxTesting}
+                >
+                  测试连通
+                </Button>
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={handleSyncNetBox}
+                  loading={netboxSyncing}
+                  disabled={!integrationStatus?.netbox?.enabled}
+                >
+                  立即同步
+                </Button>
+              </Space>
             </Form>
           </Card>
-          <Card title="GLPI" style={{ marginTop: 16 }}>
-            <Form layout="vertical">
-              <Form.Item label="URL">
-                <Input placeholder="http://localhost" defaultValue="http://localhost" />
+          <Card
+            title={
+              <Space>
+                <span>GLPI</span>
+                {integrationStatus?.glpi?.has_app_token && integrationStatus?.glpi?.has_user_token && (
+                  <Tag color="blue">双 Token 已配置</Tag>
+                )}
+                {(integrationStatus?.glpi?.has_app_token || integrationStatus?.glpi?.has_user_token) &&
+                 !(integrationStatus?.glpi?.has_app_token && integrationStatus?.glpi?.has_user_token) && (
+                  <Tag color="orange">Token 不完整</Tag>
+                )}
+              </Space>
+            }
+          >
+            <Form form={glpiForm} layout="vertical">
+              <Form.Item
+                label="URL"
+                name="url"
+                rules={[{ required: true, message: '请输入 GLPI URL' }]}
+              >
+                <Input placeholder="http://glpi:80" />
               </Form.Item>
-              <Form.Item label="API Token">
-                <Input.Password placeholder="请输入API Token" />
+              <Form.Item
+                label="App Token"
+                name="app_token"
+                extra={integrationStatus?.glpi?.has_app_token ? '已配置 · 留空表示不修改' : '未配置 · 请输入'}
+              >
+                <Input.Password placeholder="请输入 App Token（留空保留原值）" />
               </Form.Item>
-              <Button type="primary" disabled>保存（暂未启用）</Button>
+              <Form.Item
+                label="User Token"
+                name="user_token"
+                extra={integrationStatus?.glpi?.has_user_token ? '已配置 · 留空表示不修改' : '未配置 · 请输入'}
+              >
+                <Input.Password placeholder="请输入 User Token（留空保留原值）" />
+              </Form.Item>
+              <Space>
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleSaveGLPI}
+                  loading={glpiSaving}
+                >
+                  保存配置
+                </Button>
+                <Button
+                  icon={<ApiFilled />}
+                  onClick={handleTestGLPI}
+                  loading={glpiTesting}
+                >
+                  测试连通
+                </Button>
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={handleSyncGLPI}
+                  loading={glpiSyncing}
+                  disabled={!integrationStatus?.glpi?.enabled}
+                >
+                  立即同步
+                </Button>
+              </Space>
             </Form>
           </Card>
         </Spin>

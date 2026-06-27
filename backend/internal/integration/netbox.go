@@ -15,6 +15,7 @@ import (
 // NetBoxClient NetBox 客户端（C-P7：走 httpx，集成 retry/熔断/metrics/ctx）。
 type NetBoxClient struct {
 	c *httpx.Client
+	m httpx.MetricsRecorder // v2.2: Reload 时复用，metrics 不断
 }
 
 // NewNetBoxClient 创建 NetBox 客户端。
@@ -23,7 +24,32 @@ func NewNetBoxClient(cfg *config.NetboxConfig, m httpx.MetricsRecorder) *NetBoxC
 	hcfg.HeaderName = "Authorization"
 	hcfg.HeaderValue = fmt.Sprintf("Token %s", cfg.Token)
 	hcfg.Timeout = 30 * time.Second // 同步任务允许更久
-	return &NetBoxClient{c: httpx.New(hcfg, "netbox", m)}
+	return &NetBoxClient{c: httpx.New(hcfg, "netbox", m), m: m}
+}
+
+// Reload 运行时热更新 NetBox URL/Token（v2.2：UI 保存后免重启）。
+func (c *NetBoxClient) Reload(cfg *config.NetboxConfig) {
+	hcfg := httpx.DefaultConfig(cfg.URL)
+	hcfg.HeaderName = "Authorization"
+	hcfg.HeaderValue = fmt.Sprintf("Token %s", cfg.Token)
+	hcfg.Timeout = 30 * time.Second
+	c.c = httpx.New(hcfg, "netbox", c.m)
+}
+
+// TestConnection v2.2: 拉 1 条设备验证 URL/Token 通不通（不动 DB）。
+func (c *NetBoxClient) TestConnection(ctx context.Context) error {
+	body, _, err := c.c.Do(ctx, "GET", "/api/dcim/devices/?limit=1", nil)
+	if err != nil {
+		return fmt.Errorf("NetBox 连通失败: %w", err)
+	}
+	// 401/403 走 httpx retry 不抓，所以这里只看 body 是否能解析（说明认证通过）
+	var probe struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return fmt.Errorf("NetBox 响应解析失败（认证错？）: %w", err)
+	}
+	return nil
 }
 
 // Device NetBox 设备

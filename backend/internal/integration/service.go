@@ -60,6 +60,26 @@ func (s *IntegrationService) ReloadZabbix(cfg *config.ZabbixConfig) {
 	s.zabbix.Reload(cfg)
 }
 
+// TestNetBoxConnection v2.2: 拉 1 条设备验证 NetBox URL/Token 通不通。
+func (s *IntegrationService) TestNetBoxConnection(ctx context.Context) error {
+	return s.netbox.TestConnection(ctx)
+}
+
+// ReloadNetBox v2.2: UI 改完配置点保存后调。
+func (s *IntegrationService) ReloadNetBox(cfg *config.NetboxConfig) {
+	s.netbox.Reload(cfg)
+}
+
+// TestGLPIConnection v2.2: InitSession 验证 GLPI URL + 两个 token 通不通。
+func (s *IntegrationService) TestGLPIConnection(ctx context.Context) error {
+	return s.glpi.InitSession(ctx)
+}
+
+// ReloadGLPI v2.2: UI 改完配置点保存后调。
+func (s *IntegrationService) ReloadGLPI(cfg *config.GLPIConfig) {
+	s.glpi.Reload(cfg)
+}
+
 // SyncFromNetBox 从 NetBox 同步资产（C-P6：批量 upsert；C-P7：ctx 透传）。
 func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 	devices, err := s.netbox.SyncDevices(ctx)
