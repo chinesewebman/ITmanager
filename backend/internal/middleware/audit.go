@@ -26,10 +26,10 @@ type AuditConfig struct {
 // DefaultSkipPaths 默认不审计的路径
 func DefaultSkipPaths() map[string]bool {
 	return map[string]bool{
-		"/healthz":          true,
-		"/readyz":           true,
-		"/metrics":          true,
-		"/api/health":       true,
+		"/healthz":            true,
+		"/readyz":             true,
+		"/metrics":            true,
+		"/api/health":         true,
 		"/swagger/index.html": true,
 	}
 }
