@@ -92,20 +92,19 @@ export const ApiErrorCode = {
 } as const
 export type ApiErrorCodeType = (typeof ApiErrorCode)[keyof typeof ApiErrorCode]
 
-// ==================== Migration 标记 ====================
-
-/**
- * 已迁移到 type-safe 的方法（示范）：
- * - assetApi.list (query params 用 AssetListParams)
- * - alertApi.list (query params 用 AlertListParams)
- * - authApi.login (body 用 LoginRequest)
- *
- * 迁移原则：保留原 method signature 不变，type alias 作为 opt-in 增强。
- * 调用方可以继续用 `params: any`，但 IDE 会在 type 已知时给出提示。
- */
-export const MIGRATION_STATUS = {
-  assetApi_list: 'typed (AssetListParams)',
-  alertApi_list: 'typed (AlertListParams)',
-  authApi_login: 'typed (LoginRequest)',
-  // TODO: 全部方法迁移
-} as const
+// ==================== 迁移状态说明 ====================
+//
+// v2.1.1 (P1-frontend audit): 原 MIGRATION_STATUS 常量已删除。
+// 旧常量硬编码 "assetApi_list: typed" 等, 但 api.ts 里 90% 方法签名仍是
+// (data: any) (assetApi.create/update, alertRuleApi.*, ticketApi.*, notificationApi.*)。
+// 假装"已迁移到位"会误导后来人 — 调用方看不出哪些是真 typed 哪些仍是 any。
+//
+// 真实迁移计划（v3.0 大版本 + openapi-typescript 自动化）：
+//   - 把 api.ts 所有 `data: any` 替换成具体 schema type
+//     (e.g. AssetCreateRequest, TicketCreateRequest from api.types.ts)
+//   - 用 gen:api 脚本自动生成 typed client, 避免手维护漂移
+//   - 估计影响 ~200 处签名变更 + 30+ 调用方调整, 需要独立大版本
+//
+// 当前策略：保留 apiClient.ts 的 typePath helper + 部分已迁移方法 (assetApi.list,
+// alertApi.list, authApi.login) 作为示范, 调用方仍可用 `any` 但 IDE 在 type
+// 已知处会提示。完整迁移追踪见 v3.0 roadmap。
