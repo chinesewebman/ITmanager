@@ -123,3 +123,23 @@ func TestEncode_空字符串是NUL分隔的明确证据(t *testing.T) {
 	decoded, _ := base64.RawURLEncoding.DecodeString(enc)
 	assert.True(t, strings.Contains(string(decoded), separator), "encode 后的明文应含 NUL 分隔符")
 }
+
+// P2: benchmark 测试 — cursor 在 List 路径热点上, 防 encode/decode 退化
+func BenchmarkEncode(b *testing.B) {
+	id := uuid.New()
+	ts := time.Now()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Encode(ts, id)
+	}
+}
+
+func BenchmarkDecode(b *testing.B) {
+	id := uuid.New()
+	ts := time.Now()
+	enc := Encode(ts, id)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = Decode(enc)
+	}
+}
