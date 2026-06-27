@@ -45,7 +45,15 @@ func (h *AlertHandler) ListAlerts(c *gin.Context) {
 		// err 时降级到 v1.x 行为 (忽略 cursor)
 	}
 
-	items, stats, err := h.svc.List(c.Request.Context(), filter)
+	items, stats, err := h.svc.List(c.Request.Context(), service.AlertFilter{
+		Status:       c.Query("status"),
+		Severity:     severity,
+		HostID:       c.Query("host_id"),
+		Limit:        limit,
+		CursorTS:     filter.CursorTS,
+		CursorID:     filter.CursorID,
+		IncludeStats: true, // HTTP 列表页需要 stats 全表聚合
+	})
 	if err != nil {
 		apierr.Internal(c, "获取告警列表失败", err)
 		return

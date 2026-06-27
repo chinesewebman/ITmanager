@@ -237,7 +237,7 @@ func TestAlertService_List_成功_返items和stats(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
 		WillReturnRows(statsRows)
 
-	items, stats, err := svc.List(ctx, AlertFilter{})
+	items, stats, err := svc.List(ctx, AlertFilter{IncludeStats: true})
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 	assert.Equal(t, "CPU 100%", items[0].TriggerName)
@@ -282,8 +282,31 @@ func TestAlertService_List_limit超1000截断(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
 		WillReturnRows(statsRows)
 
-	_, _, err := svc.List(ctx, AlertFilter{Limit: 9999})
+	items, stats, err := svc.List(ctx, AlertFilter{Limit: 9999, IncludeStats: true})
 	require.NoError(t, err)
+	_ = items
+	_ = stats
+}
+
+// TestAlertService_List_IncludeStatsFalse跳过stats (P2)
+// IncludeStats=false 时不应 expect stats SELECT query (省 1 次 DB roundtrip)
+func TestAlertService_List_IncludeStatsFalse跳过stats(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	rows := sqlmock.NewRows([]string{"id", "alert_id", "severity"}).
+		AddRow(uuid.NewString(), "zab-1", 4)
+	mock.ExpectQuery(`SELECT \* FROM "alerts"`).
+		WillReturnRows(rows)
+
+	// 注意: 这里不 expect COUNT(*) 查询, 验证 opt-out 路径跳过 statsInternal
+
+	items, stats, err := svc.List(ctx, AlertFilter{IncludeStats: false})
+	require.NoError(t, err)
+	assert.Len(t, items, 1)
+	assert.Equal(t, int64(0), stats.Total, "IncludeStats=false 时 stats 应为空")
+	assert.NoError(t, mock.ExpectationsWereMet(), "不应有 COUNT(*) 查询")
 }
 
 // ==================== BulkResolve 补全 (现只有空ids) ====================

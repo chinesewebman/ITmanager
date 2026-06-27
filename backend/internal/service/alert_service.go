@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/notification"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -26,6 +26,9 @@ type AlertFilter struct {
 	// 为空时走 v1.x 行为 (Limit only, no offset)
 	CursorTS time.Time
 	CursorID uuid.UUID
+	// P2: 是否需要 stats 全表聚合 (默认 false, 减少分页路径多 1 次 DB roundtrip)
+	// HTTP 列表页设 true; gRPC 已弃用 stats 字段不设
+	IncludeStats bool
 }
 
 // AlertStats 告警统计聚合结果
@@ -88,16 +91,16 @@ func (s *alertService) WithBus(bus eventbus.Bus) {
 }
 
 // publish 内部辅助: bus 为 nil 时静默跳过
+// P2: 失败 log warn (旧版 _ = err 静默吞掉)
 func (s *alertService) publish(topic string, payload any) {
 	if s.bus == nil {
 		return
 	}
 	if err := s.bus.Publish(topic, payload); err != nil {
-		// Publish 失败不应阻塞主业务, 只 log
-		// (用 slog 后续可注入, 现在 fmt 占位)
-		_ = err
+		slog.Warn("alertService: publish failed", slog.String("topic", topic), slog.String("err", err.Error()))
 	}
 }
+
 func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert, AlertStats, error) {
 	q := s.db.WithContext(ctx).Model(&models.Alert{})
 
@@ -137,6 +140,10 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 		return nil, AlertStats{}, err
 	}
 
+	// P2: statsInternal 仅在 IncludeStats=true 时调用 (gRPC 翻页场景可省 1 次 DB roundtrip)
+	if !f.IncludeStats {
+		return items, AlertStats{}, nil
+	}
 	stats, err := s.statsInternal(ctx)
 	if err != nil {
 		return nil, AlertStats{}, err
@@ -339,7 +346,7 @@ func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, err
 	return affected, err
 }
 
-// writeNotificationTrigger v1.1 P2-B-3: 告警状态变更 → 落 notification_logs (pending)。
+// writeNotificationTrigger v1.1 P2-B-3: 告警状态变更 → 落 notification_logs (pending).
 // 实际发送 (dingtalk/email) 是 v1.2 异步 worker 的事，这里只做 trigger + 落库。
 // 失败仅 log，不影响主流程 — 主调用方 (Acknowledge/Resolve) 已成功改 status。
 func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uuid.UUID, newStatus, userID string) error {
@@ -348,10 +355,8 @@ func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uui
 	if err := s.db.WithContext(ctx).
 		Where("is_enabled = ?", true).
 		Find(&channels).Error; err != nil {
-		// 不致命 — log 后继续
-		gin.DefaultErrorWriter.Write([]byte(
-			"[WARN] notification trigger: query channels failed: " + err.Error() + "\n",
-		))
+		// P2: 不致命 — slog.Warn 后继续 (旧版用 gin.DefaultErrorWriter 不一致)
+		slog.Warn("notification trigger: query channels failed", slog.String("err", err.Error()))
 		return nil
 	}
 	if len(channels) == 0 {
@@ -371,9 +376,7 @@ func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uui
 		})
 	}
 	if err := s.db.WithContext(ctx).Create(&logs).Error; err != nil {
-		gin.DefaultErrorWriter.Write([]byte(
-			"[WARN] notification trigger: insert logs failed: " + err.Error() + "\n",
-		))
+		slog.Warn("notification trigger: insert logs failed", slog.String("err", err.Error()))
 		return nil
 	}
 	return nil
