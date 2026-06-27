@@ -165,23 +165,25 @@ func (s *OncallService) CreatePolicy(ctx context.Context, policy *models.Escalat
 	if policy.ID == uuid.Nil {
 		policy.ID = uuid.New()
 	}
-	if err := s.db.WithContext(ctx).Create(policy).Error; err != nil {
-		return err
-	}
-	// 同步创建 levels
-	for i := range policy.Levels {
-		level := &policy.Levels[i]
-		if level.PolicyID == uuid.Nil {
-			level.PolicyID = policy.ID
-		}
-		if level.ID == uuid.Nil {
-			level.ID = uuid.New()
-		}
-		if err := s.db.WithContext(ctx).Create(level).Error; err != nil {
+	// M4-5 审计 P2 修复: policy + levels 包事务, 防部分写入产生半成品 policy
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(policy).Error; err != nil {
 			return err
 		}
-	}
-	return nil
+		for i := range policy.Levels {
+			level := &policy.Levels[i]
+			if level.PolicyID == uuid.Nil {
+				level.PolicyID = policy.ID
+			}
+			if level.ID == uuid.Nil {
+				level.ID = uuid.New()
+			}
+			if err := tx.Create(level).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *OncallService) ListPolicies(ctx context.Context) ([]models.EscalationPolicy, error) {
@@ -237,18 +239,20 @@ func (s *OncallService) GetPolicy(ctx context.Context, id uuid.UUID) (*models.Es
 }
 
 func (s *OncallService) DeletePolicy(ctx context.Context, id uuid.UUID) error {
-	// 删 levels
-	if err := s.db.WithContext(ctx).Where("policy_id = ?", id).Delete(&models.EscalationLevel{}).Error; err != nil {
-		return err
-	}
-	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.EscalationPolicy{})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	// M4-5 审计 P2 修复: 删 levels + policy 包事务, 防 levels 残留
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("policy_id = ?", id).Delete(&models.EscalationLevel{}).Error; err != nil {
+			return err
+		}
+		res := tx.Where("id = ?", id).Delete(&models.EscalationPolicy{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 // ==================== ProcessEscalation 升级评估 ====================
