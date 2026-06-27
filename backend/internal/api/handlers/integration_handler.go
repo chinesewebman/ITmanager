@@ -40,10 +40,10 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 
 	// 🐛 BUG#7: 之前 type=garbage 静默走 default("all")，现在严格校验
 	switch req.Type {
-	case "netbox", "zabbix", "glpi", "all", "":
+	case "netbox", "zabbix", "glpi", "zabbix_metrics", "all", "":
 		// 合法
 	default:
-		apierr.BadRequest(c, "type 必须是 netbox/zabbix/glpi/all 之一")
+		apierr.BadRequest(c, "type 必须是 netbox/zabbix/glpi/zabbix_metrics/all 之一")
 		return
 	}
 
@@ -62,6 +62,11 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 	case "zabbix":
 		count, e := h.svc.SyncFromZabbix(ctx)
 		results = map[string]int{"zabbix": count}
+		err = e
+	case "zabbix_metrics":
+		// v2.3: Zabbix 兜底采集，单独走 item.get → metric_snapshots
+		count, e := h.svc.SyncMetricsFromZabbix(ctx)
+		results = map[string]int{"zabbix_metrics": count}
 		err = e
 	case "glpi":
 		count, e := h.svc.SyncFromGLPI(ctx)
@@ -88,9 +93,9 @@ func (h *IntegrationHandler) GetIntegrationStatus(c *gin.Context) {
 		"code": 0,
 		"data": gin.H{
 			"netbox": gin.H{
-				"enabled":    h.config.Integrations.Netbox.URL != "",
-				"url":        h.config.Integrations.Netbox.URL,
-				"has_token":  h.config.Integrations.Netbox.Token != "",
+				"enabled":   h.config.Integrations.Netbox.URL != "",
+				"url":       h.config.Integrations.Netbox.URL,
+				"has_token": h.config.Integrations.Netbox.Token != "",
 			},
 			"zabbix": gin.H{
 				"enabled":      h.config.Integrations.Zabbix.URL != "",

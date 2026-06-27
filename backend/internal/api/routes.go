@@ -9,6 +9,7 @@ import (
 	"network-monitor-platform/internal/api/handlers"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/httpx"
 	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/metrics"
 	"network-monitor-platform/internal/middleware"
@@ -84,9 +85,9 @@ func UpdateDBPoolMetrics(gormDB *gorm.DB) {
 	platformMetrics.SetGauge("db_pool_wait_count", float64(stats.WaitCount))
 }
 
-// integrationMetricsAdapter 把 metrics.Registry 适配成 httpx.MetricsRecorder 接口。
-// 集成层 httpx 调用时把事件桥接到全局 platformMetrics。
-func integrationMetricsAdapter() *integrationHTTPMetrics {
+// NewIntegrationMetricsAdapter v2.3: 暴露给 main.go 用于构造 IntegrationService。
+// 内部仍使用 platformMetrics 全局（由 InitMetrics() 注入）。
+func NewIntegrationMetricsAdapter() httpx.MetricsRecorder {
 	return &integrationHTTPMetrics{}
 }
 
@@ -105,8 +106,10 @@ func (i *integrationHTTPMetrics) ObserveDuration(system string, seconds float64)
 	platformMetrics.ObserveHistogram("integration_request_duration_seconds", seconds, system)
 }
 
-// SetupRouter 设置路由
-func SetupRouter(cfg *config.Config) *gin.Engine {
+// SetupRouter v2.3: IntegrationService 由调用方（main.go）传入并复用，
+// MetricSyncWorker 也用同一个 svc.zabbix 客户端 — 保证 UI Reload Zabbix 配置后
+// worker 立即生效，无需重启。
+func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationService) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -133,8 +136,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		})
 	}
 
-	// C-P5: 集成 metric 记录器
-	integMetrics := integrationMetricsAdapter()
+	// C-P5: 集成 metric 记录器（v2.3：构造在 main.go，此处不再重复构造）
 
 	assetSvc := service.NewAssetService(db)
 	alertSvc := service.NewAlertService(db)
@@ -150,7 +152,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	oncallSvc := service.NewOncallService(db)
 	runbookSvc := service.NewRunbookService(db)
 	metricSvc := service.NewMetricSnapshotService(db)
-	integrationSvc := integration.NewIntegrationService(cfg, integMetrics)
+	// integrationSvc v2.3: 改为参数传入，避免重复构造 ZabbixClient
 	postmortemSvc := service.NewPostmortemService(db, diagnosticSvc)
 
 	assetH := handlers.NewAssetHandler(assetSvc)

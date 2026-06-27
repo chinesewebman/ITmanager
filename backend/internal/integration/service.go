@@ -7,6 +7,8 @@ import (
 	"log"
 	"time"
 
+	"gorm.io/gorm"
+
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/httpx"
@@ -296,3 +298,14 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 	}
 	return results, nil
 }
+
+// SyncMetricsFromZabbix v2.3: Zabbix → metric_snapshots 兜底单次同步。
+// 给 HTTP handler 手动触发用（运维 / 调试）；cron worker 也走同一个函数。
+// Zabbix 未配置 → 返 0, nil；登录失败 / item.get 失败 → 返 error。
+func (s *IntegrationService) SyncMetricsFromZabbix(ctx context.Context) (int, error) {
+	return SyncMetricsFromZabbix(ctx, s.zabbix, s.db(), 1000)
+}
+
+// db 拿 *gorm.DB 句柄（与 SyncFromNetBox 一致走 database.DB）。
+// 单独抽函数便于测试 mock（v2.3 暂未引入 mock 框架，先保持简单）。
+func (s *IntegrationService) db() *gorm.DB { return database.DB }

@@ -15,6 +15,7 @@ import (
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/eventbus"
+	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/notification"
 	"network-monitor-platform/internal/service"
@@ -48,6 +49,16 @@ func main() {
 	// 内部 counter/gauge 都会积累；只有 /metrics 端点开/关控制是否暴露）
 	api.InitMetrics()
 
+	// v2.3: 构造 IntegrationService 一次，路由 + 兜底 worker 复用同一个 ZabbixClient。
+	// UI 在 Settings 改 Zabbix 配置后 Reload 该 client，两个 caller 立即生效，无需重启。
+	integrationSvc := integration.NewIntegrationService(cfg, api.NewIntegrationMetricsAdapter())
+
+	// v2.3: 启动 Zabbix 兜底 metric sync worker（每 5min 拉一次 item.get → metric_snapshots）
+	metricWorker := integration.NewMetricSyncWorker(integrationSvc, db, integration.MetricSyncConfig{Tick: 5 * time.Minute})
+	metricWorker.Start(context.Background())
+	defer metricWorker.Stop()
+	logger.Info("📊 Zabbix 兜底 metric sync worker 已启动 (5min tick)")
+
 	// v1.4: 启动通知 worker (消费 pending notification_logs, 调 Sender 真发)
 	notifWorker := notification.NewWorker(db, notification.WorkerConfig{Tick: 5 * time.Second})
 	notifWorker.Start(context.Background())
@@ -76,7 +87,7 @@ func main() {
 	logger.Info("📨 事件总线已启动 (4 workers, 通知 worker 已注册订阅)")
 
 	// 4. 设置路由
-	router := api.SetupRouter(cfg)
+	router := api.SetupRouter(cfg, integrationSvc)
 
 	// 5. 创建服务器
 	srv := &http.Server{

@@ -106,6 +106,48 @@ func (z *ZabbixClient) Login(ctx context.Context) error {
 	return nil
 }
 
+// GetMetricItems 拉所有 numeric item 的 lastvalue（兜底采集用）。
+// 调用 item.get 时带 selectHosts: extend，让 caller 能 host → asset 关联。
+// 仅取 value_type ∈ {0 (float), 1 (char), 3 (int), 4 (text)}，跳过 type=2 (log) 防爆量。
+// history 不拉（item.lastvalue 自带，省一次 API call + 时间范围参数复杂度）。
+func (z *ZabbixClient) GetMetricItems(ctx context.Context) ([]Item, error) {
+	z.mu.Lock()
+	needLogin := z.auth == "" || time.Now().After(z.expiresAt.Add(-60*time.Second))
+	z.mu.Unlock()
+	if needLogin {
+		if err := z.Login(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	req := ZabbixAPIRequest{
+		JSONRPC: "2.0",
+		Method:  "item.get",
+		Params: map[string]interface{}{
+			"output":      []string{"itemid", "name", "key_", "lastvalue", "units", "value_type"},
+			"selectHosts": "extend",
+			"value_type":  []int{0, 1, 3, 4},
+			"webitems":    true,                               // include web items
+			"filter":      map[string]interface{}{"state": 0}, // skip disabled
+			"sortfield":   "itemid",
+			"limit":       5000,
+		},
+		Auth: z.auth,
+		ID:   10,
+	}
+	resp, err := z.doRequest(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("获取监控项失败: %w", err)
+	}
+	var result struct {
+		Result []Item `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+	return result.Result, nil
+}
+
 // GetTriggers 获取告警列表（C-P7：ctx 透传）。
 func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 	z.mu.Lock()
@@ -212,6 +254,10 @@ type Item struct {
 	Name      string `json:"name"`
 	Key       string `json:"key_"`
 	LastValue string `json:"lastvalue"`
+	Units     string `json:"units"`
+	// Hosts v2.3 Zabbix 兜底: GetMetricItems selectHosts=extend 时填充。
+	// trigger.get 的 selectItems 不会填充，留 nil 不影响已有调用方。
+	Hosts []Host `json:"hosts,omitempty"`
 }
 type Event struct {
 	EventID   string `json:"eventid"`

@@ -22,7 +22,7 @@ import (
 func newIntegrationTestRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(gin.Recovery()) // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
+	r.Use(gin.Recovery())                         // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
 	h := handlers.NewIntegrationHandler(nil, cfg) // nil svc，Sync 路由不能实际调用
 	g := r.Group("/integrations")
 	g.POST("/sync", h.Sync)
@@ -165,7 +165,7 @@ func TestSync_合法Type_通过校验(t *testing.T) {
 	cfg := minimalCfgForTest("", "", "")
 	r := newIntegrationTestRouter(cfg)
 
-	for _, ty := range []string{"netbox", "zabbix", "glpi", "all", ""} {
+	for _, ty := range []string{"netbox", "zabbix", "glpi", "zabbix_metrics", "all", ""} {
 		t.Run("type="+ty, func(t *testing.T) {
 			defer func() {
 				_ = recover() // svc=nil 必然 panic，过校验即可

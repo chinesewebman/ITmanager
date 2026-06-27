@@ -13,6 +13,7 @@ import (
 	"network-monitor-platform/internal/api"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/integration"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -311,7 +312,9 @@ func setupRouterWithConfig(t *testing.T, cfg *config.Config) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	_ = api.InitMetrics()
-	return api.SetupRouter(cfg)
+	// v2.3: SetupRouter 需要 IntegrationService 参数
+	integSvc := integration.NewIntegrationService(cfg, api.NewIntegrationMetricsAdapter())
+	return api.SetupRouter(cfg, integSvc)
 }
 
 // genExpiredToken 构造 exp 已过的 JWT（用 cfg 里的 secret 签）

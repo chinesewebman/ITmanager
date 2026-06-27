@@ -15,6 +15,7 @@ import (
 	"network-monitor-platform/internal/api"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/migrate"
 
@@ -98,7 +99,9 @@ func setupTestRouter(t *testing.T) *gin.Engine {
 	// 5. metrics 初始化（InitMetrics 幂等）
 	_ = api.InitMetrics()
 
-	return api.SetupRouter(cfg)
+	// v2.3: 构造 IntegrationService（routes.SetupRouter 现在需要）
+	integSvc := integration.NewIntegrationService(cfg, api.NewIntegrationMetricsAdapter())
+	return api.SetupRouter(cfg, integSvc)
 }
 
 func loadTestConfigForRoutes(t *testing.T) *config.Config {
