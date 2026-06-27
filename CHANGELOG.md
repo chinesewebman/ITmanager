@@ -2,6 +2,34 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v2.0.2] - 2026-06-27
+
+🛠️ **审计 P1 修复** — 4 项跨模块数据完整性 / 稳定性 / 审计语义
+
+### 修复 (审计 v2.0.1 → v2.0.2 patch)
+
+- **fix(audit-P1)**: `resourceFromPath` 跳过动态段找下一个静态段 — 旧逻辑遇到 `:` 开头段直接 return `""`，导致 `/api/:tenant/users` 等路径的审计 resource 字段丢失。改为 continue 跳过动态段继续找第一个静态段。
+  - 新增 4 case 测试：tenant 前缀 / id 中缀 / 纯动态 / 首段动态 + api 段
+- **fix(eventbus-P1)**: dispatch panic recover — handler panic 之前会让 worker goroutine 死亡，chan 持续入事件无人消费，最终 ErrBufferFull 风暴。`dispatch` 加 defer recover，panic 后日志 + DLQ 落库，worker 继续服务后续事件。
+- **fix(eventbus-P1)**: `Subscribe` 跨 topic 聚合 — 旧版只统计最后一个 Subscribe 的 topic 的 handler 数（A=3 + B=5 应=8 报 5），监控失真。改为聚合所有 topic 的 handler 总和。
+- **fix(oncall-P1)**: `DeleteSchedule` 两步 DELETE 包事务 — 旧实现先删 schedule 再删 shifts，若第二步失败（FK/DB）则 shifts 永久孤立。改为 `db.Transaction` 包裹两次 DELETE，失败回滚 schedule。
+
+### 风格
+
+- **style(middleware)**: `DefaultSkipPaths` 4 行 whitespace 重对齐
+
+### 测试
+
+- backend: 818 → **827 passed** (+9 tests)
+- 全量 28 包 0 fail
+- 审计来源：`/Users/apple/study/ITmanager/docs/audit-v2.0.1.md` (待归档)
+
+### 升级指引
+
+- ✅ 0 DB migration (纯代码修复)
+- ✅ 0 API 变更 (审计/事件总线字段不变)
+- ✅ 0 行为破坏性变更
+
 ## [v2.0.1] - 2026-06-17
 
 🔌 **gRPC 内部通信** — AlertService s2s + proto contract
