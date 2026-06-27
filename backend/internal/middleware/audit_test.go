@@ -298,3 +298,28 @@ func TestAuditLog_默认SkipPaths(t *testing.T) {
 	assert.True(t, paths["/api/health"])
 	assert.False(t, paths["/api/x"])
 }
+
+// TestAuditLog_InvalidUUIDLogWarn (P2)
+// audit user_id 非合法 uuid 时应 log warn 而非静默丢弃
+func TestAuditLog_InvalidUUIDLogWarn(t *testing.T) {
+	db, mock := newAuditDB(t)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("user_id", "not-a-uuid") // 故意放非法值
+		c.Set("username", "tester")
+		c.Next()
+	})
+	r.Use(AuditLog(AuditConfig{DB: db, Async: false}))
+	r.GET("/api/x", func(c *gin.Context) { c.String(200, "ok") })
+
+	// INSERT 仍应执行 (P2: parse 失败仅 log warn, 不影响主路径)
+	mock.ExpectQuery(`INSERT INTO "audit_logs"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/x", nil))
+
+	assert.Equal(t, 200, w.Code, "请求仍成功 (uuid parse 失败不阻塞)")
+	assert.NoError(t, mock.ExpectationsWereMet(), "INSERT 应执行 (即使 user_id 非法)")
+}

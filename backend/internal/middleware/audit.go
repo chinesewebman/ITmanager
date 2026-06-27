@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"network-monitor-platform/internal/models"
@@ -70,7 +70,7 @@ func AuditLog(cfg AuditConfig) gin.HandlerFunc {
 					Session(&gorm.Session{SkipDefaultTransaction: true}).
 					Create(entry).Error
 				if err != nil {
-					log.Printf("[audit] failed to write audit log: %v", err)
+					slog.Warn("audit: failed to write audit log (async)", slog.String("err", err.Error()))
 				}
 			}()
 			return
@@ -81,7 +81,7 @@ func AuditLog(cfg AuditConfig) gin.HandlerFunc {
 			Session(&gorm.Session{SkipDefaultTransaction: true}).
 			Create(entry).Error
 		if err != nil {
-			log.Printf("[audit] failed to write audit log (sync): %v", err)
+			slog.Warn("audit: failed to write audit log (sync)", slog.String("err", err.Error()))
 		}
 	}
 }
@@ -105,6 +105,9 @@ func buildAuditEntry(c *gin.Context, cfg AuditConfig) *models.AuditLog {
 	if userID := c.GetString("user_id"); userID != "" {
 		if parsed, err := uuid.Parse(userID); err == nil {
 			entry.UserID = &parsed
+		} else {
+			// P2: parse 失败时 log warn 便于 forensic (审计元数据保底, 原始字符串仍在 Username)
+			slog.Warn("audit: user_id 不是合法 uuid", slog.String("raw", userID), slog.String("err", err.Error()))
 		}
 	}
 	if username := c.GetString("username"); username != "" {

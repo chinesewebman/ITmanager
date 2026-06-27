@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -14,6 +15,15 @@ import (
 )
 
 func init() { gin.SetMode(gin.TestMode) }
+
+// TestMain 重置 rateLimiter 缓存保证测试隔离 (P2 引入 cache 后需要)
+// resetRateLimiterCache() 必须在每个测试运行前调用, 否则前一个测试的 bucket 状态污染下一个。
+func TestMain(m *testing.M) {
+	resetRateLimiterCache()
+	code := m.Run()
+	resetRateLimiterCache()
+	os.Exit(code)
+}
 
 func newTestRouter(cfg RateLimitConfig) *gin.Engine {
 	r := gin.New()
@@ -79,6 +89,8 @@ func TestRateLimit_自定义KeyFunc(t *testing.T) {
 			return c.GetHeader("X-User")
 		},
 	}
+	// P2: 清空 cache 保证 bucket 干净 (max=1 时前次测试的 alice/bob 会让首次 200 变 429)
+	resetRateLimiterCache()
 	r2 := gin.New()
 	r2.GET("/api/test", RateLimit(cfg), func(c *gin.Context) { c.String(200, "ok") })
 
@@ -172,4 +184,29 @@ func TestItoa(t *testing.T) {
 	assert.Equal(t, "1", itoa(1))
 	assert.Equal(t, "12345", itoa(12345))
 	assert.Equal(t, "-42", itoa(-42))
+}
+
+// TestRateLimit_Singleton同cfg复用rateLimiter (P2)
+// 同 cfg 多次 RateLimit() 应返回同一个 rateLimiter (避免 N 路由 = N goroutine)
+func TestRateLimit_Singleton同cfg复用rateLimiter(t *testing.T) {
+	cfg := RateLimitConfig{Window: time.Minute, Max: 100, Message: "shared"}
+
+	// 清空缓存后第一次调用应创建
+	resetRateLimiterCache()
+	rl1 := getOrCreateRateLimiter(cfg)
+	require.NotNil(t, rl1)
+
+	// 第二次同 cfg 应返回同一实例
+	rl2 := getOrCreateRateLimiter(cfg)
+	assert.Same(t, rl1, rl2, "同 cfg 应复用同一 rateLimiter")
+
+	// 不同 cfg 应创建不同实例
+	cfg2 := RateLimitConfig{Window: time.Minute, Max: 50, Message: "shared"}
+	rl3 := getOrCreateRateLimiter(cfg2)
+	assert.NotSame(t, rl1, rl3, "不同 Max 应创建新 rateLimiter")
+
+	// 不同 Message 应创建不同实例
+	cfg3 := RateLimitConfig{Window: time.Minute, Max: 100, Message: "different"}
+	rl4 := getOrCreateRateLimiter(cfg3)
+	assert.NotSame(t, rl1, rl4, "不同 Message 应创建新 rateLimiter")
 }

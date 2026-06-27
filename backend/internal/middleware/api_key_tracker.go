@@ -14,7 +14,7 @@ package middleware
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -23,6 +23,9 @@ import (
 )
 
 // apiKeyTracker 全局单例（P1-审计 last_used_at 异步批量写）
+//
+// 单例用 lazy + sync.Mutex (替代 sync.Once)，便于测试隔离：
+// 测试可调 resetAPIKeyTracker() 重置；生产只初始化一次。
 var apiKeyTracker = newAPIKeyTracker()
 
 // APIKeyTracker API key 使用追踪器
@@ -35,20 +38,37 @@ type APIKeyTracker struct {
 }
 
 var (
-	trackerOnce sync.Once
-	trackerRef  *APIKeyTracker
+	trackerMu  sync.Mutex
+	trackerRef *APIKeyTracker
 )
 
-// newAPIKeyTracker 单例构造
+// newAPIKeyTracker 单例构造（每次返回同一实例；测试 reset 后可重建）
 func newAPIKeyTracker() *APIKeyTracker {
-	trackerOnce.Do(func() {
+	trackerMu.Lock()
+	defer trackerMu.Unlock()
+	if trackerRef == nil {
 		trackerRef = &APIKeyTracker{
 			dirty:  make(map[uuid.UUID]time.Time),
 			stopCh: make(chan struct{}),
 		}
 		go trackerRef.backgroundFlush()
-	})
+	}
 	return trackerRef
+}
+
+// resetAPIKeyTracker 测试用：停止 background goroutine 并清空 ref（下次 newAPIKeyTracker 重启）
+func resetAPIKeyTracker() {
+	trackerMu.Lock()
+	defer trackerMu.Unlock()
+	if trackerRef != nil {
+		select {
+		case <-trackerRef.stopCh:
+			// 已停止
+		default:
+			close(trackerRef.stopCh)
+		}
+	}
+	trackerRef = nil
 }
 
 // Track 标记一个 API key 已被使用（非阻塞）
@@ -82,7 +102,7 @@ func (t *APIKeyTracker) FlushNow() {
 
 	if t.db == nil {
 		// 单测或未初始化 db：跳过（log 一次）
-		log.Printf("apiKeyTracker: db 未初始化，跳过 %d 条 flush", len(pending))
+		slog.Warn("apiKeyTracker: db 未初始化, 跳过 flush", slog.Int("pending", len(pending)))
 		return
 	}
 
@@ -94,10 +114,10 @@ func (t *APIKeyTracker) FlushNow() {
 							Table("api_keys").
 							Where("id = ?", id).
 							Update("last_used_at", ts).Error; err != nil {
-			log.Printf("apiKeyTracker flush 失败 id=%s: %v", id, err)
+			slog.Warn("apiKeyTracker flush 失败", slog.String("id", id.String()), slog.String("err", err.Error()))
 		}
 	}
-	log.Printf("apiKeyTracker: flushed %d keys", len(pending))
+	slog.Info("apiKeyTracker flushed", slog.Int("count", len(pending)))
 }
 
 // backgroundFlush 每 30s 调一次 FlushNow

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -80,23 +81,58 @@ type rateLimiter struct {
 	cfg     RateLimitConfig
 }
 
+// P2: rateLimiter 包级缓存 — 同一 cfg 复用同一 rateLimiter, 避免 N 路由 = N goroutine
+// key 由 (Window, Max, Message) 构成; KeyFunc 走 default 时归一
+var (
+	rlCacheMu sync.Mutex
+	rlCache   = make(map[string]*rateLimiter)
+)
+
 func newRateLimiter(cfg RateLimitConfig) *rateLimiter {
+	if cfg.KeyFunc == nil {
+		cfg.KeyFunc = defaultKey
+	}
+	if cfg.Window == 0 {
+		cfg.Window = time.Minute
+	}
+	if cfg.Max <= 0 {
+		cfg.Max = 100
+	}
 	rl := &rateLimiter{
 		buckets: make(map[string]*bucket),
 		cfg:     cfg,
 	}
-	if rl.cfg.KeyFunc == nil {
-		rl.cfg.KeyFunc = defaultKey
-	}
-	if rl.cfg.Window == 0 {
-		rl.cfg.Window = time.Minute
-	}
-	if rl.cfg.Max <= 0 {
-		rl.cfg.Max = 100
-	}
 	// 1% 命中率时清理过期 bucket, 防止内存膨胀
 	go rl.gc()
 	return rl
+}
+
+// rateLimiterCacheKey 生成缓存 key (cfg 归一化后)
+func rateLimiterCacheKey(cfg RateLimitConfig) string {
+	return fmt.Sprintf("%d|%d|%s", cfg.Window, cfg.Max, cfg.Message)
+}
+
+// getOrCreateRateLimiter 包级缓存查找/创建
+func getOrCreateRateLimiter(cfg RateLimitConfig) *rateLimiter {
+	key := rateLimiterCacheKey(cfg)
+	rlCacheMu.Lock()
+	defer rlCacheMu.Unlock()
+	if rl, ok := rlCache[key]; ok {
+		return rl
+	}
+	rl := newRateLimiter(cfg)
+	rlCache[key] = rl
+	return rl
+}
+
+// resetRateLimiterCache 测试用：清空 rateLimiter 缓存 (gc goroutine 会因没有 bucket 引用而退出)
+// 注意：调用此函数后, 旧 rateLimiter 的 gc goroutine 仍在跑（无 bucket 时空转）,
+// 真正清理由下一次 RateLimit() 调用复用同 key 时继续; 或测试结束进程退出。
+// 生产代码不应调用此函数。
+func resetRateLimiterCache() {
+	rlCacheMu.Lock()
+	defer rlCacheMu.Unlock()
+	rlCache = make(map[string]*rateLimiter)
 }
 
 func (rl *rateLimiter) getBucket(key string) *bucket {
@@ -136,14 +172,15 @@ func (rl *rateLimiter) gc() {
 
 // RateLimit 返回一个 per-route 限流中间件（per-IP+path sliding window）
 //
+// P2: 同 cfg 复用同一 rateLimiter + gc goroutine (包级缓存), N 路由不再 = N goroutine
+//
 // 用法:
 //
 //	r.GET("/api/auth/login", middleware.RateLimit(middleware.DefaultRateLimitConfig(5)))
 //
 // 升级到 ulule/limiter/v3 (Redis 后端) 时, 替换 record() 实现即可, 接口不变。
 func RateLimit(cfg RateLimitConfig) gin.HandlerFunc {
-	rl := newRateLimiter(cfg)
-	// cfg.KeyFunc 在 newRateLimiter 已设默认值, 但保留 cfg 引用供闭包
+	rl := getOrCreateRateLimiter(cfg)
 	keyFn := rl.cfg.KeyFunc
 	msg := rl.cfg.Message
 	return func(c *gin.Context) {
