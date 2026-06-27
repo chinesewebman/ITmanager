@@ -121,6 +121,55 @@ func TestOncallService_DeleteSchedule_级联删shifts(t *testing.T) {
 	assert.Equal(t, int64(0), n, "级联删除应清空 shifts")
 }
 
+// TestOncallService_DeleteSchedule_事务原子性 (audit-P1 回归)
+// 修前 bug: schedule 删了但 shifts 删除失败 → 孤儿数据
+// 修后: 包事务, ErrNotFound 不触发级联删, 失败回滚 schedule
+func TestOncallService_DeleteSchedule_事务原子性(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedID := seedSchedule(t, db, "team-a", true)
+	seedShift(t, db, schedID, uuid.New(), "alice", time.Now(), time.Now().Add(time.Hour))
+
+	// 删除 schedule
+	err := svc.DeleteSchedule(context.Background(), schedID)
+	require.NoError(t, err)
+
+	// 验证 schedule 也删了 (事务提交)
+	var schedCount int64
+	db.Raw(`SELECT COUNT(*) FROM oncall_schedules WHERE id = ?`, schedID).Scan(&schedCount)
+	assert.Equal(t, int64(0), schedCount, "事务提交后 schedule 应被删除")
+
+	// 验证 shifts 也删了 (级联)
+	var shiftCount int64
+	db.Raw(`SELECT COUNT(*) FROM oncall_shifts WHERE schedule_id = ?`, schedID).Scan(&shiftCount)
+	assert.Equal(t, int64(0), shiftCount, "事务提交后 shifts 应被级联删除")
+}
+
+// TestOncallService_DeleteSchedule_不存在时事务回滚 (audit-P1 回归)
+// schedule 不存在 → ErrNotFound, 不应触发任何 shifts 删除 (空操作)
+func TestOncallService_DeleteSchedule_不存在时事务回滚(t *testing.T) {
+	db := newOncallTestDB(t)
+	svc := NewOncallService(db)
+	schedID := seedSchedule(t, db, "team-a", true)
+	shiftCount := int64(3)
+	for i := 0; i < int(shiftCount); i++ {
+		seedShift(t, db, schedID, uuid.New(), "alice", time.Now(), time.Now().Add(time.Hour))
+	}
+
+	// 不存在的 schedule ID
+	err := svc.DeleteSchedule(context.Background(), uuid.New())
+	require.ErrorIs(t, err, ErrNotFound)
+
+	// 原 schedule 应仍在 (没被误删)
+	var n int64
+	db.Raw(`SELECT COUNT(*) FROM oncall_schedules WHERE id = ?`, schedID).Scan(&n)
+	assert.Equal(t, int64(1), n, "ErrNotFound 时原 schedule 不应被误删")
+
+	// 原 shifts 应仍在 (事务回滚)
+	db.Raw(`SELECT COUNT(*) FROM oncall_shifts WHERE schedule_id = ?`, schedID).Scan(&n)
+	assert.Equal(t, shiftCount, n, "ErrNotFound 时原 shifts 不应被误删")
+}
+
 // ==================== Shift CRUD ====================
 
 func TestOncallService_CreateShift_endsAt早于startsAt报错(t *testing.T) {

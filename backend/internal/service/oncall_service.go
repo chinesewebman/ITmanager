@@ -62,18 +62,17 @@ func (s *OncallService) GetSchedule(ctx context.Context, id uuid.UUID) (*models.
 }
 
 func (s *OncallService) DeleteSchedule(ctx context.Context, id uuid.UUID) error {
-	res := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.OncallSchedule{})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	// 级联删 shifts
-	if err := s.db.WithContext(ctx).Where("schedule_id = ?", id).Delete(&models.OncallShift{}).Error; err != nil {
-		return err
-	}
-	return nil
+	// audit-P1: 两步 DELETE 包事务, 防止 schedule 删了 shifts 残留 (孤儿数据)
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("id = ?", id).Delete(&models.OncallSchedule{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return tx.Where("schedule_id = ?", id).Delete(&models.OncallShift{}).Error
+	})
 }
 
 // ==================== Shift CRUD ====================
