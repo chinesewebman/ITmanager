@@ -75,22 +75,24 @@ type Bus interface {
 
 // Stats 运行时统计
 type Stats struct {
-	Published   uint64 `json:"published"`
-	Dispatched  uint64 `json:"dispatched"`
-	DLQ         uint64 `json:"dlq"`
-	Retries     uint64 `json:"retries"`
-	Pending     int    `json:"pending"`      // 当前 chan 排队
-	Subscribers int    `json:"subscribers"`  // 总订阅者数
-	HandlerErrs uint64 `json:"handler_errs"` // handler 返 err 计数
+	Published         uint64 `json:"published"`           // 累计成功 Publish
+	Dispatched        uint64 `json:"dispatched"`          // 累计成功 Dispatch (handler 返回 nil)
+	DLQ               uint64 `json:"dlq"`                 // 累计入 DLQ (无订阅者 + retry 耗尽 + panic)
+	Retries           uint64 `json:"retries"`             // 累计 retry 调用次数
+	Pending           int    `json:"pending"`             // 当前 chan 排队
+	Subscribers       int    `json:"subscribers"`         // 总订阅者数 (跨 topic 聚合)
+	HandlerErrs       uint64 `json:"handler_errs"`        // handler 每次返 err (含 retry 中)
+	HandlerFinalFails uint64 `json:"handler_final_fails"` // P2: handler 最终失败次数 (retry 耗尽, 进入 DLQ 前)
 }
 
 // Config 总线配置
 type Config struct {
-	BufferSize   int           // chan 缓冲, 默认 1024
-	MaxRetries   int           // handler 重试次数, 默认 3
-	RetryBackoff time.Duration // 重试间隔, 默认 100ms
-	WorkerCount  int           // dispatcher goroutine 数, 默认 4
-	Logger       *slog.Logger  // 缺省 slog.Default()
+	BufferSize     int           // chan 缓冲, 默认 1024
+	MaxRetries     int           // handler 重试次数, 默认 3
+	RetryBackoff   time.Duration // 重试间隔基数, 默认 100ms (实际 = base << attempt 指数退避)
+	WorkerCount    int           // dispatcher goroutine 数, 默认 4
+	MaxPayloadSize int           // 单事件 payload 上限 (bytes), 默认 64KB; 超限 Publish 直接 err
+	Logger         *slog.Logger  // 缺省 slog.Default()
 }
 
 // EventDLQ 死信队列行 (SQLite 表)
@@ -134,6 +136,9 @@ func New(db *gorm.DB, cfg Config) Bus {
 	if cfg.WorkerCount <= 0 {
 		cfg.WorkerCount = 4
 	}
+	if cfg.MaxPayloadSize <= 0 {
+		cfg.MaxPayloadSize = 64 * 1024 // 64KB 默认
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -154,6 +159,7 @@ func New(db *gorm.DB, cfg Config) Bus {
 
 // Publish 同步发布事件: payload 序列化为 JSON 后入 chan.
 // 返 ErrBusClosed 如果总线已 Close; 返 ErrBufferFull 如果 chan 满 (非阻塞).
+// P2: 返 ErrPayloadTooLarge 如果 payload 超 MaxPayloadSize (默认 64KB).
 func (b *bus) Publish(topic string, payload any) error {
 	select {
 	case <-b.stop:
@@ -163,6 +169,10 @@ func (b *bus) Publish(topic string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
+	}
+	// P2: payload 大小检查 — 防大 payload 撑爆 chan / DB DLQ
+	if len(raw) > b.cfg.MaxPayloadSize {
+		return fmt.Errorf("%w: %d > %d bytes", ErrPayloadTooLarge, len(raw), b.cfg.MaxPayloadSize)
 	}
 	e := Event{
 		ID:        newID(),
@@ -215,13 +225,14 @@ func (b *bus) Stats() Stats {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return Stats{
-		Published:   atomic.LoadUint64(&b.stats.Published),
-		Dispatched:  atomic.LoadUint64(&b.stats.Dispatched),
-		DLQ:         atomic.LoadUint64(&b.stats.DLQ),
-		Retries:     atomic.LoadUint64(&b.stats.Retries),
-		Pending:     len(b.ch),
-		Subscribers: b.stats.Subscribers,
-		HandlerErrs: atomic.LoadUint64(&b.stats.HandlerErrs),
+		Published:         atomic.LoadUint64(&b.stats.Published),
+		Dispatched:        atomic.LoadUint64(&b.stats.Dispatched),
+		DLQ:               atomic.LoadUint64(&b.stats.DLQ),
+		Retries:           atomic.LoadUint64(&b.stats.Retries),
+		Pending:           len(b.ch),
+		Subscribers:       b.stats.Subscribers,
+		HandlerErrs:       atomic.LoadUint64(&b.stats.HandlerErrs),
+		HandlerFinalFails: atomic.LoadUint64(&b.stats.HandlerFinalFails),
 	}
 }
 
@@ -288,10 +299,13 @@ func (b *bus) invokeWithRetry(e Event, h Handler) {
 		e.Attempts = attempt + 1
 		if attempt < b.cfg.MaxRetries {
 			atomic.AddUint64(&b.stats.Retries, 1)
-			time.Sleep(b.cfg.RetryBackoff * time.Duration(attempt+1))
+			// P2: 指数退避 base << attempt (100ms, 200ms, 400ms...), 替代线性 base*(attempt+1)
+			backoff := b.cfg.RetryBackoff << attempt
+			time.Sleep(backoff)
 			continue
 		}
-		// 超过 maxRetries, 入 DLQ
+		// P2: 超过 maxRetries, 计入最终失败, 入 DLQ
+		atomic.AddUint64(&b.stats.HandlerFinalFails, 1)
 		b.toDLQ(e, err.Error())
 		return
 	}
@@ -327,6 +341,9 @@ var ErrBusClosed = errors.New("event bus closed")
 
 // ErrBufferFull chan 缓冲满 (非阻塞模式)
 var ErrBufferFull = errors.New("event bus buffer full")
+
+// ErrPayloadTooLarge payload 超 MaxPayloadSize (默认 64KB)
+var ErrPayloadTooLarge = errors.New("event payload too large")
 
 // newID 生成本事件 ID (基于 timestamp + atomic counter 避免 uuid 依赖)
 var idCounter uint64

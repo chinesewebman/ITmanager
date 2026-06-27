@@ -3,6 +3,7 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -325,4 +326,55 @@ func TestPublish_payload无法序列化返err(t *testing.T) {
 	// channel 不可 json.Marshal
 	err := bus.Publish(TopicAlertCreated, make(chan int))
 	assert.Error(t, err)
+}
+
+// TestPublish_超大payload返ErrPayloadTooLarge (P2)
+func TestPublish_超大payload返ErrPayloadTooLarge(t *testing.T) {
+	mockDB, _, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	gormDB, _ := gorm.Open(postgres.New(postgres.Config{Conn: mockDB, PreferSimpleProtocol: true}), &gorm.Config{})
+
+	bus := New(gormDB, Config{MaxPayloadSize: 100, WorkerCount: 0})
+	defer bus.Close()
+
+	// payload ~50 bytes 应通过
+	require.NoError(t, bus.Publish(TopicAlertCreated, map[string]string{"id": "abc"}))
+
+	// payload >100 bytes 应返 ErrPayloadTooLarge
+	big := strings.Repeat("x", 200)
+	err = bus.Publish(TopicAlertCreated, map[string]string{"data": big})
+	assert.ErrorIs(t, err, ErrPayloadTooLarge)
+}
+
+// TestPublish_HandlerErrs与HandlerFinalFails区分 (P2)
+// handler 返 err 后 retry, 最终入 DLQ; HandlerErrs 含 retry 次数, HandlerFinalFails 仅 1
+func TestPublish_HandlerErrs与HandlerFinalFails区分(t *testing.T) {
+	bus, mock := newTestBus(t)
+	defer bus.Close()
+
+	require.NoError(t, bus.Subscribe(TopicAlertCreated, func(ctx context.Context, e Event) error {
+		return errors.New("simulated")
+	}))
+
+	// MaxRetries=2 → 3 次 handler 调用 → 1 次 DLQ
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO "event_dlq"`).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, bus.Publish(TopicAlertCreated, nil))
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if bus.Stats().DLQ > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stats := bus.Stats()
+	assert.Equal(t, uint64(3), stats.HandlerErrs, "3 次 handler 调用均返 err")
+	assert.Equal(t, uint64(1), stats.HandlerFinalFails, "最终失败 1 次 (retry 耗尽后)")
+	assert.GreaterOrEqual(t, stats.DLQ, uint64(1), "入 DLQ")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
