@@ -104,7 +104,7 @@ type AlertEventPayload struct {
 	HostName  string `json:"host_name"`
 	Severity  int    `json:"severity"`
 	Trigger   string `json:"trigger"`
-	Status    string `json:"status"` // "problem" 或 "resolved"
+	Status    string `json:"status"`     // "problem" 或 "resolved"
 	EventType string `json:"event_type"` // "created" 或 "resolved"
 }
 

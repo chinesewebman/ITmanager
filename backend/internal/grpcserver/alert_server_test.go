@@ -13,10 +13,10 @@ import (
 // fakeAlertService 是测试用 stub, 不依赖 gorm.DB
 type fakeAlertService struct {
 	service.AlertService
-	listFn  func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error)
-	getFn   func(ctx context.Context, id string) (*models.Alert, error)
+	listFn    func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error)
+	getFn     func(ctx context.Context, id string) (*models.Alert, error)
 	resolveFn func(ctx context.Context, id, userID string) error
-	ackFn   func(ctx context.Context, id, userID string) error
+	ackFn     func(ctx context.Context, id, userID string) error
 }
 
 func (f *fakeAlertService) List(ctx context.Context, filter service.AlertFilter) ([]models.Alert, service.AlertStats, error) {

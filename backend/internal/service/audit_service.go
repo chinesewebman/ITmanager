@@ -12,11 +12,11 @@ import (
 
 // AuditFilter 审计日志查询
 type AuditFilter struct {
-	UserID   *uuid.UUID // 按用户过滤 (nil = 全部)
-	Action   string     // 按 action 过滤 (空 = 全部)
-	Method   string     // GET/POST/PUT/DELETE (空 = 全部)
-	Path     string     // 按 path 前缀匹配 (空 = 全部)
-	Limit    int
+	UserID *uuid.UUID // 按用户过滤 (nil = 全部)
+	Action string     // 按 action 过滤 (空 = 全部)
+	Method string     // GET/POST/PUT/DELETE (空 = 全部)
+	Path   string     // 按 path 前缀匹配 (空 = 全部)
+	Limit  int
 	// v2.0 cursor 分页: 非空时走 (created_at, id) 二元组 < 翻页
 	CursorTS time.Time
 	CursorID uuid.UUID
