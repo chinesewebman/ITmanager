@@ -196,6 +196,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		{
 			protected.POST("/integrations/sync", integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
+			// v2.2: Zabbix 运行时配置管理（UI Settings 保存按钮 + 测试连通）
+			protected.POST("/integrations/zabbix/test", integrationH.TestZabbix)
+			protected.PUT("/integrations/zabbix", integrationH.UpdateZabbix)
 
 			// v2.0: 审计日志查询端点
 			protected.GET("/audit-logs", auditH.ListAuditLogs)

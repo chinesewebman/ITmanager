@@ -228,6 +228,83 @@ func TestValidate_ReleaseMode_BothGLPITokensMissing_SingleError(t *testing.T) {
 		"两个 GLPI token 都缺应只报 1 条（不重复）")
 }
 
+// ==================== v2.2: Zabbix release-mode 校验 ====================
+
+func TestValidate_ReleaseMode_ZabbixDefault_AdminZabbix_ReturnsError(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok"
+	cfg.Integrations.Zabbix.URL = "http://zabbix:8080"
+	cfg.Integrations.Zabbix.User = "Admin"
+	cfg.Integrations.Zabbix.Password = "zabbix" // 默认占位
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "默认占位 Admin/zabbix")
+}
+
+func TestValidate_ReleaseMode_ZabbixEmptyPassword_ReturnsError(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok"
+	cfg.Integrations.Zabbix.URL = "http://zabbix:8080"
+	cfg.Integrations.Zabbix.User = "Admin"
+	cfg.Integrations.Zabbix.Password = "" // 空
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "integrations.zabbix.user/password")
+}
+
+func TestValidate_ReleaseMode_ZabbixEmptyUser_ReturnsError(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok"
+	cfg.Integrations.Zabbix.URL = "http://zabbix:8080"
+	cfg.Integrations.Zabbix.User = ""
+	cfg.Integrations.Zabbix.Password = "real-zabbix-pwd"
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "integrations.zabbix.user/password")
+}
+
+func TestValidate_ReleaseMode_ZabbixRealCreds_OK(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok"
+	cfg.Integrations.Zabbix.URL = "http://zabbix:8080"
+	cfg.Integrations.Zabbix.User = "nmp-zabbix-api"
+	cfg.Integrations.Zabbix.Password = "real-zabbix-pwd-xyz"
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_ReleaseMode_ZabbixNotConfigured_OK(t *testing.T) {
+	// Zabbix URL 空 → 集成未启用 → 跳过校验（集成可选）
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.AppToken = "app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok"
+	cfg.Integrations.Zabbix.URL = "" // 未配置
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestValidate_DebugMode_ZabbixDefault_OK(t *testing.T) {
+	// debug 模式不强制 Zabbix 占位校验（开发友好）
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "debug"
+	cfg.Integrations.Zabbix.URL = "http://localhost:8080"
+	cfg.Integrations.Zabbix.User = "Admin"
+	cfg.Integrations.Zabbix.Password = "zabbix" // debug 模式允许
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestValidate_DebugMode_NetboxToken_Empty_OK(t *testing.T) {
 	// debug 模式不强制 Netbox/GLPI token
 	cfg := minimalValidConfig()

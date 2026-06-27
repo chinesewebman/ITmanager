@@ -49,6 +49,17 @@ func NewIntegrationService(cfg *config.Config, m httpx.MetricsRecorder) *Integra
 	}
 }
 
+// TestZabbixConnection v2.2: 仅尝试 Login 验证 Zabbix URL/user/password 通不通。
+// 不动数据库、不入指标，正常返回说明三件套对得上。
+func (s *IntegrationService) TestZabbixConnection(ctx context.Context) error {
+	return s.zabbix.Login(ctx)
+}
+
+// ReloadZabbix v2.2: UI 改完配置点保存后调。清缓存让下次 GetTriggers 重新 Login。
+func (s *IntegrationService) ReloadZabbix(cfg *config.ZabbixConfig) {
+	s.zabbix.Reload(cfg)
+}
+
 // SyncFromNetBox 从 NetBox 同步资产（C-P6：批量 upsert；C-P7：ctx 透传）。
 func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 	devices, err := s.netbox.SyncDevices(ctx)

@@ -210,6 +210,14 @@ func (c *Config) Validate() error {
 		if c.Integrations.GLPI.AppToken == "" || c.Integrations.GLPI.UserToken == "" {
 			errs = append(errs, "integrations.glpi.*_token 在 release 模式下不能为空")
 		}
+		// v2.2: Zabbix 用 user.login 鉴权，user/password 是真凭据；占位/默认密码必须拒掉
+		if c.Integrations.Zabbix.URL != "" { // 未配置则跳过（集成可选）
+			if c.Integrations.Zabbix.User == "" || c.Integrations.Zabbix.Password == "" {
+				errs = append(errs, "integrations.zabbix.user/password 在 release 模式下不能为空（通过 NMP_INTEGRATIONS_ZABBIX_USER / NMP_INTEGRATIONS_ZABBIX_PASSWORD 注入）")
+			} else if c.Integrations.Zabbix.User == "Admin" && c.Integrations.Zabbix.Password == "zabbix" {
+				errs = append(errs, "integrations.zabbix 仍为 Zabbix 默认占位 Admin/zabbix（首次部署必须修改）")
+			}
+		}
 	}
 
 	if len(errs) > 0 {

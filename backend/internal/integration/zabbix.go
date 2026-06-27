@@ -17,6 +17,7 @@ type ZabbixClient struct {
 	c        *httpx.Client
 	user     string
 	password string
+	m        httpx.MetricsRecorder // v2.2: Reload 时复用，metrics 不断
 
 	mu        sync.Mutex
 	auth      string
@@ -35,7 +36,22 @@ func NewZabbixClient(cfg *config.ZabbixConfig, m httpx.MetricsRecorder) *ZabbixC
 		c:        httpx.New(hcfg, "zabbix", m),
 		user:     cfg.User,
 		password: cfg.Password,
+		m:        m,
 	}
+}
+
+// Reload 运行时热更新配置（v2.2: UI 改 Zabbix URL/账号后免重启）。
+// 清空缓存的 auth 让下次 GetTriggers 重新 Login；httpx 客户端 URL/timeout 重建，metrics 复用。
+func (z *ZabbixClient) Reload(cfg *config.ZabbixConfig) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.user = cfg.User
+	z.password = cfg.Password
+	z.auth = ""
+	z.expiresAt = time.Time{}
+	hcfg := httpx.DefaultConfig(cfg.URL)
+	hcfg.Timeout = 30 * time.Second
+	z.c = httpx.New(hcfg, "zabbix", z.m)
 }
 
 // ZabbixAPIRequest Zabbix API 请求

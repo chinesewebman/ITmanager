@@ -22,10 +22,14 @@ import (
 func newIntegrationTestRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(gin.Recovery())                         // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
 	h := handlers.NewIntegrationHandler(nil, cfg) // nil svc，Sync 路由不能实际调用
 	g := r.Group("/integrations")
 	g.POST("/sync", h.Sync)
 	g.GET("/status", h.GetIntegrationStatus)
+	// v2.2: Zabbix 配置 + 连通测试
+	g.PUT("/zabbix", h.UpdateZabbix)
+	g.POST("/zabbix/test", h.TestZabbix)
 	return r
 }
 
@@ -171,4 +175,125 @@ func TestSync_合法Type_通过校验(t *testing.T) {
 			assert.NotEqual(t, http.StatusBadRequest, w.Code, "合法 type=%q 不该 400", ty)
 		})
 	}
+}
+
+// ==================== v2.2: Zabbix Status 新字段 ====================
+
+// TestIntegrationStatus_Zabbix_HasUserAndHasPassword v2.2: status 返回 user + has_password（不返明文 password）。
+func TestIntegrationStatus_Zabbix_HasUserAndHasPassword(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://zabbix.local", "")
+	cfg.Integrations.Zabbix.User = "Admin"
+	cfg.Integrations.Zabbix.Password = "zabbix"
+	r := newIntegrationTestRouter(cfg)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"user":"Admin"`)
+	assert.Contains(t, body, `"has_password":true`)
+	// 不应回显明文 password
+	assert.NotContains(t, body, `"password":"zabbix"`)
+}
+
+// TestIntegrationStatus_Zabbix_NoPassword v2.2: 未配置密码时 has_password=false。
+func TestIntegrationStatus_Zabbix_NoPassword(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://zabbix.local", "")
+	cfg.Integrations.Zabbix.User = "Admin"
+	cfg.Integrations.Zabbix.Password = ""
+	r := newIntegrationTestRouter(cfg)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"has_password":false`)
+}
+
+// ==================== v2.2: UpdateZabbix ====================
+
+// TestUpdateZabbix_缺URL_返400 v2.2: 缺 url 必返 400。
+func TestUpdateZabbix_缺URL_返400(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+
+	body := []byte(`{"user":"Admin","password":"newpass"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/zabbix", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestUpdateZabbix_缺User_返400 v2.2: 缺 user 必返 400。
+func TestUpdateZabbix_缺User_返400(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+
+	body := []byte(`{"url":"http://x","password":"newpass"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/zabbix", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestUpdateZabbix_OK_内存Cfg已更新 v2.2: 合法请求 200 且 cfg.Integrations.Zabbix 同步更新。
+// 注：svc=nil 会让 ReloadZabbix panic，但 cfg 写入发生在 Reload 之前。
+// 验证方法：用 httptest server + 直接跳过 panic（gin.Recovery 会把 panic 转 500）。
+func TestUpdateZabbix_OK_内存Cfg已更新(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://old", "")
+	cfg.Integrations.Zabbix.User = "old"
+	cfg.Integrations.Zabbix.Password = "oldpass"
+	r := newIntegrationTestRouter(cfg)
+
+	body := []byte(`{"url":"http://new-zabbix:8080","user":"new-admin","password":"newpass"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/zabbix", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// 不期待 200：svc=nil 会 panic → gin.Recovery 转 500。但 cfg 在 panic 前已改写。
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "svc=nil 应 panic → gin 转 500")
+	// 关键断言：panic 前 cfg 已被改写（handler 顺序：cfg 写入在 ReloadZabbix 之前）
+	assert.Equal(t, "http://new-zabbix:8080", cfg.Integrations.Zabbix.URL)
+	assert.Equal(t, "new-admin", cfg.Integrations.Zabbix.User)
+	assert.Equal(t, "newpass", cfg.Integrations.Zabbix.Password)
+}
+
+// TestUpdateZabbix_空Password_保留旧值 v2.2: password 字段为空时保留 cfg 旧值（避免 UI 误清空）。
+func TestUpdateZabbix_空Password_保留旧值(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://old", "")
+	cfg.Integrations.Zabbix.User = "old"
+	cfg.Integrations.Zabbix.Password = "oldpass-preserved"
+	r := newIntegrationTestRouter(cfg)
+
+	body := []byte(`{"url":"http://new","user":"new","password":""}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/zabbix", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// password="" → handler 应保留 "oldpass-preserved"，所以 cfg 写入也是新 URL+新 user+旧 password
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "svc=nil 应 panic → gin 转 500")
+	assert.Equal(t, "http://new", cfg.Integrations.Zabbix.URL)
+	assert.Equal(t, "new", cfg.Integrations.Zabbix.User)
+	assert.Equal(t, "oldpass-preserved", cfg.Integrations.Zabbix.Password, "空 password 必须保留旧值")
+}
+
+// ==================== v2.2: TestZabbix 连通测试 ====================
+
+// TestTestZabbix_svcNil_返500 v2.2: svc=nil 时连通测试必 panic → 500（保证调用 svc 不会假成功）。
+func TestTestZabbix_svcNil_返500(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/integrations/zabbix/test", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	// svc.TestZabbixConnection → svc.zabbix.Login → nil pointer panic → gin.Recovery → 500
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

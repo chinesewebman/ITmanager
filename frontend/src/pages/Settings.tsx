@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Divider } from 'antd'
-import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined } from '@ant-design/icons'
-import { notificationApi } from '../services/api'
+import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Divider, Spin } from 'antd'
+import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
+import { notificationApi, integrationApi } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface NotificationChannel {
@@ -16,6 +16,13 @@ function Settings() {
   const [channels, setChannels] = useState<NotificationChannel[]>([])
   const [loading, setLoading] = useState(false)
   const [channelModal, setChannelModal] = useState<{ open: boolean; data?: NotificationChannel }>({ open: false })
+  // v2.2: 集成页接 API（不再是死表单）
+  const [integrationStatus, setIntegrationStatus] = useState<any>(null)
+  const [statusLoading, setStatusLoading] = useState(false)
+  const [zabbixForm] = Form.useForm()
+  const [zabbixSaving, setZabbixSaving] = useState(false)
+  const [zabbixTesting, setZabbixTesting] = useState(false)
+  const [zabbixSyncing, setZabbixSyncing] = useState(false)
 
   useDocumentTitle('系统设置')
 
@@ -38,8 +45,96 @@ function Settings() {
     }
   }
 
+  // v2.2: 拉取集成 status（首次打开集成 tab 时填充 Zabbix 表单）
+  const fetchIntegrationStatus = async () => {
+    setStatusLoading(true)
+    try {
+      const res: any = await integrationApi.getStatus()
+      const data = res?.data?.data
+      setIntegrationStatus(data)
+      if (data?.zabbix) {
+        zabbixForm.setFieldsValue({
+          url: data.zabbix.url || '',
+          user: data.zabbix.user || '',
+        })
+      }
+    } catch (error) {
+      console.error('获取集成状态失败:', error)
+      message.error('获取集成状态失败')
+    } finally {
+      setStatusLoading(false)
+    }
+  }
+
+  // v2.2: 保存 Zabbix 配置 → PUT /integrations/zabbix
+  const handleSaveZabbix = async () => {
+    try {
+      const values = await zabbixForm.validateFields()
+      setZabbixSaving(true)
+      const payload: { url: string; user: string; password?: string } = {
+        url: values.url,
+        user: values.user,
+      }
+      // password 字段为空 → 后端保留旧值（避免 UI 误清空）
+      if (values.password) payload.password = values.password
+      const res: any = await integrationApi.updateZabbix(payload)
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'Zabbix 配置已生效')
+        zabbixForm.setFieldValue('password', '') // 清空密码框（保留后端旧值）
+        await fetchIntegrationStatus() // 刷新状态
+      } else {
+        message.error(res?.data?.message || '保存失败')
+      }
+    } catch (error: any) {
+      if (error?.errorFields) return // 表单校验失败，Antd 已展示
+      console.error('保存 Zabbix 配置失败:', error)
+      message.error(error?.response?.data?.message || '保存失败')
+    } finally {
+      setZabbixSaving(false)
+    }
+  }
+
+  // v2.2: 测试 Zabbix 连通 → POST /integrations/zabbix/test
+  const handleTestZabbix = async () => {
+    setZabbixTesting(true)
+    try {
+      const res: any = await integrationApi.testZabbix()
+      if (res?.data?.code === 0) {
+        message.success(res?.data?.message || 'Zabbix 连通 OK')
+      } else {
+        message.error(res?.data?.message || '连通失败')
+      }
+    } catch (error: any) {
+      console.error('Zabbix 连通测试失败:', error)
+      message.error(error?.response?.data?.message || '连通失败')
+    } finally {
+      setZabbixTesting(false)
+    }
+  }
+
+  // v2.2: 立即同步 Zabbix → POST /integrations/sync { type: "zabbix" }
+  const handleSyncZabbix = async () => {
+    setZabbixSyncing(true)
+    try {
+      const res: any = await integrationApi.syncZabbix()
+      const synced = res?.data?.data?.synced?.zabbix
+      if (res?.data?.code === 0) {
+        message.success(`Zabbix 同步完成，新增 ${synced ?? 0} 条告警`)
+      } else {
+        message.error(res?.data?.message || '同步失败')
+      }
+    } catch (error: any) {
+      console.error('Zabbix 同步失败:', error)
+      message.error(error?.response?.data?.message || '同步失败')
+    } finally {
+      setZabbixSyncing(false)
+    }
+  }
+
   useEffect(() => {
     fetchChannels()
+    fetchIntegrationStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleSaveChannel = async () => {
@@ -142,9 +237,86 @@ function Settings() {
         </span>
       ),
       children: (
-        <div>
-          <h3 style={{ marginBottom: 16 }}>集成配置</h3>
-          <Card title="NetBox" style={{ marginBottom: 16 }}>
+        <Spin spinning={statusLoading}>
+          <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0 }}>集成配置</h3>
+            <Space>
+              {integrationStatus?.zabbix?.enabled && (
+                <Tag color="green">Zabbix 已连接</Tag>
+              )}
+              {!integrationStatus?.zabbix?.enabled && (
+                <Tag color="default">Zabbix 未配置</Tag>
+              )}
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={fetchIntegrationStatus}
+                loading={statusLoading}
+              >
+                刷新状态
+              </Button>
+            </Space>
+          </div>
+          <Card
+            title={
+              <Space>
+                <span>Zabbix</span>
+                {integrationStatus?.zabbix?.has_password && (
+                  <Tag color="blue">已配置密码</Tag>
+                )}
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Form form={zabbixForm} layout="vertical">
+              <Form.Item
+                label="URL"
+                name="url"
+                rules={[{ required: true, message: '请输入 Zabbix URL' }]}
+              >
+                <Input placeholder="http://zabbix:8080" />
+              </Form.Item>
+              <Form.Item
+                label="用户名"
+                name="user"
+                rules={[{ required: true, message: '请输入用户名' }]}
+              >
+                <Input placeholder="Admin" />
+              </Form.Item>
+              <Form.Item
+                label="密码"
+                name="password"
+                extra={integrationStatus?.zabbix?.has_password ? '已配置 · 留空表示不修改' : '未配置 · 请输入'}
+              >
+                <Input.Password placeholder="请输入密码（留空保留原值）" />
+              </Form.Item>
+              <Space>
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleSaveZabbix}
+                  loading={zabbixSaving}
+                >
+                  保存配置
+                </Button>
+                <Button
+                  icon={<ApiFilled />}
+                  onClick={handleTestZabbix}
+                  loading={zabbixTesting}
+                >
+                  测试连通
+                </Button>
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={handleSyncZabbix}
+                  loading={zabbixSyncing}
+                  disabled={!integrationStatus?.zabbix?.enabled}
+                >
+                  立即同步
+                </Button>
+              </Space>
+            </Form>
+          </Card>
+          <Card title="NetBox">
             <Form layout="vertical">
               <Form.Item label="URL">
                 <Input placeholder="http://localhost:8000" defaultValue="http://localhost:8000" />
@@ -152,24 +324,10 @@ function Settings() {
               <Form.Item label="API Token">
                 <Input.Password placeholder="请输入API Token" defaultValue="" />
               </Form.Item>
-              <Button type="primary">保存</Button>
+              <Button type="primary" disabled>保存（暂未启用）</Button>
             </Form>
           </Card>
-          <Card title="Zabbix" style={{ marginBottom: 16 }}>
-            <Form layout="vertical">
-              <Form.Item label="URL">
-                <Input placeholder="http://localhost:8080" defaultValue="http://localhost:8080" />
-              </Form.Item>
-              <Form.Item label="用户名">
-                <Input placeholder="Admin" defaultValue="Admin" />
-              </Form.Item>
-              <Form.Item label="密码">
-                <Input.Password placeholder="请输入密码" />
-              </Form.Item>
-              <Button type="primary">保存</Button>
-            </Form>
-          </Card>
-          <Card title="GLPI">
+          <Card title="GLPI" style={{ marginTop: 16 }}>
             <Form layout="vertical">
               <Form.Item label="URL">
                 <Input placeholder="http://localhost" defaultValue="http://localhost" />
@@ -177,10 +335,10 @@ function Settings() {
               <Form.Item label="API Token">
                 <Input.Password placeholder="请输入API Token" />
               </Form.Item>
-              <Button type="primary">保存</Button>
+              <Button type="primary" disabled>保存（暂未启用）</Button>
             </Form>
           </Card>
-        </div>
+        </Spin>
       ),
     },
     {

@@ -151,6 +151,17 @@ export const notificationApi = {
   testChannel: (id: string) => api.put(`/notification-channels/${id}/test`),
 };
 
+// ==================== 第三方集成（v2.2） ====================
+// P2-2 优化：Settings 集成页接后端 API，不再是死表单。
+// 三件套：status 读取 / 保存配置 / 测试连通 / 立即同步。
+export const integrationApi = {
+  getStatus: () => api.get("/integrations/status"),
+  updateZabbix: (data: { url: string; user: string; password?: string }) =>
+    api.put("/integrations/zabbix", data),
+  testZabbix: () => api.post("/integrations/zabbix/test"),
+  syncZabbix: () => api.post("/integrations/sync", { type: "zabbix" }),
+};
+
 // ==================== 网络诊断 ====================
 // A-1: ICMP ping + traceroute 探活
 
