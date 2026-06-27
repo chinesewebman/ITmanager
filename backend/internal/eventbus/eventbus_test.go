@@ -248,6 +248,77 @@ func TestSubscribe_nilHandler返err(t *testing.T) {
 	assert.Error(t, bus.Subscribe(TopicAlertCreated, nil))
 }
 
+// TestSubscribe_Subscribers跨topic聚合 (audit-P1 回归)
+// 修前 bug: 只统计最后一个 Subscribe 的 topic 的 handler 数
+// 修后: 聚合所有 topic 的 handler 总数
+func TestSubscribe_Subscribers跨topic聚合(t *testing.T) {
+	bus, _ := newTestBus(t)
+	defer bus.Close()
+
+	h := func(ctx context.Context, e Event) error { return nil }
+
+	// topic A: 2 个 handler
+	require.NoError(t, bus.Subscribe(TopicAlertCreated, h))
+	require.NoError(t, bus.Subscribe(TopicAlertCreated, h))
+	assert.Equal(t, 2, bus.Stats().Subscribers, "topic A 2 handler")
+
+	// topic B: 3 个 handler → 总 5
+	require.NoError(t, bus.Subscribe(TopicAlertResolved, h))
+	require.NoError(t, bus.Subscribe(TopicAlertResolved, h))
+	require.NoError(t, bus.Subscribe(TopicAlertResolved, h))
+	assert.Equal(t, 5, bus.Stats().Subscribers, "跨 topic 聚合应为 5")
+}
+
+// TestPublish_HandlerPanic不挂worker (audit-P1 回归)
+// 修前 bug: handler panic 直接挂 worker goroutine, 后继事件堆积
+// 修后: dispatch 层 defer recover, 事件入 DLQ, worker 健在
+func TestPublish_HandlerPanic不挂worker(t *testing.T) {
+	bus, mock := newTestBus(t)
+	defer bus.Close()
+
+	var calls atomic.Int32
+	require.NoError(t, bus.Subscribe(TopicAlertCreated, func(ctx context.Context, e Event) error {
+		calls.Add(1)
+		panic("simulated panic")
+	}))
+
+	// 第一次 panic → DLQ
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO "event_dlq"`).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, bus.Publish(TopicAlertCreated, nil))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bus.Stats().DLQ >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.GreaterOrEqual(t, calls.Load(), int32(1), "handler 至少被调一次")
+	assert.GreaterOrEqual(t, bus.Stats().DLQ, uint64(1), "panic 后事件入 DLQ")
+
+	// 第二次 publish → worker 仍健在 (仍 panic → 仍 DLQ)
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO "event_dlq"`).
+		WillReturnResult(sqlmock.NewResult(2, 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, bus.Publish(TopicAlertCreated, nil))
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bus.Stats().DLQ >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.GreaterOrEqual(t, bus.Stats().DLQ, uint64(2), "worker 健在, 第二次 panic 也入 DLQ")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPublish_payload无法序列化返err(t *testing.T) {
 	bus, _ := newTestBus(t)
 	defer bus.Close()

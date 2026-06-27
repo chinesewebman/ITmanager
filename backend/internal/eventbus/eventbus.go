@@ -45,20 +45,20 @@ import (
 
 // Topic 事件类型常量
 const (
-	TopicAlertCreated  = "alert.created"
-	TopicAlertResolved = "alert.resolved"
-	TopicTicketCreated = "ticket.created"
+	TopicAlertCreated   = "alert.created"
+	TopicAlertResolved  = "alert.resolved"
+	TopicTicketCreated  = "ticket.created"
 	TopicTicketResolved = "ticket.resolved"
-	TopicUserLocked    = "user.locked"
+	TopicUserLocked     = "user.locked"
 )
 
 // Event 事件结构
 type Event struct {
-	ID        string          `json:"id"`        // uuid
+	ID        string          `json:"id"` // uuid
 	Topic     string          `json:"topic"`
-	Payload   json.RawMessage `json:"payload"`   // JSON 编码
+	Payload   json.RawMessage `json:"payload"` // JSON 编码
 	Timestamp time.Time       `json:"timestamp"`
-	Attempts  int             `json:"attempts"`  // 重试次数
+	Attempts  int             `json:"attempts"` // 重试次数
 }
 
 // Handler 订阅者处理函数
@@ -75,13 +75,13 @@ type Bus interface {
 
 // Stats 运行时统计
 type Stats struct {
-	Published    uint64 `json:"published"`
-	Dispatched   uint64 `json:"dispatched"`
-	DLQ          uint64 `json:"dlq"`
-	Retries      uint64 `json:"retries"`
-	Pending      int    `json:"pending"`       // 当前 chan 排队
-	Subscribers  int    `json:"subscribers"`   // 总订阅者数
-	HandlerErrs  uint64 `json:"handler_errs"`  // handler 返 err 计数
+	Published   uint64 `json:"published"`
+	Dispatched  uint64 `json:"dispatched"`
+	DLQ         uint64 `json:"dlq"`
+	Retries     uint64 `json:"retries"`
+	Pending     int    `json:"pending"`      // 当前 chan 排队
+	Subscribers int    `json:"subscribers"`  // 总订阅者数
+	HandlerErrs uint64 `json:"handler_errs"` // handler 返 err 计数
 }
 
 // Config 总线配置
@@ -189,8 +189,11 @@ func (b *bus) Subscribe(topic string, h Handler) error {
 	}
 	b.mu.Lock()
 	b.subs[topic] = append(b.subs[topic], h)
-	b.stats.Subscribers = len(b.subs[topic])
-	// 注: 这里只计了最后一个 topic 的订阅者数, 简单起见不聚合
+	// audit-P1: 聚合所有 topic 的 handler 数 (旧版只算最后一个 topic, 监控失真)
+	b.stats.Subscribers = 0
+	for _, handlers := range b.subs {
+		b.stats.Subscribers += len(handlers)
+	}
 	b.mu.Unlock()
 	return nil
 }
@@ -244,6 +247,19 @@ func (b *bus) worker() {
 }
 
 func (b *bus) dispatch(e Event) {
+	// audit-P1: handler panic recover — 防止 worker goroutine 死亡导致 chan 堆积
+	defer func() {
+		if r := recover(); r != nil {
+			b.logger.Error("eventbus: handler panic recovered",
+				slog.String("event_id", e.ID),
+				slog.String("topic", e.Topic),
+				slog.Any("panic", r),
+			)
+			// 入 DLQ 防止事件丢失 (人工可补)
+			b.toDLQ(e, fmt.Sprintf("panic: %v", r))
+		}
+	}()
+
 	b.mu.RLock()
 	handlers := b.subs[e.Topic]
 	b.mu.RUnlock()
