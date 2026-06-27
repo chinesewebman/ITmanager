@@ -2,6 +2,49 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [v2.1.0] - 2026-06-27
+
+🔧 **审计 P2 改进** — 13 项跨模块打磨 (性能 / 一致性 / 可观测 / 数据完整性)
+
+### 性能 (3 项)
+
+- **rate_limit 单例化** (`internal/middleware/rate_limit.go`) — `RateLimit(cfg)` 改包级 cache, 同 cfg 复用同一 `rateLimiter` + gc goroutine; 生产 50+ 路由从 50+ goroutine 收敛到 N (N=distinct cfg)
+- **eventbus 指数退避** (`internal/eventbus/eventbus.go:299`) — 重试退避改 `base << attempt` (100ms, 200ms, 400ms), 替代线性 `base*(attempt+1)`, 缓解 retry 风暴下后端压力
+- **alert_service IncludeStats opt-in** (`internal/service/alert_service.go:30`) — `AlertFilter.IncludeStats` 字段, 默认 false; gRPC 翻页路径省 1 次 stats 全表聚合查询 (HTTP 列表页显式设 true 保持兼容)
+
+### 一致性 (3 项)
+
+- **middleware slog 一致** — `audit.go` / `api_key_tracker.go` 全量 `log.Printf` → `slog.Warn/Info` (async/sync warn + flush/failure + count), 与项目 logger 体系对齐
+- **service slog 一致** — `alert_service.go` `writeNotificationTrigger` 2 处 `gin.DefaultErrorWriter` → `slog.Warn`; `publish()` `_ = err` 静默吞 → `slog.Warn` 含 topic + err
+- **eventbus stats 命名** — 新增 `HandlerFinalFails` 字段 (retry 耗尽最终失败), 与 `HandlerErrs` (含 retry 中) 区分, 告警阈值更准
+
+### 可观测 / 测试 (3 项)
+
+- **audit UUID warn** (`audit.go:108`) — `user_id` 非合法 uuid 时 `slog.Warn` forensic 价值 (原始字符串仍在 `Username`), 旧版静默丢弃
+- **eventbus payload 上限** (`eventbus.go:90`) — `Config.MaxPayloadSize` 默认 64KB, 超限返 `ErrPayloadTooLarge` 不入 chan, 防大 payload 撑爆内存 + DLQ 表
+- **cursor benchmark** (`cursor_test.go`) — `BenchmarkEncode` (Encode ~992ns/op) + `BenchmarkDecode` 防 encode/decode 实现退化
+
+### 数据完整性 (2 项 — M4-5 扫描发现)
+
+- **oncall CreatePolicy 事务化** (`oncall_service.go:168`) — `policy + N× levels` 包 `db.Transaction`, 防 level 失败产生半成品 policy
+- **oncall DeletePolicy 事务化** (`oncall_service.go:241`) — `levels + policy` 包 `db.Transaction`, 防 policy 删失败导致 levels 残留
+
+### 工具 (1 项)
+
+- **api_key_tracker 可重入** (`api_key_tracker.go:60`) — `sync.Once` 改 `sync.Mutex + lazy init`, 加 `resetAPIKeyTracker()` 测试隔离 helper
+
+### 测试
+
+- backend: 818 → **825 passed** (+7 新 tests: rate_limit singleton / audit UUID warn / eventbus payload+FinalFails×2 / alert IncludeStats opt-out)
+- 全量 28 包 0 fail
+- 审计来源: `docs/audit-v2.0.1.md`
+
+### 兼容性
+
+- ✅ 0 DB migration (纯代码 + 字段新增 opt-in)
+- ✅ HTTP API 行为不变 (IncludeStats 显式 true 保持)
+- ✅ gRPC 行为不变 (默认 false 已与原 _ 跳过 stats 一致)
+
 ## [v2.0.2] - 2026-06-27
 
 🛠️ **审计 P1 修复** — 4 项跨模块数据完整性 / 稳定性 / 审计语义
