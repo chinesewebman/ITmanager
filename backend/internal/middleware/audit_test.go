@@ -197,6 +197,37 @@ func TestResourceFromPath_跳过空段和api(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/assets/abc", nil))
 }
 
+// TestResourceFromPath_动态段在前/中间 (audit-P1 回归)
+// 修前 bug: /api/:tenant/users 返 "" (因 :tenant 后直接 return)
+// 修后: 跳过动态段继续找第一个静态段 → "users"
+func TestResourceFromPath_动态段在前返第一个静态段(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"/api/:tenant/users", "users"},
+		{"/api/users/:id/posts", "users"},
+		{"/api/:id", "unknown"},      // 全是动态段 → unknown
+		{"/:org/api/repos", "repos"}, // 跳 :org, 跳 "api", 取 "repos"
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			r := gin.New()
+			r.GET(tt.path, func(c *gin.Context) {
+				got := resourceFromPath(c)
+				assert.Equal(t, tt.expected, got)
+			})
+			// 把所有动态段 (:id/:tenant/:org) 替换成 "x" 让 gin 能 match
+			concrete := tt.path
+			for _, dyn := range []string{":id", ":tenant", ":org"} {
+				concrete = strings.ReplaceAll(concrete, dyn, "x")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest("GET", concrete, nil))
+		})
+	}
+}
+
 // TestSplitPath_基本
 func TestSplitPath_基本(t *testing.T) {
 	assert.Equal(t, []string{"api", "assets", "id"}, splitPath("/api/assets/id"))

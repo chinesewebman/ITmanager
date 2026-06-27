@@ -140,9 +140,10 @@ func resourceFromPath(c *gin.Context) string {
 		if p == "" || p == "api" {
 			continue
 		}
-		// 跳过动态段
+		// 跳过动态段, 继续找第一个静态段
+		// 修 audit-P1: /api/:tenant/users → "users" (旧版返 "")
 		if len(p) > 0 && p[0] == ':' {
-			return ""
+			continue
 		}
 		return truncate(p, 100)
 	}
