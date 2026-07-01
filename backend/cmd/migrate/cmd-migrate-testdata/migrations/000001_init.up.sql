@@ -29,6 +29,7 @@ CREATE TABLE users (
     locked_until    DATETIME,
     last_login      DATETIME,
     last_login_ip   TEXT,
+    -- must_change_password + password_set_at 由 000012 migration 引入, 不在此处
     created_at      DATETIME,
     updated_at      DATETIME,
     deleted_at      DATETIME

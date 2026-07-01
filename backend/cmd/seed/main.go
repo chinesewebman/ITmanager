@@ -48,12 +48,14 @@ func seedData(db *gorm.DB) {
 			Phone:        "13800138000",
 			Role:         "admin",
 			Status:       "active",
+			// C7: seed 用默认密码 admin123 — 首次登录强改密
+			MustChangePassword: true,
 		}
 		if err := db.Create(&admin).Error; err != nil {
 			log.Printf("创建管理员用户失败: %v", err)
 			return
 		}
-		log.Printf("创建管理员用户: admin (密码: admin123)")
+		log.Printf("创建管理员用户: admin (密码: admin123) — ⚠️ 首次登录需改密")
 
 		// 创建普通用户
 		userHash, _ := bcrypt.GenerateFromPassword([]byte("user123"), bcrypt.DefaultCost)
@@ -65,6 +67,8 @@ func seedData(db *gorm.DB) {
 			Phone:        "13800138001",
 			Role:         "operator",
 			Status:       "active",
+			// C7: seed 用默认密码 user123 — 首次登录强改密
+			MustChangePassword: true,
 		}
 		db.Create(&operator)
 		log.Printf("创建普通用户: operator (密码: user123)")

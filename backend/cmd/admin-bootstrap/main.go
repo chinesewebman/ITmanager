@@ -88,8 +88,12 @@ func runWithDeps(db *gorm.DB, username, password, passwordHash, nickname, email 
 		Email:        email,
 		Role:         adminRole.Code,
 		Status:       "active",
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		// C7: bootstrap admin 用环境变量 FIRST_ADMIN_PASSWORD 创建, 视为已主动设密
+		// 不触发强改密 (deployment 时已用 secret 走完设密流程)
+		MustChangePassword: false,
+		PasswordSetAt:      &now,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	if err := db.Create(&user).Error; err != nil {
 		return fmt.Errorf("创建用户失败: %w", err)

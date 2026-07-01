@@ -184,6 +184,8 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			auth.POST("/logout", handlers.Logout)
 			auth.GET("/me", middleware.AuthMiddleware(), handlers.GetCurrentUser)
 			auth.PUT("/password", middleware.AuthMiddleware(), middleware.RateLimit(middleware.DefaultRateLimitConfig(3)), handlers.ChangePassword)
+			// C7: 跳过首次登录强改密 (用户自主选择, dev/test 友好, 不需 admin)
+			auth.POST("/skip-password-change", middleware.AuthMiddleware(), handlers.SkipPasswordChange)
 
 			auth.POST("/api-keys", middleware.AuthMiddleware(), handlers.CreateAPIKey)
 			auth.GET("/api-keys", middleware.AuthMiddleware(), handlers.ListAPIKeys)

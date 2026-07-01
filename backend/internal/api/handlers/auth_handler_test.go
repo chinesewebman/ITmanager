@@ -45,9 +45,27 @@ CREATE TABLE IF NOT EXISTS users (
     locked_until DATETIME,
     last_login DATETIME,
     last_login_ip TEXT,
+    must_change_password INTEGER DEFAULT 1,
+    password_set_at DATETIME,
     created_at DATETIME,
     updated_at DATETIME,
     deleted_at DATETIME
+);
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    username TEXT,
+    action TEXT,
+    resource TEXT,
+    resource_id TEXT,
+    method TEXT,
+    path TEXT,
+    ip TEXT,
+    user_agent TEXT,
+    status INTEGER,
+    error_msg TEXT,
+    request_id TEXT,
+    created_at DATETIME
 );
 `
 
@@ -112,6 +130,16 @@ func newAuthTestRouter() *gin.Engine {
 		uid := c.GetHeader("X-User-Id")
 		c.Set("user_id", uid)
 		handlers.ChangePassword(c)
+	})
+	// C7: 跳过首次改密 — 测试路由 (注入 user_id via X-User-Id header)
+	g.POST("/skip-password-change", func(c *gin.Context) {
+		uid := c.GetHeader("X-User-Id")
+		if uid == "" {
+			c.Set("user_id", "")
+		} else {
+			c.Set("user_id", uid)
+		}
+		handlers.SkipPasswordChange(c)
 	})
 	return r
 }
@@ -501,6 +529,160 @@ func TestChangePassword_改回旧密码_返400(t *testing.T) {
 	db.First(&updated, "id = ?", uid)
 	assert.True(t, bcrypt.CompareHashAndPassword([]byte(updated.PasswordHash), []byte("real-pwd-123")) == nil,
 		"拒绝时 hash 必须保持原值")
+}
+
+// ==================== C7: 首次登录强改密 + 跳过 ====================
+
+// TestLogin_返回MustChangePasswordFlag_True — seed 默认用户首次登录带 flag
+func TestLogin_返回MustChangePasswordFlag_True(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "freshuser", "old-pass-1")
+	// 显式 must_change_password=1 (模拟 seed admin 默认状态)
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	w := doJSON(t, r, "POST", "/auth/login", map[string]string{
+		"username": "freshuser",
+		"password": "old-pass-1",
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, 0, body.Code)
+	assert.True(t, body.Data.MustChangePassword, "首次登录用户必须返 must_change_password=true")
+}
+
+// TestLogin_返回MustChangePasswordFlag_False — 改过密后登录不带 flag
+func TestLogin_返回MustChangePasswordFlag_False(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "olduser", "old-pass-1")
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 0 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	w := doJSON(t, r, "POST", "/auth/login", map[string]string{
+		"username": "olduser",
+		"password": "old-pass-1",
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Data struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.False(t, body.Data.MustChangePassword, "改过密后不再返 must_change_password")
+}
+
+// TestChangePassword_成功后清除Flag — C7 核心: 改密 → flag 自动清
+func TestChangePassword_成功后清除Flag(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "tochange", "old-pwd-123")
+	// 初始 flag = true
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	w := doJSONWithUser(t, r, "POST", "/auth/change-password", uid.String(), map[string]string{
+		"old_password": "old-pwd-123",
+		"new_password": "brand-new-456",
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证: must_change_password=0 + password_set_at NOT NULL
+	var updated models.User
+	require.NoError(t, db.First(&updated, "id = ?", uid).Error)
+	assert.False(t, updated.MustChangePassword, "改密成功后 must_change_password 必须变 false")
+	assert.NotNil(t, updated.PasswordSetAt, "改密成功后 password_set_at 必须写入")
+}
+
+// TestSkipPasswordChange_清Flag_写Audit — 跳过 endpoint
+func TestSkipPasswordChange_清Flag_写Audit(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "skippie", "any-pwd-123")
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证: users 表 flag 清除 + password_set_at 写入
+	var updated models.User
+	require.NoError(t, db.First(&updated, "id = ?", uid).Error)
+	assert.False(t, updated.MustChangePassword, "跳过改密后 must_change_password 必须变 false")
+	assert.NotNil(t, updated.PasswordSetAt, "跳过改密后 password_set_at 必须写入")
+
+	// 验证: audit_logs 写入一条
+	var auditCount int64
+	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE action = 'skip_password_change' AND user_id = ?`, uid.String()).Scan(&auditCount).Error)
+	assert.Equal(t, int64(1), auditCount, "首次跳过必须写一条 audit log")
+}
+
+// TestSkipPasswordChange_幂等不重复写Audit — 第二次 skip 不刷 audit 噪音
+func TestSkipPasswordChange_幂等不重复写Audit(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "twiceskip", "any-pwd-123")
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	// 第一次 skip
+	w1 := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
+	assert.Equal(t, http.StatusOK, w1.Code)
+
+	// 第二次 skip (此时 flag 已 false, 幂等分支)
+	w2 := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	// audit 只应有 1 条
+	var auditCount int64
+	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE action = 'skip_password_change' AND user_id = ?`, uid.String()).Scan(&auditCount).Error)
+	assert.Equal(t, int64(1), auditCount, "幂等: 第二次 skip 不写新 audit (wasFlagged=false 跳过)")
+}
+
+// TestSkipPasswordChange_FirstLoginReason_拒绝400 — 主人 7/02 决策
+// 首次登录强改密**不可跳** (reason=first_login 必返 400)
+// 这是 C7 最重要的一条: seed admin/admin123 这种默认密码必须改
+func TestSkipPasswordChange_FirstLoginReason_拒绝400(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "firstlogin", "default-pwd")
+	// 模拟 seed 默认用户: must_change_password=1
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	// 前端首次登录时若 (错误地) 调 skip, 后端必须拒绝
+	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), map[string]string{
+		"reason": "first_login",
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code, "首次登录 reason=first_login 必须返 400")
+
+	// 验证: must_change_password 没被清 (拒绝路径不动 user 表)
+	var stillFlagged models.User
+	require.NoError(t, db.First(&stillFlagged, "id = ?", uid).Error)
+	assert.True(t, stillFlagged.MustChangePassword, "拒绝路径必须不动 must_change_password flag")
+	assert.Nil(t, stillFlagged.PasswordSetAt, "拒绝路径不能写 password_set_at")
+}
+
+// TestSkipPasswordChange_OptionalReason_允许跳 — 主人 7/02 决策
+// 非首次 (用户在改密页自己点取消) 允许跳, 用 reason=optional 显式标记
+func TestSkipPasswordChange_OptionalReason_允许跳(t *testing.T) {
+	db := setupAuthTestDB(t)
+	uid := seedActiveUser(t, db, "optskip", "any-pwd-456")
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+	r := newAuthTestRouter()
+	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), map[string]string{
+		"reason": "optional",
+	})
+	assert.Equal(t, http.StatusOK, w.Code, "reason=optional 允许跳")
+
+	var updated models.User
+	require.NoError(t, db.First(&updated, "id = ?", uid).Error)
+	assert.False(t, updated.MustChangePassword, "reason=optional 跳过后必须清 flag")
 }
 
 // ==================== 辅助 ====================

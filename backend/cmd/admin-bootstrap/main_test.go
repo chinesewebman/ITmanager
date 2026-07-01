@@ -53,6 +53,9 @@ func newTestDB(t *testing.T) *gorm.DB {
 			locked_until DATETIME,
 			last_login DATETIME,
 			last_login_ip TEXT,
+			-- C7: 跟 production 000012 migration 同步
+			must_change_password INTEGER DEFAULT 1,
+			password_set_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME,
 			deleted_at DATETIME

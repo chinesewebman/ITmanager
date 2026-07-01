@@ -89,6 +89,43 @@ paths:
         '200':
           description: 登出成功
 
+  /auth/skip-password-change:
+    post:
+      tags:
+        - 认证
+      summary: 跳过改密 (非首次场景)
+      description: |
+        C7: 用户在 `/change-password` 页可点"跳过"调本接口。
+        写 `password_set_at = NOW()` + 清 `must_change_password = false` + 写 audit_log。
+
+        主人 7/02 决策: **首次登录强改密不可跳**。
+        - `reason=first_login` → 400 (seed admin/admin123 这类必须改)
+        - `reason=optional` (或不传) → 允许 (用户主动取消改密, 不算"首次")
+      operationId: skipPasswordChange
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [first_login, optional]
+                  description: first_login=必改拒绝; optional=允许跳 (默认)
+                  example: optional
+      responses:
+        '200':
+          description: 跳过成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: 首次登录必改, 拒绝跳过
+
   # ==================== 仪表盘 ====================
   /dashboard/stats:
     get:
@@ -1880,6 +1917,12 @@ components:
               type: string
             user:
               $ref: '#/components/schemas/User'
+            # C7: 首次登录强改密 flag
+            # TRUE = 需要 redirect 到 /change-password (前端检测)
+            # FALSE = 正常 dashboard
+            must_change_password:
+              type: boolean
+              example: false
 
     # ==================== 仪表盘 ====================
     DashboardStats:

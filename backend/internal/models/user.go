@@ -11,23 +11,25 @@ import (
 
 // User 用户
 type User struct {
-	ID           uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Username     string         `json:"username" gorm:"uniqueIndex;size:50;not null"`
-	PasswordHash string         `json:"-" gorm:"size:255;not null"`
-	Nickname     string         `json:"nickname" gorm:"size:100"`
-	Email        string         `json:"email" gorm:"size:255"`
-	Phone        string         `json:"phone" gorm:"size:20"`
-	Avatar       string         `json:"avatar" gorm:"size:500"`
-	Status       string         `json:"status" gorm:"size:20;default:active"` // active, inactive, locked
-	DepartmentID *uuid.UUID     `json:"department_id" gorm:"type:uuid"`
-	Role         string         `json:"role" gorm:"size:20;default:user"` // admin, operator, readonly
-	FailedLogin  int            `json:"failed_login" gorm:"default:0"`
-	LockedUntil  *time.Time     `json:"locked_until"`
-	LastLogin    *time.Time     `json:"last_login"`
-	LastLoginIP  string         `json:"last_login_ip" gorm:"size:50"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
+	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Username           string         `json:"username" gorm:"uniqueIndex;size:50;not null"`
+	PasswordHash       string         `json:"-" gorm:"size:255;not null"`
+	Nickname           string         `json:"nickname" gorm:"size:100"`
+	Email              string         `json:"email" gorm:"size:255"`
+	Phone              string         `json:"phone" gorm:"size:20"`
+	Avatar             string         `json:"avatar" gorm:"size:500"`
+	Status             string         `json:"status" gorm:"size:20;default:active"` // active, inactive, locked
+	DepartmentID       *uuid.UUID     `json:"department_id" gorm:"type:uuid"`
+	Role               string         `json:"role" gorm:"size:20;default:user"` // admin, operator, readonly
+	FailedLogin        int            `json:"failed_login" gorm:"default:0"`
+	LockedUntil        *time.Time     `json:"locked_until"`
+	LastLogin          *time.Time     `json:"last_login"`
+	LastLoginIP        string         `json:"last_login_ip" gorm:"size:50"`
+	MustChangePassword bool           `json:"must_change_password" gorm:"default:true"`
+	PasswordSetAt      *time.Time     `json:"password_set_at"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 func (u *User) TableName() string {

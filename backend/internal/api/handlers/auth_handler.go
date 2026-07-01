@@ -12,6 +12,7 @@ import (
 	"network-monitor-platform/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
@@ -127,6 +128,8 @@ func Login(c *gin.Context) {
 				"role":     user.Role,
 				"avatar":   user.Avatar,
 			},
+			// C7: 首次登录强改密 flag — 前端检测后强制 redirect /change-password
+			"must_change_password": user.MustChangePassword,
 		},
 	})
 }
@@ -231,7 +234,11 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
+	now := time.Now()
 	user.PasswordHash = string(hash)
+	// C7: 改密成功后清除强制改密 flag (幂等: 多次调也安全)
+	user.MustChangePassword = false
+	user.PasswordSetAt = &now
 	if err := database.DB.Save(&user).Error; err != nil {
 		apierr.Internal(c, "密码更新失败", err)
 		return
@@ -240,5 +247,73 @@ func ChangePassword(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"code":    0,
 		"message": "密码修改成功",
+	})
+}
+
+// SkipPasswordChangeRequest 跳过首次登录强改密请求
+// C7: 带 reason 字段让前端区分"首次强改密(不可跳)" vs "用户自己改密(可跳)"
+//
+//	reason=first_login → 拒绝 400 (主人决策 7/02: 首次必须改)
+//	reason=optional / 不传 → 走原逻辑 (audit + 清 flag, 用于"我自己想先不改成别的")
+type SkipPasswordChangeRequest struct {
+	Reason string `json:"reason"`
+}
+
+// SkipPasswordChange 跳过首次登录强改密
+// C7: 用户在 /change-password 页面点 "本次跳过" — 写 password_set_at + 清 flag + audit
+// 主人 7/02 决策: 首次登录强改密**不可跳** (reason=first_login 拒绝)
+// 只接受 reason=optional (用户在改密页主动取消, 不算首次强改)
+func SkipPasswordChange(c *gin.Context) {
+	var req SkipPasswordChangeRequest
+	// body 可空 (老 API 兼容: 不传 reason 视为 optional)
+	_ = c.ShouldBindJSON(&req)
+
+	userID := c.GetString("user_id")
+	if userID == "" {
+		apierr.Unauthorized(c, "")
+		return
+	}
+
+	var user models.User
+	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
+		apierr.NotFound(c, "用户不存在")
+		return
+	}
+
+	// 主人 7/02 决策: 首次登录强改密不可跳 — reason=first_login 拒绝
+	if req.Reason == "first_login" {
+		apierr.BadRequest(c, "首次登录必须修改默认密码,不允许跳过")
+		return
+	}
+
+	now := time.Now()
+	// 幂等: 已是 FALSE 不重复写 audit
+	wasFlagged := user.MustChangePassword
+	user.MustChangePassword = false
+	user.PasswordSetAt = &now
+	if err := database.DB.Save(&user).Error; err != nil {
+		apierr.Internal(c, "跳过改密失败", err)
+		return
+	}
+
+	// 写 audit (仅首次跳过写, 重复 skip 不刷 audit 噪音)
+	if wasFlagged {
+		_ = database.DB.Create(&models.AuditLog{
+			ID:         uuid.New(),
+			UserID:     &user.ID,
+			Username:   user.Username,
+			Action:     "skip_password_change",
+			Resource:   "user",
+			ResourceID: &user.ID,
+			Method:     "POST",
+			Path:       "/auth/skip-password-change",
+			IP:         c.ClientIP(),
+			Status:     200,
+		}).Error
+	}
+
+	c.JSON(200, gin.H{
+		"code":    0,
+		"message": "已跳过首次改密, 下次登录不再提示",
 	})
 }
