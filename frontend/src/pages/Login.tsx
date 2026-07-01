@@ -35,7 +35,7 @@ function Login() {
       // C-F5: 后端 set-cookie auth_token（httpOnly, SameSite=Strict）
       // 不再在前端存 token；仅缓存 user 字典
       const response: any = await authApi.login(values)
-      const { user } = response.data.data
+      const { user, must_change_password } = response.data.data
 
       localStorage.setItem('user', JSON.stringify(user))
 
@@ -44,6 +44,14 @@ function Login() {
         localStorage.setItem(REMEMBER_KEY, JSON.stringify({ username: values.username, remember: true }))
       } else {
         localStorage.removeItem(REMEMBER_KEY)
+      }
+
+      // C7: 首次登录强改密 — 跳到改密页 (后端 must_change_password=true)
+      // reason=first-login 让 ChangePassword 知道"首次不可跳"
+      if (must_change_password) {
+        message.warning('检测到您首次登录, 请修改默认密码')
+        navigate('/change-password?reason=first-login', { replace: true })
+        return
       }
 
       message.success('登录成功')

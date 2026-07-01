@@ -46,6 +46,8 @@ const Oncall = lazy(() => import("./pages/Oncall"));
 const Runbook = lazy(() => import("./pages/Runbook"));
 const MetricSnapshot = lazy(() => import("./pages/MetricSnapshot"));
 import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
+// C7: 改密页 — 跟 Login 一样不走 AppLayout (无侧边栏, 满屏卡片)
+import ChangePassword from "./pages/ChangePassword";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ThemeSwitcher } from "./components/ThemeSwitcher";
 import { CommandPalette, CommandPaletteTrigger } from "./components/CommandPalette";
@@ -357,6 +359,11 @@ function App() {
           <Route
             path="/login"
             element={isLoggedIn ? <Navigate to="/" replace /> : <Login />}
+          />
+          {/* C7: 改密页 — 登录后访问, 走裸 layout 跟 Login 一致 */}
+          <Route
+            path="/change-password"
+            element={isLoggedIn ? <ChangePassword /> : <Navigate to="/login" replace />}
           />
           <Route
             path="/*"

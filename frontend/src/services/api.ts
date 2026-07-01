@@ -61,6 +61,12 @@ export default api;
 export const authApi = {
   login: (data: LoginRequest) => api.post("/auth/login", data),
   logout: () => api.post("/auth/logout"),
+  // C7: 跳过改密 (非首次场景; reason=first_login 后端会拒绝)
+  skipPasswordChange: (reason: "first_login" | "optional" = "optional") =>
+    api.post("/auth/skip-password-change", { reason }),
+  // C7: 改密 (复用 PUT /auth/password; 后端 ChangePassword handler 兼容)
+  changePassword: (oldPassword: string, newPassword: string) =>
+    api.put("/auth/password", { old_password: oldPassword, new_password: newPassword }),
 };
 
 // ==================== 仪表盘 ====================

@@ -9,7 +9,7 @@ import Login from './Login'
 // Mock antd message（避免 jsdom 副作用）
 vi.mock('antd', async () => {
   const actual = await vi.importActual<typeof import('antd')>('antd')
-  return { ...actual, message: { success: vi.fn(), error: vi.fn() } }
+  return { ...actual, message: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }
 })
 
 // Mock services/api
@@ -29,6 +29,8 @@ function renderLogin(initialPath: string = '/login', fromState: { from?: string 
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<div>HOME_PAGE</div>} />
         <Route path="/assets" element={<div>ASSETS_PAGE</div>} />
+        {/* C7: ChangePassword 占位 (verify Login 跳过来) */}
+        <Route path="/change-password" element={<div>CHANGE_PASSWORD_TARGET</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -128,5 +130,45 @@ describe('Login page', () => {
     // form 恢复 username
     const usernameInput = screen.getByPlaceholderText('用户名') as HTMLInputElement
     expect(usernameInput.value).toBe('saveduser')
+  })
+
+  // C7: must_change_password 行为
+  it('首次登录 (must_change_password=true) 跳到 /change-password?reason=first-login', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      data: { data: { user: { id: '1', username: 'admin' }, must_change_password: true } },
+    } as any)
+
+    renderLogin('/login', null)
+    fireEvent.change(screen.getByPlaceholderText('用户名'), { target: { value: 'admin' } })
+    fireEvent.change(screen.getByPlaceholderText('密码'), { target: { value: 'admin123' } })
+    fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }))
+
+    await waitFor(
+      () => {
+        expect(screen.getByText('CHANGE_PASSWORD_TARGET')).toBeInTheDocument()
+      },
+      { timeout: 3000 },
+    )
+    // 确认 Login 表单已 unmount
+    expect(screen.queryByText('网络运维监控平台')).not.toBeInTheDocument()
+  })
+
+  it('非首次 (must_change_password=false) 跳到原页面 /', async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      data: { data: { user: { id: '1', username: 'admin' }, must_change_password: false } },
+    } as any)
+
+    renderLogin('/login', null)
+    fireEvent.change(screen.getByPlaceholderText('用户名'), { target: { value: 'admin' } })
+    fireEvent.change(screen.getByPlaceholderText('密码'), { target: { value: 'real-pwd' } })
+    fireEvent.click(screen.getByRole('button', { name: /登\s*录/ }))
+
+    // 跳到首页
+    await waitFor(
+      () => {
+        expect(screen.getByText('HOME_PAGE')).toBeInTheDocument()
+      },
+      { timeout: 2000 },
+    )
   })
 })
