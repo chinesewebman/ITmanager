@@ -360,7 +360,6 @@ function Settings() {
 
   useEffect(() => {
     fetchApiKeys()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // B1-2: 接 createChannel / updateChannel（之前只 message.success 不调 API）

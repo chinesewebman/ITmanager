@@ -217,6 +217,9 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				assets.POST("", assetH.CreateAsset)
 				assets.PUT("/:id", assetH.UpdateAsset)
 				assets.DELETE("/:id", assetH.DeleteAsset)
+				// B4: 软退役 + 恢复
+				assets.POST("/:id/retire", assetH.RetireAsset)   // 静态段 /retire 在 /:id 之后, gin 路径匹配 OK
+				assets.POST("/:id/restore", assetH.RestoreAsset) // 同上
 			}
 
 			racks := protected.Group("/racks")

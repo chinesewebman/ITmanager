@@ -34,6 +34,14 @@ type Asset struct {
 	OnlineTime  *time.Time `json:"online_time"`
 	OfflineTime *time.Time `json:"offline_time"`
 
+	// B4: 软退役存档 — 退役时把 IP 移到 last_known_ip*, 然后清空 AssetNetwork.IP*
+	// 详见 docs/TRAPS.md T-* + migrations/000011_asset_retire.up.sql
+	LastKnownIP4  *string    `json:"last_known_ip4" gorm:"size:45"`
+	LastKnownIP6  *string    `json:"last_known_ip6" gorm:"size:45"`
+	RetiredAt     *time.Time `json:"retired_at" gorm:"index"`
+	RetiredReason *string    `json:"retired_reason" gorm:"type:text"`
+	RetiredBy     *uuid.UUID `json:"retired_by" gorm:"type:uuid"` // FK users.id (soft, no DB constraint)
+
 	// 业务信息
 	BusinessUnit string `json:"business_unit" gorm:"size:100"`
 	ServiceName  string `json:"service_name" gorm:"size:100"`

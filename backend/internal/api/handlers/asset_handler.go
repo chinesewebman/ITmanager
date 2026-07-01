@@ -11,6 +11,7 @@ import (
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // safeCSV 防 Excel 公式注入（C-F7）：对 = + - @ 	 \r 开头字段加前导单引号
@@ -139,6 +140,79 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "删除成功",
+	})
+}
+
+// B4: RetireAsset 软退役
+// POST /api/assets/:id/retire
+// body: { "reason": "设备下架" }
+// - 把网卡 IP 移到 asset.last_known_ip*, 清空网卡 IP, status='retired'
+// - 后续新设备可使用同一 IP 不冲突, 历史按 hostid 仍可查 (T-* future trap)
+func (h *AssetHandler) RetireAsset(c *gin.Context) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apierr.BadRequest(c, "请求参数错误")
+		return
+	}
+	userID, err := uuid.Parse(c.GetString("user_id"))
+	if err != nil {
+		apierr.Unauthorized(c, "无效的用户凭证")
+		return
+	}
+	asset, networks, err := h.svc.Retire(c.Request.Context(), c.Param("id"), req.Reason, userID)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "资产不存在")
+			return
+		}
+		if errors.Is(err, service.ErrInvalidInput) {
+			// 重复退役 / 非 uuid id
+			apierr.BadRequest(c, "无法退役（资产已退役或参数无效）")
+			return
+		}
+		apierr.Internal(c, "退役资产失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "资产已软退役，IP 已释放",
+		"data": gin.H{
+			"asset":          asset,
+			"networks":       networks,
+			"released_ip4":   asset.LastKnownIP4,
+			"released_ip6":   asset.LastKnownIP6,
+			"retired_at":     asset.RetiredAt,
+			"retired_reason": asset.RetiredReason,
+		},
+	})
+}
+
+// B4: RestoreAsset 恢复软退役
+// POST /api/assets/:id/restore
+// - 把 last_known_ip* 写回网卡, 清空 retired_*, status='active'
+func (h *AssetHandler) RestoreAsset(c *gin.Context) {
+	asset, networks, err := h.svc.Restore(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "资产不存在")
+			return
+		}
+		if errors.Is(err, service.ErrInvalidInput) {
+			apierr.BadRequest(c, "无法恢复（资产未处于退役状态）")
+			return
+		}
+		apierr.Internal(c, "恢复资产失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "资产已恢复，IP 已写回",
+		"data": gin.H{
+			"asset":    asset,
+			"networks": networks,
+		},
 	})
 }
 

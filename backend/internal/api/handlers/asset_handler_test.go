@@ -20,11 +20,13 @@ import (
 
 // mockAssetService 手写 mock（避免引入 sqlmock / testify/mock）
 type mockAssetService struct {
-	listFunc   func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
-	getFunc    func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
-	createFunc func(ctx context.Context, a *models.Asset) error
-	updateFunc func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
-	deleteFunc func(ctx context.Context, id string) error
+	listFunc    func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
+	getFunc     func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
+	createFunc  func(ctx context.Context, a *models.Asset) error
+	updateFunc  func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
+	deleteFunc  func(ctx context.Context, id string) error
+	retireFunc  func(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
+	restoreFunc func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 }
 
 func (m *mockAssetService) List(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error) {
@@ -42,11 +44,18 @@ func (m *mockAssetService) Update(ctx context.Context, id string, u map[string]i
 func (m *mockAssetService) Delete(ctx context.Context, id string) error {
 	return m.deleteFunc(ctx, id)
 }
+func (m *mockAssetService) Retire(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error) {
+	return m.retireFunc(ctx, id, reason, userID)
+}
+func (m *mockAssetService) Restore(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error) {
+	return m.restoreFunc(ctx, id)
+}
 
 // newTestRouter 把 handler 挂到 /assets 路由上
 func newTestRouter(svc service.AssetService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(gin.Recovery()) // T-15: handler svc=nil panic 不穿透 testing.tRunner
 	h := handlers.NewAssetHandler(svc)
 	g := r.Group("/assets")
 	g.GET("", h.ListAssets)
@@ -55,6 +64,8 @@ func newTestRouter(svc service.AssetService) *gin.Engine {
 	g.PUT("/:id", h.UpdateAsset)
 	g.DELETE("/:id", h.DeleteAsset)
 	g.GET("/export", h.ExportAssets)
+	g.POST("/:id/retire", h.RetireAsset)
+	g.POST("/:id/restore", h.RestoreAsset)
 	return r
 }
 

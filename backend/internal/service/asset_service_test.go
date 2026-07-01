@@ -385,3 +385,210 @@ func TestAssetService_List_PageSizeClamp_500上限(t *testing.T) {
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
+
+// ==================== B4: Retire / Restore 测试 ====================
+
+// retiredAssetSampleRows 返回 status=active 的 asset row (Retire 前置 First)
+func activeAssetSampleRows(id string) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "name", "asset_tag", "sn", "status", "asset_type",
+		"created_at", "updated_at",
+	}).AddRow(id, "web-01", "AT-001", "SN-1", "active", "server", time.Now(), time.Now())
+}
+
+func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	userID := uuid.New()
+	netID := uuid.New()
+
+	// 1) First 拿 asset (active) — First(id, ?) gorm 发 SELECT * WHERE id = $1 ORDER BY id LIMIT $2, 2 args (uid + 1)
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(activeAssetSampleRows(id.String()))
+	// 2) Find networks (取 IPv4)
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv_address"}).
+			AddRow(netID, id, "eth0", "192.168.3.50", ""))
+	// 3) Transaction Begin
+	mock.ExpectBegin()
+	// 3a) UPDATE asset (Model.Updates 走 Exec, 走 Update 0 行也返 nil)
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// 3b) UPDATE asset_networks (清空 IP)
+	mock.ExpectExec(`UPDATE "asset_networks" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	// 4) 重读 networks (查最终态)
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv_address"}).
+			AddRow(netID, "", ""))
+
+	asset, networks, err := svc.Retire(context.Background(), id.String(), "设备下架", userID)
+	require.NoError(t, err)
+	assert.NotNil(t, asset)
+	assert.Equal(t, "retired", asset.Status)
+	require.NotNil(t, asset.LastKnownIP4)
+	assert.Equal(t, "192.168.3.50", *asset.LastKnownIP4)
+	assert.Nil(t, asset.LastKnownIP6)
+	require.NotNil(t, asset.RetiredReason)
+	assert.Equal(t, "设备下架", *asset.RetiredReason)
+	require.NotNil(t, asset.RetiredBy)
+	assert.Equal(t, userID, *asset.RetiredBy)
+	assert.NotEmpty(t, networks)
+	assert.Equal(t, "", networks[0].IPv4Address) // IP 已清空
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Retire_重复退役返ErrInvalidInput(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "status", "asset_type", "created_at", "updated_at",
+	}).AddRow(id, "web-01", "retired", "server", time.Now(), time.Now())
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(rows)
+
+	_, _, err := svc.Retire(context.Background(), id.String(), "再来一次", uuid.New())
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Retire_不存在返ErrNotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, _, err := svc.Retire(context.Background(), id.String(), "x", uuid.New())
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Retire_非法UUID返ErrInvalidInput(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	_, _, err := svc.Retire(context.Background(), "not-a-uuid", "x", uuid.New())
+	assert.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	netID := uuid.New()
+	lastIP4 := "192.168.3.50"
+
+	// 1) First asset (retired with last_known_ip4) — 用 uuid.UUID 作为 First 参数 (Trap 9)
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "name", "status", "asset_type", "last_known_ip4",
+			"created_at", "updated_at",
+		}).AddRow(id, "web-01", "retired", "server", lastIP4, time.Now(), time.Now()))
+	// 2) Find networks (空 IP 待写回)
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv_address"}).
+			AddRow(netID, id, "eth0", "", ""))
+	// 3) Transaction Begin
+	mock.ExpectBegin()
+	// 3a) UPDATE asset_networks (写回 IPv4)
+	mock.ExpectExec(`UPDATE "asset_networks" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// 3b) UPDATE asset (status=active, 清空 retired_*)
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	// 4) 重读
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address"}).
+			AddRow(netID, lastIP4))
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(id, "active"))
+
+	asset, networks, err := svc.Restore(context.Background(), id.String())
+	require.NoError(t, err)
+	assert.NotNil(t, asset)
+	assert.Equal(t, "active", asset.Status)
+	assert.Nil(t, asset.RetiredAt)
+	assert.Nil(t, asset.LastKnownIP4)
+	require.NotEmpty(t, networks)
+	assert.Equal(t, lastIP4, networks[0].IPv4Address)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Restore_非退役状态返ErrInvalidInput(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(activeAssetSampleRows(id.String()))
+
+	_, _, err := svc.Restore(context.Background(), id.String())
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Restore_不存在返ErrNotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, _, err := svc.Restore(context.Background(), id.String())
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAssetService_Retire_无网卡时last_known为空(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(activeAssetSampleRows(id.String()))
+	// 0 张网卡
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "asset_networks" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	asset, _, err := svc.Retire(context.Background(), id.String(), "无网卡", userID)
+	require.NoError(t, err)
+	assert.Equal(t, "retired", asset.Status)
+	assert.Nil(t, asset.LastKnownIP4)
+	assert.Nil(t, asset.LastKnownIP6)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}

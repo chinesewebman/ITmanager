@@ -129,6 +129,11 @@ func newTestDB(t *testing.T) *gorm.DB {
 			custom_fields TEXT,
 			net_box_id INTEGER,
 			source TEXT,
+			last_known_ip4 TEXT,
+			last_known_ip6 TEXT,
+			retired_at DATETIME,
+			retired_reason TEXT,
+			retired_by TEXT,
 			created_at DATETIME,
 			updated_at DATETIME,
 			deleted_at DATETIME

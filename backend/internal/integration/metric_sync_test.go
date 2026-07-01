@@ -41,7 +41,10 @@ func initSchema(t *testing.T) *gorm.DB {
 			purchase_date DATETIME, warranty_end DATETIME, vendor TEXT, vendor_contact TEXT,
 			status TEXT DEFAULT 'active', online_time DATETIME, offline_time DATETIME,
 			business_unit TEXT, service_name TEXT, tags TEXT, custom_fields TEXT,
-			net_box_id INTEGER, source TEXT, created_at DATETIME, updated_at DATETIME
+			net_box_id INTEGER, source TEXT,
+			last_known_ip4 TEXT, last_known_ip6 TEXT,
+			retired_at DATETIME, retired_reason TEXT, retired_by TEXT,
+			created_at DATETIME, updated_at DATETIME
 		)`,
 	} {
 		if err := db.Exec(s).Error; err != nil {
