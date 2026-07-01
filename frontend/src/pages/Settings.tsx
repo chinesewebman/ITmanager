@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Divider, Spin } from 'antd'
+import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
-import { notificationApi, integrationApi } from '../services/api'
+import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface NotificationChannel {
@@ -267,15 +267,130 @@ function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ===== B1-1: API 密钥管理 =====
+  const [apiKeys, setApiKeys] = useState<APIKey[]>([])
+  const [apiKeyLoading, setApiKeyLoading] = useState(false)
+  const [apiKeyCreating, setApiKeyCreating] = useState(false)
+  const [apiKeyModal, setApiKeyModal] = useState<{ open: boolean }>({ open: false })
+  const [apiKeyForm] = Form.useForm()
+  const [generatedKey, setGeneratedKey] = useState<string | null>(null)
+
+  const fetchApiKeys = async () => {
+    setApiKeyLoading(true)
+    try {
+      const res: any = await apiKeyApi.list()
+      setApiKeys(res?.data?.data || [])
+    } catch (error) {
+      console.error('获取 API 密钥失败:', error)
+      setApiKeys([])
+    } finally {
+      setApiKeyLoading(false)
+    }
+  }
+
+  const handleCreateApiKey = async (values: { name: string; permissions?: string[]; expires_at?: string }) => {
+    setApiKeyCreating(true)
+    try {
+      const payload: { name: string; permissions?: string[]; expires_at?: string } = {
+        name: values.name,
+        permissions: values.permissions || ['read'],
+      }
+      if (values.expires_at) payload.expires_at = values.expires_at
+      const res: any = await apiKeyApi.create(payload)
+      const key = res?.data?.data?.key
+      if (res?.data?.code === 0) {
+        message.success('API 密钥已生成')
+        if (key) setGeneratedKey(key) // 只展示一次
+        await fetchApiKeys()
+      } else {
+        message.error(res?.data?.message || '生成失败')
+      }
+    } catch (error: any) {
+      message.error(error?.response?.data?.message || '生成失败')
+    } finally {
+      setApiKeyCreating(false)
+    }
+  }
+
+  const handleRevokeApiKey = async (r: APIKey) => {
+    Modal.confirm({
+      title: '撤销密钥',
+      content: `确认撤销「${r.name}」？撤销后使用该密钥的请求将被拒绝。`,
+      okText: '确认撤销',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const res: any = await apiKeyApi.revoke(r.id)
+          if (res?.data?.code === 0) {
+            message.success('已撤销')
+            await fetchApiKeys()
+          } else {
+            message.error(res?.data?.message || '撤销失败')
+          }
+        } catch (error: any) {
+          message.error(error?.response?.data?.message || '撤销失败')
+        }
+      },
+    })
+  }
+
+  const handleDeleteApiKey = async (r: APIKey) => {
+    Modal.confirm({
+      title: '删除密钥',
+      content: `确认删除「${r.name}」？删除后无法恢复。`,
+      okText: '确认删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const res: any = await apiKeyApi.delete(r.id)
+          if (res?.data?.code === 0) {
+            message.success('已删除')
+            await fetchApiKeys()
+          } else {
+            message.error(res?.data?.message || '删除失败')
+          }
+        } catch (error: any) {
+          message.error(error?.response?.data?.message || '删除失败')
+        }
+      },
+    })
+  }
+
+  useEffect(() => {
+    fetchApiKeys()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // B1-2: 接 createChannel / updateChannel（之前只 message.success 不调 API）
   const handleSaveChannel = async () => {
     try {
-      await form.validateFields()
-      message.success('保存成功')
-      setChannelModal({ open: false })
-      form.resetFields()
-      fetchChannels()
-    } catch (error) {
-      console.error(error)
+      const values = await form.validateFields()
+      const configObj = values.config || {}
+      // 后端 NotificationChannel.Config 是 JSON 字符串，前端表单是嵌套对象
+      // → stringify 后发；后端 Service.Update/Create 应当接受字符串或对象（看 service 实现）
+      const payload = {
+        name: values.name,
+        type: values.type,
+        config: JSON.stringify(configObj),
+        is_enabled: true,
+      }
+      const res: any = channelModal.data
+        ? await notificationApi.updateChannel(channelModal.data.id, payload)
+        : await notificationApi.createChannel(payload)
+      if (res?.data?.code === 0) {
+        message.success(channelModal.data ? '更新成功' : '保存成功')
+        setChannelModal({ open: false })
+        form.resetFields()
+        fetchChannels()
+      } else {
+        message.error(res?.data?.message || '保存失败')
+      }
+    } catch (error: any) {
+      if (error?.errorFields) return // Antd 表单校验失败
+      console.error('保存通知渠道失败:', error)
+      message.error(error?.response?.data?.message || '保存失败')
     }
   }
 
@@ -601,11 +716,30 @@ function Settings() {
               form.resetFields()
             }}
             width={500}
+            okText="保存"
+            cancelText="取消"
           >
             <Form
               form={form}
               layout="vertical"
-              initialValues={channelModal.data || {}}
+              initialValues={
+                channelModal.data
+                  ? {
+                      name: channelModal.data.name,
+                      type: channelModal.data.type,
+                      // 后端 Config 是 JSON 字符串 → 编辑时 parse 回嵌套对象
+                      config: (() => {
+                        try {
+                          return typeof channelModal.data.config === 'string'
+                            ? JSON.parse(channelModal.data.config)
+                            : channelModal.data.config || {}
+                        } catch {
+                          return {}
+                        }
+                      })(),
+                    }
+                  : {}
+              }
             >
               <Form.Item name="name" label="渠道名称" rules={[{ required: true }]}>
                 <Input />
@@ -665,26 +799,155 @@ function Settings() {
       ),
       children: (
         <div>
-          <h3 style={{ marginBottom: 16 }}>API 密钥管理</h3>
-          <Card>
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong>默认 API 密钥</strong>
-                  <div style={{ color: '#999', fontSize: 12 }}>用于系统间集成</div>
+          <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0 }}>API 密钥管理</h3>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setApiKeyModal({ open: true })}
+            >
+              生成密钥
+            </Button>
+          </div>
+
+          <Table
+            rowKey="id"
+            loading={apiKeyLoading}
+            dataSource={apiKeys}
+            pagination={false}
+            columns={[
+              { title: '名称', dataIndex: 'name', key: 'name' },
+              {
+                title: '前缀',
+                dataIndex: 'prefix',
+                key: 'prefix',
+                render: (p: string) => <Tag>{p}-…</Tag>,
+              },
+              {
+                title: '权限',
+                dataIndex: 'permissions',
+                key: 'permissions',
+                render: (perms: string[]) => (
+                  <Space size={4}>
+                    {perms.map((p) => (
+                      <Tag color="blue" key={p}>{p}</Tag>
+                    ))}
+                  </Space>
+                ),
+              },
+              { title: '速率限制', dataIndex: 'rate_limit', key: 'rate_limit' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                key: 'status',
+                render: (s: string) => (
+                  <Tag color={s === 'active' ? 'green' : s === 'revoked' ? 'orange' : 'default'}>{s}</Tag>
+                ),
+              },
+              {
+                title: '最后使用',
+                dataIndex: 'last_used_at',
+                key: 'last_used_at',
+                render: (t?: string | null) => (t ? new Date(t).toLocaleString() : '—'),
+              },
+              {
+                title: '操作',
+                key: 'action',
+                render: (_: any, r: APIKey) => (
+                  <Space>
+                    {r.status === 'active' && (
+                      <Button
+                        type="link"
+                        size="small"
+                        onClick={() => handleRevokeApiKey(r)}
+                      >
+                        撤销
+                      </Button>
+                    )}
+                    <Button
+                      type="link"
+                      size="small"
+                      danger
+                      onClick={() => handleDeleteApiKey(r)}
+                    >
+                      删除
+                    </Button>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+
+          <Modal
+            title="生成 API 密钥"
+            open={apiKeyModal.open}
+            onCancel={() => {
+              setApiKeyModal({ open: false })
+              apiKeyForm.resetFields()
+            }}
+            footer={null}
+            width={500}
+          >
+            <Form form={apiKeyForm} layout="vertical" onFinish={handleCreateApiKey}>
+              <Form.Item
+                label="密钥名称"
+                name="name"
+                rules={[{ required: true, message: '请输入密钥名称' }]}
+              >
+                <Input placeholder="如：监控告警推送" />
+              </Form.Item>
+              <Form.Item
+                label="权限"
+                name="permissions"
+                initialValue={['read']}
+                rules={[{ required: true, message: '请选择至少一项权限' }]}
+              >
+                <Select
+                  mode="multiple"
+                  options={[
+                    { label: '只读 (read)', value: 'read' },
+                    { label: '读写 (write)', value: 'write' },
+                    { label: '管理 (admin)', value: 'admin' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item label="过期时间（可选）" name="expires_at">
+                <Input placeholder="RFC3339，如 2027-01-01T00:00:00Z（留空永不过期）" />
+              </Form.Item>
+
+              {generatedKey && (
+                <div
+                  style={{
+                    background: '#f6ffed',
+                    border: '1px solid #b7eb8f',
+                    padding: 12,
+                    borderRadius: 4,
+                    marginBottom: 16,
+                  }}
+                >
+                  <div style={{ marginBottom: 4, fontWeight: 600 }}>
+                    ✅ 密钥已生成（仅此一次展示，请妥善保存）
+                  </div>
+                  <Input.TextArea readOnly value={generatedKey} autoSize={{ minRows: 2, maxRows: 4 }} />
                 </div>
-                <Button>重新生成</Button>
-              </div>
-              <Divider style={{ margin: '12px 0' }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong>只读 API 密钥</strong>
-                  <div style={{ color: '#999', fontSize: 12 }}>用于只读访问</div>
-                </div>
-                <Button type="primary">生成</Button>
-              </div>
-            </Space>
-          </Card>
+              )}
+
+              <Space>
+                <Button type="primary" htmlType="submit" loading={apiKeyCreating}>
+                  {generatedKey ? '已生成' : '生成'}
+                </Button>
+                <Button
+                  onClick={() => {
+                    setApiKeyModal({ open: false })
+                    setGeneratedKey(null)
+                    apiKeyForm.resetFields()
+                  }}
+                >
+                  关闭
+                </Button>
+              </Space>
+            </Form>
+          </Modal>
         </div>
       ),
     },

@@ -71,6 +71,15 @@ jobs:
         run: npm run lint
         continue-on-error: false
 
+      # B1-3: 前端测试 (vitest) + 类型检查 (tsc) — 之前 CI 缺这两个步骤
+      - name: Type check
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        working-directory: frontend
+        run: npx vitest run
+
       - name: Build
         working-directory: frontend
         run: npm run build

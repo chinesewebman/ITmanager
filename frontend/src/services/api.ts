@@ -141,6 +141,30 @@ export const userApi = {
   get: (id: string) => api.get(`/users/${id}`),
 };
 
+// ==================== API 密钥（B1-1） ====================
+// P1 修复：Settings.tsx 之前是死表单（"重新生成"/"生成" 按钮零 onClick）
+// 后端已经有 POST/GET/DELETE/PUT /api-keys/* 四个端点，缺的只是前端 client
+export interface APIKey {
+  id: string
+  name: string
+  prefix: string
+  permissions: string[]
+  ip_whitelist: string[]
+  rate_limit: number
+  status: string
+  expires_at?: string | null
+  last_used_at?: string | null
+  created_at: string
+}
+
+export const apiKeyApi = {
+  list: () => api.get("/api-keys"),
+  create: (data: { name: string; permissions?: string[]; expires_at?: string }) =>
+    api.post("/api-keys", data),
+  revoke: (id: string) => api.put(`/api-keys/${id}/revoke`),
+  delete: (id: string) => api.delete(`/api-keys/${id}`),
+}
+
 // ==================== 通知渠道 ====================
 export const notificationApi = {
   listChannels: () => api.get("/notification-channels"),
