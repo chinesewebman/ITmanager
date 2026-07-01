@@ -77,6 +77,10 @@ export const assetApi = {
   create: (data: any) => api.post("/assets", data),
   update: (id: string, data: any) => api.put(`/assets/${id}`, data),
   delete: (id: string) => api.delete(`/assets/${id}`),
+  // B4: 软退役 + 恢复 (主人 7/01 insight: 软删除的 IP 必须能被新设备继承)
+  retire: (id: string, reason: string) =>
+    api.post(`/assets/${id}/retire`, { reason }),
+  restore: (id: string) => api.post(`/assets/${id}/restore`),
 };
 
 // ==================== 告警中心 ====================

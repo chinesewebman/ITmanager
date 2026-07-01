@@ -1,5 +1,5 @@
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
-import { Button, message, Modal, Table, Tag } from 'antd'
+import { Button, Form, Input, message, Modal, Table, Tag } from 'antd'
 import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
@@ -51,6 +51,11 @@ function Assets() {
       return res?.data?.data?.items ?? []
     },
   )
+
+  // B4: 退役 modal 状态 + form
+  const [retireModal, setRetireModal] = useState<{ open: boolean; asset: Asset | null }>({ open: false, asset: null })
+  const [retireForm] = Form.useForm<{ reason: string }>()
+  const [retireSubmitting, setRetireSubmitting] = useState(false)
 
   // 写操作：创建/更新/删除统一 invalidate 列表
   const createMut = useApiMutation((v: AssetFormValues) => assetApi.create(v), {
@@ -179,6 +184,53 @@ function Assets() {
     }
   }
 
+  // B4: 退役 / 恢复 handler
+  const handleRetire = (asset: Asset) => {
+    setRetireModal({ open: true, asset })
+    retireForm.resetFields()
+  }
+  const handleRetireSubmit = async (values: { reason: string }) => {
+    if (!retireModal.asset) return
+    setRetireSubmitting(true)
+    try {
+      const res: any = await assetApi.retire(retireModal.asset.id, values.reason || '')
+      const releasedIp = res?.data?.data?.released_ip4 || res?.data?.data?.released_ip6
+      message.success(
+        releasedIp
+          ? `已退役 — IP ${releasedIp} 已释放给新设备使用`
+          : '已退役',
+      )
+      setRetireModal({ open: false, asset: null })
+      retireForm.resetFields()
+      refetch()
+    } catch (e) {
+      // axios 拦截器已提示
+    } finally {
+      setRetireSubmitting(false)
+    }
+  }
+  const handleRestore = async (asset: Asset) => {
+    Modal.confirm({
+      title: '恢复退役',
+      content: `确认恢复「${asset.name}」？IP 将写回网卡。`,
+      okText: '确认恢复',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res: any = await assetApi.restore(asset.id)
+          if (res?.data?.code === 0) {
+            message.success('已恢复，IP 已写回')
+            refetch()
+          } else {
+            message.error(res?.data?.message || '恢复失败')
+          }
+        } catch (e) {
+          // axios 拦截器已提示
+        }
+      },
+    })
+  }
+
   return (
     <div>
       <PageHeader
@@ -223,6 +275,8 @@ function Assets() {
           onChanged={() => refetch()}
           onDiagnose={handleDiagnose}
           onPostmortem={handlePostmortem}
+          onRetire={handleRetire}
+          onRestore={handleRestore}
         />
       )}
       <AssetFormModal
@@ -232,6 +286,54 @@ function Assets() {
         onCancel={() => setModalOpen(false)}
         onSubmit={handleSubmit}
       />
+
+      {/* B4: 软退役 modal (填退役原因) */}
+      <Modal
+        open={retireModal.open}
+        title={`软退役：${retireModal.asset?.name || ''}`}
+        onCancel={() => {
+          setRetireModal({ open: false, asset: null })
+          retireForm.resetFields()
+        }}
+        footer={null}
+        width={520}
+        okText="确认退役"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: 16, padding: 12, background: 'var(--ant-color-bg-layout)', borderRadius: 4 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>⚠️ 退役后将发生：</div>
+          <ul style={{ margin: 0, paddingLeft: 20, color: 'var(--ant-color-text-secondary)' }}>
+            <li>网卡 IPv4/IPv6 字段被清空</li>
+            <li>原 IP 保存到 <code>last_known_ip*</code> 字段</li>
+            <li>状态改为 <Tag color="orange">已退役</Tag></li>
+            <li>新设备可以使用此 IP，不冲突</li>
+            <li>历史数据按 hostid 仍可查</li>
+          </ul>
+        </div>
+        <Form form={retireForm} layout="vertical" onFinish={handleRetireSubmit}>
+          <Form.Item
+            label="退役原因"
+            name="reason"
+            rules={[{ required: true, message: '请填写退役原因' }]}
+          >
+            <Input placeholder="如：设备老化下架 / 业务下线 / 替换新设备" />
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0 }}>
+            <Button type="primary" danger htmlType="submit" loading={retireSubmitting}>
+              确认退役
+            </Button>
+            <Button
+              style={{ marginLeft: 8 }}
+              onClick={() => {
+                setRetireModal({ open: false, asset: null })
+                retireForm.resetFields()
+              }}
+            >
+              取消
+            </Button>
+          </Form.Item>
+        </Form>
+      </Modal>
 
       {/* A-1: 网络诊断 modal（ping / traceroute 结果） */}
       <Modal

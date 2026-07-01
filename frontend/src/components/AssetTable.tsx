@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Table, Button, Space, Popconfirm, message } from 'antd'
-import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined } from '@ant-design/icons'
+import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined, StopOutlined, RollbackOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { assetApi } from '../services/api'
 import { StatusTag } from './StatusTag'
@@ -14,6 +14,11 @@ export interface Asset {
   status: string
   site_name?: string
   rack_name?: string
+  // B4: 软退役字段
+  last_known_ip4?: string | null
+  last_known_ip6?: string | null
+  retired_at?: string | null
+  retired_reason?: string | null
 }
 
 export interface AssetTableProps {
@@ -23,6 +28,9 @@ export interface AssetTableProps {
   onChanged: () => void
   onDiagnose?: (asset: Asset, kind: 'ping' | 'traceroute') => void
   onPostmortem?: (asset: Asset) => void
+  // B4: 退役/恢复按钮回调 (optional, 不传则不渲染)
+  onRetire?: (asset: Asset) => void
+  onRestore?: (asset: Asset) => void
   rowSelection?: {
     selectedRowKeys: React.Key[]
     onChange: (keys: React.Key[]) => void
@@ -30,10 +38,10 @@ export interface AssetTableProps {
 }
 
 /**
- * AssetTable - 资产列表展示 + 行内编辑/删除。
+ * AssetTable - 资产列表展示 + 行内编辑/删除/退役。
  * 父组件持有数据状态和表单弹窗状态。
  */
-export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, rowSelection }: AssetTableProps) {
+export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, onRetire, onRestore, rowSelection }: AssetTableProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const handleDelete = async (id: string) => {
@@ -65,8 +73,24 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
-      render: (s: string) => <StatusTag value={s} label={s === 'active' ? '在线' : '离线'} />,
+      width: 140,
+      render: (s: string, r: Asset) => {
+        // B4: 退役特殊显示 — 状态 + 历史 IP 提示
+        if (s === 'retired') {
+          const historyIp = r.last_known_ip4 || r.last_known_ip6 || ''
+          return (
+            <span>
+              <StatusTag value="retired" label="已退役" />
+              {historyIp && (
+                <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--ant-color-text-secondary)' }}>
+                  原 IP: {historyIp}
+                </span>
+              )}
+            </span>
+          )
+        }
+        return <StatusTag value={s} label={s === 'active' ? '在线' : s === 'offline' ? '离线' : s === 'maintenance' ? '维护' : s} />
+      },
     },
     {
       title: '操作',
@@ -111,6 +135,29 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
               title="下载资产复盘 PDF 报告"
             >
               复盘
+            </Button>
+          )}
+          {/* B4: 退役 / 恢复 (按状态二选一) */}
+          {onRetire && record.status !== 'retired' && (
+            <Button
+              type="link"
+              size="small"
+              icon={<StopOutlined />}
+              onClick={() => onRetire(record)}
+              title="软退役：IP 释放给新设备，历史按 hostid 仍可查"
+            >
+              退役
+            </Button>
+          )}
+          {onRestore && record.status === 'retired' && (
+            <Button
+              type="link"
+              size="small"
+              icon={<RollbackOutlined />}
+              onClick={() => onRestore(record)}
+              title="恢复退役：IP 写回网卡"
+            >
+              恢复
             </Button>
           )}
           <Popconfirm
