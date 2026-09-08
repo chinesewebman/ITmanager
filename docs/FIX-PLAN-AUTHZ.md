@@ -255,6 +255,6 @@ func RequireCapability(cap Capability) gin.HandlerFunc
 | 用 `permissions` / `role_permissions` 表做运行时授权 | 这两张表仅由迁移 000001 种子写入、`user_roles` 由 `admin-bootstrap` 写入，三者运行时**零读取**（已 grep 核实）；表驱动授权另立任务 |
 | 新增迁移清洗 `operator`/`viewer` 存量数据 | 只在 dev 种子数据里出现，别名已保证行为正确；改数据需新迁移，收益不抵风险 |
 | 给 `user` 角色补 `roles` 表行 | `user` 是 000013 兜底值，不在 `roles` 表内属已知设计（§3.1 已标注） |
-| **前端 6 个页面 token 路径失效**（`AlertSuppressions`/`Oncall`/`Runbook`/`Topology`/`MetricSnapshot`/`AssetTimeline` 用 `localStorage.getItem('token') ?? ''` 拼 Bearer，而该键自 C-F5 改 httpOnly cookie 后**无人写入** → 恒 401 + 静默回退 mock 数据） | 既有缺陷，与鉴权矩阵无关；**本轮影响面评估以其余页面为准**，该缺陷单列任务修复 |
+| ~~**前端 6 个页面 token 路径失效**~~ | **已于 2026-09-09 修复**，见 `docs/FIX-PLAN-FRONTEND-TOKEN.md`（收敛为共享 `apiGet`/`apiSend` + 修 `/api/v1` 前缀 + 拦截器 204/blob 容错 + ESLint 守卫） |
 | JWT 吊销 / refresh（R-3） | 独立任务 |
 | gRPC 鉴权（R-1） | 按 ADR-0003 冻结，需用户决策 |

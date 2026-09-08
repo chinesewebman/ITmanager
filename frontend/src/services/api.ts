@@ -20,8 +20,17 @@ const api: AxiosInstance = axios.create({
 // 响应拦截器 - 统一错误处理
 api.interceptors.response.use(
   (response) => {
+    // 只有「对象且自有 code 字段」的 JSON 业务包才校验 code。
+    // 204（response.data === ""）、blob 下载、HTML 回退都没有 code，直接放行——
+    // 否则 `res.code !== 0` 会把成功当失败（''.code 为 undefined）。
+    // 用 hasOwnProperty 而非 `'code' in res`：后者沿原型链判定；也不用 Object.hasOwn（ES2022，tsconfig lib 为 ES2020）。
     const res = response.data;
-    if (res.code !== 0) {
+    if (
+      res &&
+      typeof res === "object" &&
+      Object.prototype.hasOwnProperty.call(res, "code") &&
+      res.code !== 0
+    ) {
       message.error(res.message || "请求失败");
       return Promise.reject(new Error(res.message || "请求失败"));
     }
@@ -56,6 +65,23 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+// ==================== 通用请求助手 ====================
+// 解包 `{code, data}` 业务包，返回 data。
+// 原先 AlertSuppressions / Oncall / Runbook / MetricSnapshot 各自复制了一份，
+// 还手拼 Bearer 头——token 取自 localStorage 里一个自 C-F5 改用 httpOnly cookie 后
+// 就没人写入的键 → 恒 401（后端见到非空 Authorization 头就不回退 cookie）。
+// 副本已漂移过一次（Runbook 少了 204 分支），故收敛为唯一一份；
+// 鉴权由实例的 withCredentials 携带 cookie。见 docs/FIX-PLAN-FRONTEND-TOKEN.md。
+export async function apiGet<T>(path: string): Promise<T> {
+  const res = await api.get(path);
+  return res.data?.data as T;
+}
+
+export async function apiSend<T>(method: string, path: string, body?: any): Promise<T> {
+  const res = await api.request({ method, url: path, data: body });
+  return res.data?.data as T; // 204 无 body → undefined
+}
 
 // ==================== 认证 ====================
 export const authApi = {

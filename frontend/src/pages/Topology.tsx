@@ -5,6 +5,7 @@
 import { useState } from 'react'
 import { Card, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
 import { useApiQuery } from '../hooks/useApiQuery'
+import api from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -76,13 +77,14 @@ export function Topology() {
   const { data, isLoading } = useApiQuery<TopologyGraph>(
     ['topology', onlyWithAlerts] as const,
     async () => {
-      const token = localStorage.getItem('token') ?? ''
-      const url = new URL('/api/v1/topology', window.location.origin)
-      if (onlyWithAlerts) url.searchParams.set('only_with_alerts', 'true')
-      const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } })
-      if (!res.ok) return MOCK_GRAPH
-      const json: any = await res.json()
-      return json?.data ?? MOCK_GRAPH
+      try {
+        const res = await api.get('/topology', {
+          params: onlyWithAlerts ? { only_with_alerts: true } : {},
+        })
+        return (res.data?.data as TopologyGraph) ?? MOCK_GRAPH
+      } catch {
+        return MOCK_GRAPH
+      }
     },
   )
 

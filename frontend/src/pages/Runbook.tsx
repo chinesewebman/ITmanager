@@ -6,6 +6,7 @@ import {
 } from 'antd'
 import { PlusOutlined, BookOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { SeverityTag } from '../components/SeverityTag'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -34,26 +35,6 @@ const MOCK_RUNBOOKS: Runbook[] = [
 const MOCK_RECOMMEND: Runbook[] = [
   { id: 'r1', title: 'MySQL 主从延迟告警处理', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
 ]
-
-async function apiGet<T>(path: string): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error('fetch failed')
-  const json: any = await res.json()
-  return json?.data
-}
-
-async function apiSend<T>(method: string, path: string, body?: any): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) throw new Error('fetch failed')
-  const json: any = await res.json()
-  return json?.data
-}
 
 function RunbookList() {
   const [filter, setFilter] = useState<{ asset_type?: string; severity?: number }>({})
@@ -86,24 +67,31 @@ function RunbookList() {
     try {
       const values = await form.validateFields()
       if (editing) {
-        await apiSend('PUT', `/runbooks/${editing.id}`, values).catch(() => null)
-        message.success('已更新（mock）')
+        await apiSend('PUT', `/runbooks/${editing.id}`, values)
+        message.success('已更新')
       } else {
-        await apiSend('POST', '/runbooks', values).catch(() => null)
-        message.success('已创建（mock）')
+        await apiSend('POST', '/runbooks', values)
+        message.success('已创建')
       }
       setEditing(null)
       setCreating(false)
       refetch()
     } catch (e: any) {
+      if (e?.errorFields) return // 表单校验失败，antd 已在字段上提示
+      if (e?.isAxiosError) return // 4xx/5xx/网络错误已由响应拦截器提示，不重复弹
       message.error(e?.message ?? '提交失败')
     }
   }
 
   async function onDelete(id: string) {
-    await apiSend('DELETE', `/runbooks/${id}`).catch(() => null)
-    message.success('已删除（mock）')
-    refetch()
+    // 失败不谎报成功：403/500 已由响应拦截器提示，这里不再重复弹
+    try {
+      await apiSend('DELETE', `/runbooks/${id}`)
+      message.success('已删除')
+      refetch()
+    } catch (e: any) {
+      if (!e?.isAxiosError) message.error(e?.message ?? '删除失败')
+    }
   }
 
   const items = data?.items ?? []

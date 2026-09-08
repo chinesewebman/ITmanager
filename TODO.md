@@ -45,7 +45,7 @@
 - [x] **`/auth/me` 下发 `capabilities`** — 前端不再复制矩阵
 - [x] **`cmd/set-role`** — 打通 `ops_admin`/`ops_user`/`auditor` 的生产分配路径，含「拒绝降级最后一个 admin」防自锁
 - [x] **ADR-0005 + 06 章同步** — `docs/adr/0005-角色词表与权限矩阵.md`、`06-用户权限.md` §6.0.2/§6.2.2
-- [ ] **前端 6 页 token 失效** — `AlertSuppressions`/`Oncall`/`Runbook`/`Topology`/`MetricSnapshot`/`AssetTimeline` 用 `localStorage.getItem('token') ?? ''` 拼 Bearer，而该键自 C-F5 改 httpOnly cookie 后无人写入 → 恒 401 + 静默回退 mock（**单列任务**）
+- [x] **前端 6 页 token 失效** — `AlertSuppressions`/`Oncall`/`Runbook`/`Topology`/`MetricSnapshot`/`AssetTimeline` 用 `localStorage.getItem('token') ?? ''` 拼 Bearer，而该键自 C-F5 改 httpOnly cookie 后无人写入 → 恒 401 + 静默回退 mock。**已修复（2026-09-09）**：收敛为 `services/api.ts` 的共享 `apiGet`/`apiSend`（4 份副本已漂移过一次）+ 修 `/api/v1` 前缀 + 拦截器不再把 204/blob 当失败 + Runbook 写操作不再谎报成功 + ESLint `no-restricted-syntax` 回归守卫。见 `docs/FIX-PLAN-FRONTEND-TOKEN.md`
 
 **AUTHZ 审计发现的既有缺陷（本轮记录，未修）**：
 

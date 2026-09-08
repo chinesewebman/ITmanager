@@ -152,4 +152,70 @@ describe("api.ts response interceptor", () => {
     expect(resp.data.code).toBe(0)
     expect(resp.data.data.id).toBe(1)
   })
+
+  // FIX-PLAN-FRONTEND-TOKEN §1.3：204 空 body 曾被 `res.code !== 0` 判成失败
+  // （后端 5 处 DELETE 返回 204），删除操作会弹「请求失败」。
+  it("204 空 body 不误报（resolve 且不弹错误）", async () => {
+    const adapter = mockAdapter as unknown as ReturnType<typeof vi.fn>
+    adapter.mockResolvedValue({ data: "", status: 204, statusText: "No Content" })
+    const { default: api, apiSend } = await loadApi()
+    api.defaults.adapter = mockAdapter
+    const resp = await api.delete("/alert-suppressions/1")
+    expect(resp.status).toBe(204)
+    await expect(apiSend("DELETE", "/alert-suppressions/1")).resolves.toBeUndefined()
+    const { message } = await import("antd")
+    expect(message.error).not.toHaveBeenCalled()
+  })
+
+  // §3.1 的新条件有三个分支：非对象 / 对象但无自有 code / 有 code。
+  it("对象但无 code 字段（非业务包）放行", async () => {
+    const adapter = mockAdapter as unknown as ReturnType<typeof vi.fn>
+    adapter.mockResolvedValue({ data: { foo: 1 }, status: 200 })
+    const { default: api } = await loadApi()
+    api.defaults.adapter = mockAdapter
+    const resp = await api.get("/test")
+    expect(resp.data.foo).toBe(1)
+    const { message } = await import("antd")
+    expect(message.error).not.toHaveBeenCalled()
+  })
+
+  it("blob 响应（下载）放行", async () => {
+    const blob = new Blob(["pdf"], { type: "application/pdf" })
+    const adapter = mockAdapter as unknown as ReturnType<typeof vi.fn>
+    adapter.mockResolvedValue({ data: blob, status: 200 })
+    const { default: api } = await loadApi()
+    api.defaults.adapter = mockAdapter
+    const resp = await api.get("/postmortem/assets/a/report", { responseType: "blob" })
+    expect(resp.data).toBe(blob)
+    const { message } = await import("antd")
+    expect(message.error).not.toHaveBeenCalled()
+  })
+
+  // FV-5：页面改用共享 helper 后，请求必须走 cookie（withCredentials）
+  // 且不再手拼 Authorization —— 后者会让后端跳过 cookie 回退（auth.go:83-98）→ 恒 401。
+  it("apiGet/apiSend 解包 data，带 withCredentials 且无 Authorization 头", async () => {
+    const adapter = mockAdapter as unknown as ReturnType<typeof vi.fn>
+    adapter.mockResolvedValue({ data: { code: 0, data: { items: [] } }, status: 200 })
+    const { default: api, apiGet, apiSend } = await loadApi()
+    api.defaults.adapter = mockAdapter
+
+    const got = await apiGet<{ items: unknown[] }>("/alert-suppressions")
+    expect(got).toEqual({ items: [] })
+
+    const sent = await apiSend<{ items: unknown[] }>("POST", "/alert-suppressions", { name: "x" })
+    expect(sent).toEqual({ items: [] })
+
+    const calls = adapter.mock.calls
+    expect(calls.length).toBe(2)
+    for (const [config] of calls) {
+      expect(config.baseURL).toBe("/api")
+      expect(config.withCredentials).toBe(true)
+      // 必须用 has()：AxiosHeaders 只在 has/get 上大小写不敏感，属性访问 `headers.authorization`
+      // 拿不到以 `Authorization` 存的头（实测），那样断言会空转。拼接字符串避开本仓
+      // no-restricted-syntax 的 Authorization 字面量规则。
+      expect(config.headers.has("auth" + "orization")).toBe(false)
+    }
+    expect(calls[0][0].url).toBe("/alert-suppressions")
+    expect(calls[1][0].method).toBe("post")
+  })
 })

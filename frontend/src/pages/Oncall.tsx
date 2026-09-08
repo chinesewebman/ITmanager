@@ -5,6 +5,7 @@ import {
 } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { apiGet, apiSend } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -31,25 +32,6 @@ const MOCK_POLICIES: EscalationPolicy[] = [
     { level: 3, target_type: 'channel', target_id: 'all-ops', wait_minutes: 5, notify_methods: 'sms,webhook' },
   ] },
 ]
-
-async function apiGet<T>(path: string): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error('fetch failed')
-  const json: any = await res.json()
-  return json?.data
-}
-async function apiSend<T>(method: string, path: string, body?: any): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, {
-    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  if (res.status === 204) return undefined as T
-  const json: any = await res.json()
-  return json?.data
-}
 
 export function Oncall() {
   useDocumentTitle('值班管理')
@@ -100,12 +82,12 @@ function SchedulesTab() {
       message.success('已创建')
       setModalOpen(false)
       refetch()
-    } catch (e: any) { if (!e?.errorFields) message.error(e?.message ?? '失败') }
+    } catch (e: any) { if (!e?.errorFields && !e?.isAxiosError) message.error(e?.message ?? '失败') }
   }
 
   async function onDelete(id: string) {
     try { await apiSend('DELETE', `/oncall/schedules/${id}`); message.success('已删除'); refetch() }
-    catch (e: any) { message.error(e?.message ?? '失败') }
+    catch (e: any) { if (!e?.isAxiosError) message.error(e?.message ?? '失败') }
   }
 
   return (
@@ -147,12 +129,12 @@ function PoliciesTab() {
       message.success('已创建')
       setModalOpen(false)
       refetch()
-    } catch (e: any) { if (!e?.errorFields) message.error(e?.message ?? '失败') }
+    } catch (e: any) { if (!e?.errorFields && !e?.isAxiosError) message.error(e?.message ?? '失败') }
   }
 
   async function onDelete(id: string) {
     try { await apiSend('DELETE', `/oncall/policies/${id}`); message.success('已删除'); refetch() }
-    catch (e: any) { message.error(e?.message ?? '失败') }
+    catch (e: any) { if (!e?.isAxiosError) message.error(e?.message ?? '失败') }
   }
 
   return (

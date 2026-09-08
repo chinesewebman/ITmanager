@@ -1,6 +1,6 @@
 // 资产诊断时间线页：故障定位核心 UI（P0-1）
 //
-// 数据流：调用 /api/v1/diagnostics/assets/:id/timeline 拿到聚合事件流
+// 数据流：调用 /api/diagnostics/assets/:id/timeline 拿到聚合事件流
 // 渲染：Antd Timeline 组件（按 ts 倒序展示），顶部 Summary 卡片
 //
 // 设计要点：
@@ -14,6 +14,7 @@ import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tag, Timeline, Typography } from 'antd'
 import { ClockCircleOutlined } from '@ant-design/icons'
+import api from '../services/api'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -61,7 +62,7 @@ const MOCK_SUMMARY = {
   window_days: 30,
 }
 
-const MOCK_EVENTS = [
+const MOCK_EVENTS: TimelineEvent[] = [
   {
     ts: new Date(Date.now() - 30 * 60_000).toISOString(),
     kind: 'alert',
@@ -147,13 +148,12 @@ export function AssetTimeline() {
   const { data, isLoading } = useApiQuery<TimelineResponse>(
     ['diagnostics', 'timeline', id ?? '', days] as const,
     async () => {
-      const token = localStorage.getItem('token') ?? ''
-      const res = await fetch(`/api/v1/diagnostics/assets/${id}/timeline?days=${days}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) return MOCK_TIMELINE
-      const json: any = await res.json()
-      return json?.data ?? MOCK_TIMELINE
+      try {
+        const res = await api.get(`/diagnostics/assets/${id}/timeline`, { params: { days } })
+        return (res.data?.data as TimelineResponse) ?? MOCK_TIMELINE
+      } catch {
+        return MOCK_TIMELINE
+      }
     },
     { enabled: !!id },
   )

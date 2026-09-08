@@ -6,6 +6,7 @@ import {
 } from 'antd'
 import { PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -34,30 +35,6 @@ const MOCK_RULES: AlertSuppression[] = [
   { id: '1', name: '抑制 db-* 警告', host_pattern: 'db-*', severity_max: 3, time_window_seconds: 300, ttl_seconds: 0, enabled: true, description: '5 分钟内同 host 仅保留 1 条 warning' },
   { id: '2', name: '抑制 web-* 信息', host_pattern: 'web-*', severity_max: 2, time_window_seconds: 600, ttl_seconds: 3600, enabled: true, description: '10 分钟窗口，1 小时后自动失效' },
 ]
-
-async function apiGet<T>(path: string): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error('fetch failed')
-  const json: any = await res.json()
-  return json?.data
-}
-
-async function apiSend<T>(method: string, path: string, body?: any): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) {
-    const err: any = await res.json().catch(() => ({}))
-    throw new Error(err?.message ?? `HTTP ${res.status}`)
-  }
-  if (res.status === 204) return undefined as T
-  const json: any = await res.json()
-  return json?.data
-}
 
 export function AlertSuppressions() {
   const [form] = Form.useForm<AlertSuppression>()
@@ -103,6 +80,7 @@ export function AlertSuppressions() {
       refetch()
     } catch (e: any) {
       if (e?.errorFields) return // form 校验失败
+      if (e?.isAxiosError) return // 4xx/5xx/网络错误已由响应拦截器提示，不重复弹
       message.error(e?.message ?? '操作失败')
     }
   }
@@ -113,7 +91,7 @@ export function AlertSuppressions() {
       message.success('已删除')
       refetch()
     } catch (e: any) {
-      message.error(e?.message ?? '删除失败')
+      if (!e?.isAxiosError) message.error(e?.message ?? '删除失败')
     }
   }
 
@@ -122,7 +100,7 @@ export function AlertSuppressions() {
       const res = await apiSend<SuppressionMatchResult>('POST', '/alert-suppressions/preview', previewHost)
       setPreviewResult(res)
     } catch (e: any) {
-      message.error(e?.message ?? '评估失败')
+      if (!e?.isAxiosError) message.error(e?.message ?? '评估失败')
     }
   }
 

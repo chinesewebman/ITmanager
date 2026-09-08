@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button, Card, Form, Input, InputNumber, Space, Table, Tag, Typography, message } from 'antd'
 import { LineChartOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { apiGet } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text, Paragraph } = Typography
@@ -23,14 +24,6 @@ const MOCK_LATEST: MetricSnapshot[] = [
   { id: '4', asset_id: 'asset-1', key: 'cpu.user', value: 55.0, ts: new Date(Date.now() - 2*60_000).toISOString() },
   { id: '5', asset_id: 'asset-1', key: 'cpu.user', value: 60.3, ts: new Date(Date.now() - 1*60_000).toISOString() },
 ]
-
-async function apiGet<T>(path: string): Promise<T> {
-  const token = localStorage.getItem('token') ?? ''
-  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error('fetch failed')
-  const json: any = await res.json()
-  return json?.data
-}
 
 export function MetricSnapshotList() {
   const [assetId, setAssetId] = useState('')
