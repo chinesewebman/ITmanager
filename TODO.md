@@ -20,12 +20,24 @@
 
 优先级顺序：**R5 → R2 → R1 → R3 → R4**
 
-- [ ] **R5 文档与仓库卫生**（2-3h）— 版本号对齐 `git describe`；`schema.sql` 拆分（未实现表移入 `docs/schema-planned.sql`）；ADR-0002 的 gRPC 部分作废（ADR-0003）
-      *（README/TODO/CHANGELOG 三处版本号已于 2026-09-09 对齐；schema 拆分 + ADR-0003 待做）*
+- [x] **R5 文档与仓库卫生**（2026-09-09 完成）— 版本号对齐 `git describe`；`schema.sql` 拆分（16 张已实现表，39 张设计表移入 `docs/schema-planned.sql`）；ADR-0002 的 gRPC 部分作废（ADR-0003）；`.gitignore:10` `server` → `/server` 修复源码误伤
 - [ ] **R2 专线归属 NetBox Circuits**（3-4h）— 废弃自建 `lines` 四表，专线以 NetBox `Circuit` + `CircuitTermination` 建模，ITmanager 只读渲染
 - [ ] **R1 AI 模块重定位**（4-6h）— 砍自建 LLM 问答/知识库，改为 ITmanager 作为 HolmesGPT 数据源（toolset 端点，只读 token）
 - [ ] **R3 vCenter 纳管**（6-8h）— vCenter → NetBox sync，ITmanager 从 NetBox 读 VM（先 dry-run 一周再开自动清理）
 - [ ] **R4 告警与 Keep 划界**（2h 文档 + 后续实施）— 跨源去重/关联归 Keep；ITmanager 保留人工抑制（维护窗口）+ 值班升级
+- [x] **R6 工单 SoT 归位**（2026-09-09 完成）— `05-运维工单.md` 重写：ITmanager `tickets` 为唯一真值，GLPI 降级为可选只读参考；新增 `docs/adr/0004-工单SoT决策.md`；明确不做 ITIL 审批 / SLA / 满意度
+
+### 待修复缺陷（2026-09-09 实测，见 [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md) §9）
+
+- [ ] **D-1（阻断级）`tickets` 三套 schema 不一致** — 迁移 24 列 / GORM 模型 24 列（交集仅 10 列）/ 测试 schema 与模型一致 → CI 盲。生产走 `migrate.Up`，GORM INSERT 引用迁移里不存在的列 → `POST /tickets` 必然失败
+      修复方向：先定方向 → 写显式迁移 → 改模型与测试 schema；**禁止对生产库 AutoMigrate**；补「用迁移建库跑 POST /tickets」集成测试
+- [ ] **D-2 工单号碰撞** — `generateTicketNumber` 用全表 `Count()%26`，同日第 27 张与第 1 张同号；`ticket_number` 唯一索引导致插入失败。修复须在 D-1 之后
+- [ ] **D-3 `alerts.ticket_id` 悬空** — 注释指向 GLPI 工单，全仓库无写入方。随「告警 → 一键建单」改为指向 `tickets.id`
+- [ ] **D-4（阻断级）`users` 表缺 `role` / `deleted_at` 列** — 模型有、迁移没有；GORM 查询会枚举模型全部字段 + 软删除条件 → **用迁移新建的库连登录都过不去**
+- [ ] **D-5 `audit_logs` 列名漂移** — 模型 `method`/`path`/`ip`/`status` vs 迁移 `event_type`/`ip_address`/`result`；写入失败仅 `slog.Warn` → 静默丢审计
+- [ ] **D-6 `RequireRole` 未挂载** — 定义后无路由调用（仅测试引用）→ 路由级 RBAC 形同虚设
+- [ ] **D-7 API Key `permissions` 未校验** — 字段可写入，鉴权分支不校验 scope
+      *（D-1/D-4/D-5 同一类：模型与迁移各自演化 + CI 无 Postgres。建议一次修完，并加「用迁移建库跑冒烟」的 CI 步骤）*
 
 ### v1.0.2 已发布（6/17）
 - [x] **README.md**：6 GitHub badges (Release/CI/License/Go/React/Docker) + 状态推进

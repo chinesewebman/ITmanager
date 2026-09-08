@@ -93,5 +93,5 @@ make test-coverage   # 生成 coverage.html
 
 ## 相关文档
 
-- [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md) — v3 架构优化需求（R1–R5，当前改造依据）
+- [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md) — v3 架构优化需求（R1–R6，当前改造依据）
 - [CHANGELOG.md](CHANGELOG.md) / [TODO.md](TODO.md) / [TESTING.md](TESTING.md)
