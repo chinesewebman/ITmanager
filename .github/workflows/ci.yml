@@ -100,7 +100,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          # jsdom@29（vitest 的 jsdom 环境）engines: ^20.19.0 || ^22.13.0 || >=24；
+          # Node 18 下 require() ESM 直接抛错 → 单测步骤 3s 内 exit 1（CI 长期红）。
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 

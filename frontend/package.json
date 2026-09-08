@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "//engines": "jsdom@29 要求 Node ^20.19 || ^22.13 || >=24；Node 18 下 vitest 起不来（CI 曾长期红）。",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
