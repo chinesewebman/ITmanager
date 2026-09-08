@@ -125,8 +125,10 @@ func Login(c *gin.Context) {
 				"username": user.Username,
 				"nickname": user.Nickname,
 				"email":    user.Email,
-				"role":     user.Role,
-				"avatar":   user.Avatar,
+				// 词表归一：存量库可能存遗留别名 operator/viewer，出站一律折叠
+				// （ADR-0005 决策 2「只读入不写出」），与 /auth/me 和 openapi enum 保持一致。
+				"role":   middleware.CanonicalRole(user.Role),
+				"avatar": user.Avatar,
 			},
 			// C7: 首次登录强改密 flag — 前端检测后强制 redirect /change-password
 			"must_change_password": user.MustChangePassword,
@@ -159,17 +161,27 @@ func GetCurrentUser(c *gin.Context) {
 		return
 	}
 
+	// role 与 capabilities 都取自**鉴权上下文**（JWT claim / API Key 关联用户），
+	// 而不是回查 DB 的 user.Role：前者才是门禁实际使用的值，两者同源才不会出现
+	// 「按钮隐藏但接口放行」的错位（docs/FIX-PLAN-AUTHZ.md §4.4）。
+	role := middleware.CanonicalRole(c.GetString("role"))
+	capabilities := make([]string, 0, 5)
+	for _, cap := range middleware.Capabilities(role) {
+		capabilities = append(capabilities, string(cap))
+	}
+
 	c.JSON(200, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"id":       user.ID,
-			"username": user.Username,
-			"nickname": user.Nickname,
-			"email":    user.Email,
-			"phone":    user.Phone,
-			"avatar":   user.Avatar,
-			"role":     user.Role,
-			"status":   user.Status,
+			"id":           user.ID,
+			"username":     user.Username,
+			"nickname":     user.Nickname,
+			"email":        user.Email,
+			"phone":        user.Phone,
+			"avatar":       user.Avatar,
+			"role":         role,
+			"capabilities": capabilities,
+			"status":       user.Status,
 		},
 	})
 }

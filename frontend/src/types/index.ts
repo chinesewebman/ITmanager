@@ -4,7 +4,9 @@ export interface User {
   username: string
   nickname: string
   email?: string
-  role: 'admin' | 'operator' | 'viewer'
+  // 权威词表见 docs/FIX-PLAN-AUTHZ.md §3.1（后端 middleware.Role* 常量）；
+  // 旧值 operator/viewer 仅存量库可见，服务端会折叠为 ops_user/readonly。
+  role: 'admin' | 'ops_admin' | 'ops_user' | 'auditor' | 'readonly' | 'user'
   created_at?: string
 }
 

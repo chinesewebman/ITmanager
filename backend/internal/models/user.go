@@ -11,16 +11,18 @@ import (
 
 // User 用户
 type User struct {
-	ID                 uuid.UUID      `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Username           string         `json:"username" gorm:"uniqueIndex;size:50;not null"`
-	PasswordHash       string         `json:"-" gorm:"size:255;not null"`
-	Nickname           string         `json:"nickname" gorm:"size:100"`
-	Email              string         `json:"email" gorm:"size:255"`
-	Phone              string         `json:"phone" gorm:"size:20"`
-	Avatar             string         `json:"avatar" gorm:"size:500"`
-	Status             string         `json:"status" gorm:"size:20;default:active"` // active, inactive, locked
-	DepartmentID       *uuid.UUID     `json:"department_id" gorm:"type:uuid"`
-	Role               string         `json:"role" gorm:"size:20;default:user"` // admin, operator, readonly
+	ID           uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Username     string     `json:"username" gorm:"uniqueIndex;size:50;not null"`
+	PasswordHash string     `json:"-" gorm:"size:255;not null"`
+	Nickname     string     `json:"nickname" gorm:"size:100"`
+	Email        string     `json:"email" gorm:"size:255"`
+	Phone        string     `json:"phone" gorm:"size:20"`
+	Avatar       string     `json:"avatar" gorm:"size:500"`
+	Status       string     `json:"status" gorm:"size:20;default:active"` // active, inactive, locked
+	DepartmentID *uuid.UUID `json:"department_id" gorm:"type:uuid"`
+	// 取值 = migrations/000001 的 roles.code：admin / ops_admin / ops_user / auditor / readonly
+	// （另有 000013 兜底值 user，等同 readonly）。权威口径与权限矩阵见 docs/FIX-PLAN-AUTHZ.md §3。
+	Role               string         `json:"role" gorm:"size:20;default:user"`
 	FailedLogin        int            `json:"failed_login" gorm:"default:0"`
 	LockedUntil        *time.Time     `json:"locked_until"`
 	LastLogin          *time.Time     `json:"last_login"`

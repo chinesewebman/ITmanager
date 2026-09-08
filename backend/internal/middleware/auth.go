@@ -224,7 +224,11 @@ func apiKeyAllows(perms models.StringList, method string) bool {
 	}
 }
 
-// RequireRole 角色权限中间件
+// RequireRole 角色权限中间件。
+//
+// Deprecated: 生产路由一律用 RequireCapability（能力矩阵，见 roles.go）。
+// 本函数按角色字面量精确比较，遗留别名（operator/viewer）不会命中，也别指望它做词表归一；
+// 仅为既有测试保留，新代码不得使用。
 func RequireRole(roles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userRole := c.GetString("role")

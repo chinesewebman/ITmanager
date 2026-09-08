@@ -65,8 +65,10 @@ func seedData(db *gorm.DB) {
 			Nickname:     "运维工程师",
 			Email:        "operator@company.com",
 			Phone:        "13800138001",
-			Role:         "operator",
-			Status:       "active",
+			// 角色取值 = migrations/000001 的 roles.code（权威词表）。
+			// 原先写 "operator" 不在词表内，会导致该账号被 fail-safe 降为只读。
+			Role:   "ops_user",
+			Status: "active",
 			// C7: seed 用默认密码 user123 — 首次登录强改密
 			MustChangePassword: true,
 		}

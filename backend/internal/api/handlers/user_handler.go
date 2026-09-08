@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"network-monitor-platform/internal/apierr"
+	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,10 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 		apierr.Internal(c, "获取用户列表失败", err)
 		return
 	}
+	// 词表归一：存量库可能存遗留别名 operator/viewer，出站一律折叠（ADR-0005 决策 2）
+	for i := range users {
+		users[i].Role = middleware.CanonicalRole(users[i].Role)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
@@ -51,5 +56,6 @@ func (h *UserHandler) GetUser(c *gin.Context) {
 		apierr.Internal(c, "获取用户失败", err)
 		return
 	}
+	u.Role = middleware.CanonicalRole(u.Role) // 词表归一，同 ListUsers
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": u})
 }

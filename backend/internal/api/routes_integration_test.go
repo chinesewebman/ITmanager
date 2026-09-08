@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"network-monitor-platform/internal/api"
@@ -392,7 +394,7 @@ func TestRoutes_DiagnosticTimeline_无效UUID返400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// ==================== 缺陷 D-6：管理端路由限 admin ====================
+// ==================== 权限矩阵：路由级鉴权（docs/FIX-PLAN-AUTHZ.md §3.3） ====================
 
 // genTokenWithRole 生成指定角色的 JWT（genValidToken 固定 admin）
 func genTokenWithRole(t *testing.T, role string) string {
@@ -402,98 +404,315 @@ func genTokenWithRole(t *testing.T, role string) string {
 	return tok
 }
 
-// d6AdminOnlyRoutes D-6 限 admin 的路由全集。非 admin 侧与 admin 侧共用同一张表 ——
-// 只测一侧会漏检「把 RequireRole("admin") 写成别的角色」（非 admin 仍 403、admin 也被拒）。
-var d6AdminOnlyRoutes = []struct {
+// gatedRoute 受控路由的**声明**：方法 + 路径模板 + 所需能力。
+// 三个测试共用这张表：
+//   - TestRoutes_能力矩阵_无权限被拒
+//   - TestRoutes_能力矩阵_有权限放行
+//   - TestRoutes_非GET路由都已分类（反向：新增非 GET 路由不在表里就失败）
+//
+// 路径用 :id / :shift_id 模板，与 gin 的 r.Routes() 对齐；发请求时再替换成具体值。
+var gatedRoutes = []struct {
+	cap          middleware.Capability
 	method, path string
-	// external: handler 会主动外连（集成 sync/test），沙箱里返 500 属正常，
-	// 对这类路由只断言「不被 403 拦」。
-	external bool
+	// handlerErrOK: handler 会主动外连，或依赖测试 sqlite schema 里没有的表 ——
+	// 沙箱里 5xx 属正常，对这类路由只断言「不被 403 拦」。
+	handlerErrOK bool
 }{
-	{method: http.MethodGet, path: "/api/users"},
-	{method: http.MethodGet, path: "/api/auth/api-keys"},
-	{method: http.MethodPost, path: "/api/auth/api-keys"},
-	{method: http.MethodDelete, path: "/api/auth/api-keys/" + uuid.NewString()},
-	{method: http.MethodPut, path: "/api/auth/api-keys/" + uuid.NewString() + "/revoke"},
-	{method: http.MethodPost, path: "/api/integrations/sync", external: true},
-	{method: http.MethodPost, path: "/api/integrations/zabbix/test", external: true},
-	{method: http.MethodPut, path: "/api/integrations/zabbix"},
-	{method: http.MethodPost, path: "/api/integrations/netbox/test", external: true},
-	{method: http.MethodPut, path: "/api/integrations/netbox"},
-	{method: http.MethodPost, path: "/api/integrations/glpi/test", external: true},
-	{method: http.MethodPut, path: "/api/integrations/glpi"},
-	// 审计延伸：操作轨迹 / 含凭据且会外连的通知渠道
-	{method: http.MethodGet, path: "/api/audit-logs"},
-	{method: http.MethodPost, path: "/api/notification-channels"},
-	{method: http.MethodPut, path: "/api/notification-channels/" + uuid.NewString()},
-	{method: http.MethodDelete, path: "/api/notification-channels/" + uuid.NewString()},
-	{method: http.MethodPut, path: "/api/notification-channels/" + uuid.NewString() + "/test", external: true},
+	// identity：用户与凭据（仅 admin）
+	{middleware.CapIdentity, http.MethodGet, "/api/users", false},
+	{middleware.CapIdentity, http.MethodGet, "/api/users/:id", false},
+	{middleware.CapIdentity, http.MethodGet, "/api/auth/api-keys", false},
+	{middleware.CapIdentity, http.MethodPost, "/api/auth/api-keys", false},
+	{middleware.CapIdentity, http.MethodDelete, "/api/auth/api-keys/:id", false},
+	{middleware.CapIdentity, http.MethodPut, "/api/auth/api-keys/:id/revoke", false},
+
+	// audit：审计日志
+	{middleware.CapAudit, http.MethodGet, "/api/audit-logs", false},
+
+	// manage：集成凭据 / 通知渠道（含明文凭据）/ 破坏性删除
+	{middleware.CapManage, http.MethodPost, "/api/integrations/sync", true},
+	{middleware.CapManage, http.MethodPost, "/api/integrations/zabbix/test", true},
+	{middleware.CapManage, http.MethodPut, "/api/integrations/zabbix", false},
+	{middleware.CapManage, http.MethodPost, "/api/integrations/netbox/test", true},
+	{middleware.CapManage, http.MethodPut, "/api/integrations/netbox", false},
+	{middleware.CapManage, http.MethodPost, "/api/integrations/glpi/test", true},
+	{middleware.CapManage, http.MethodPut, "/api/integrations/glpi", false},
+	{middleware.CapManage, http.MethodGet, "/api/notification-channels", false},
+	{middleware.CapManage, http.MethodPost, "/api/notification-channels", false},
+	{middleware.CapManage, http.MethodPut, "/api/notification-channels/:id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/notification-channels/:id", false},
+	{middleware.CapManage, http.MethodPut, "/api/notification-channels/:id/test", true},
+	{middleware.CapManage, http.MethodDelete, "/api/assets/:id", false},
+	{middleware.CapManage, http.MethodPost, "/api/alerts/bulk-delete", false},
+	{middleware.CapManage, http.MethodDelete, "/api/alert-rules/:id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/alert-suppressions/:id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/oncall/schedules/:id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/oncall/shifts/:shift_id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/oncall/policies/:id", false},
+	{middleware.CapManage, http.MethodDelete, "/api/runbooks/:id", false},
+
+	// write：业务写（可逆）
+	{middleware.CapWrite, http.MethodPost, "/api/assets", false},
+	{middleware.CapWrite, http.MethodPut, "/api/assets/:id", false},
+	{middleware.CapWrite, http.MethodPost, "/api/assets/:id/retire", false},
+	{middleware.CapWrite, http.MethodPost, "/api/assets/:id/restore", false},
+	{middleware.CapWrite, http.MethodPost, "/api/alert-rules", false},
+	{middleware.CapWrite, http.MethodPut, "/api/alert-rules/:id", false},
+	{middleware.CapWrite, http.MethodPost, "/api/alerts/bulk-ack", false},
+	{middleware.CapWrite, http.MethodPost, "/api/alerts/bulk-resolve", false},
+	{middleware.CapWrite, http.MethodPut, "/api/alerts/:id/ack", false},
+	{middleware.CapWrite, http.MethodPut, "/api/alerts/:id/resolve", false},
+	{middleware.CapWrite, http.MethodPost, "/api/alerts/:id/mark-fp", false},
+	{middleware.CapWrite, http.MethodPost, "/api/tickets", false},
+	{middleware.CapWrite, http.MethodPut, "/api/tickets/:id", false},
+	{middleware.CapWrite, http.MethodPost, "/api/alert-suppressions", false},
+	{middleware.CapWrite, http.MethodPut, "/api/alert-suppressions/:id", false},
+	{middleware.CapWrite, http.MethodPost, "/api/oncall/schedules", false},
+	{middleware.CapWrite, http.MethodPost, "/api/oncall/schedules/:id/shifts", false},
+	{middleware.CapWrite, http.MethodPost, "/api/oncall/policies", false},
+	{middleware.CapWrite, http.MethodPost, "/api/runbooks", false},
+	{middleware.CapWrite, http.MethodPut, "/api/runbooks/:id", false},
+	{middleware.CapWrite, http.MethodPost, "/api/metric-snapshots", false},
+	{middleware.CapWrite, http.MethodGet, "/api/diagnostics/ping", false},
+	{middleware.CapWrite, http.MethodGet, "/api/diagnostics/traceroute", false},
 }
 
-// TestRoutes_D6_非admin被拒 覆盖 D-6 挂载的每个路由：
-// 凭据管理（API Key）、集成配置写/测试、用户列表、审计日志、通知渠道写操作，operator 一律 403。
-func TestRoutes_D6_非admin被拒(t *testing.T) {
-	r := setupTestRouter(t)
-	tok := genTokenWithRole(t, "operator")
-
-	for _, c := range d6AdminOnlyRoutes {
-		t.Run(c.method+" "+c.path, func(t *testing.T) {
-			req := httptest.NewRequest(c.method, c.path, nil)
-			req.Header.Set("Authorization", "Bearer "+tok)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
-			assert.Equal(t, http.StatusForbidden, w.Code, "非 admin 应 403")
-		})
-	}
+// matrixRoles 参与矩阵断言的令牌角色：6 个权威角色 + 2 个遗留别名 + 空角色（fail-safe 只读）。
+var matrixRoles = []string{
+	middleware.RoleAdmin, middleware.RoleOpsAdmin, middleware.RoleOpsUser,
+	middleware.RoleAuditor, middleware.RoleReadonly, middleware.RoleUser,
+	"operator", "viewer", "",
 }
 
-// TestRoutes_D6_只读集成状态不限admin 防过度收紧：
-// GET /integrations/status 是只读状态查询，operator 必须仍可访问（且必须真的 200）。
-func TestRoutes_D6_只读集成状态不限admin(t *testing.T) {
-	r := setupTestRouter(t)
-	tok := genTokenWithRole(t, "operator")
+// ungatedRoutes 刻意不挂能力的路由 → 豁免理由。新增路由若既不在 gatedRoutes
+// 也不在这里，TestRoutes_所有路由都已分类 会失败（必须显式分类）。
+//
+// 非 GET：认证 / 自助端点 / 纯计算无副作用。
+// GET：读地板（docs/FIX-PLAN-AUTHZ.md §3.2）—— 未被更高能力覆盖的端点默认放行。
+var ungatedRoutes = map[string]string{
+	// ---- 认证与自助（只需认证，不挂能力，否则 readonly 连自己的密码都改不了）----
+	"POST /api/auth/login":                "登录入口（限流 5/min）",
+	"POST /api/auth/logout":               "登出（清 cookie）",
+	"PUT /api/auth/password":              "改自己的密码",
+	"POST /api/auth/skip-password-change": "自助跳过强改密（限流 3/min）",
+	"GET /api/auth/me":                    "读自己的身份与能力集",
 
-	req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
+	// ---- 非 GET 但无副作用 ----
+	"POST /api/alert-suppressions/preview": "纯计算：仅 DB 读 + 评估，无写入",
+
+	// ---- 公开探针与静态资源 ----
+	"GET /api/health":       "存活探针",
+	"GET /healthz":          "存活探针",
+	"GET /readyz":           "就绪探针",
+	"GET /openapi.yaml":     "API 规格（无凭据内容）",
+	"GET /static/*filepath": "前端静态资源",
+	"GET /swagger/*any":     "Swagger UI",
+
+	// ---- 读地板：业务读（列表 / 详情 / 统计 / 导出）----
+	"GET /api/assets":                          "资产读",
+	"GET /api/assets/:id":                      "资产读",
+	"GET /api/assets/export":                   "资产导出（限 500 行 + safeCSV）",
+	"GET /api/alerts":                          "告警读",
+	"GET /api/alerts/:id":                      "告警读",
+	"GET /api/alerts/stats":                    "告警统计",
+	"GET /api/alerts/false-positives/export":   "误报导出（safeCSV）",
+	"GET /api/alert-rules":                     "规则读",
+	"GET /api/alert-suppressions":              "抑制读",
+	"GET /api/alert-suppressions/:id":          "抑制读",
+	"GET /api/tickets":                         "工单读",
+	"GET /api/tickets/:id":                     "工单读",
+	"GET /api/sites":                           "机房读",
+	"GET /api/sites/:id":                       "机房读",
+	"GET /api/racks":                           "机柜读",
+	"GET /api/racks/:id":                       "机柜读",
+	"GET /api/racks/:id/devices":               "机柜设备读",
+	"GET /api/topology":                        "拓扑读",
+	"GET /api/dashboard/stats":                 "仪表盘统计",
+	"GET /api/dashboard/kpis":                  "仪表盘 KPI",
+	"GET /api/dashboard/trends":                "仪表盘趋势",
+	"GET /api/integrations/status":             "集成连通状态（只回 URL/用户名，不含 token）",
+	"GET /api/metric-snapshots":                "指标快照读",
+	"GET /api/metric-snapshots/latest":         "最新指标快照",
+	"GET /api/oncall/schedules":                "排班读",
+	"GET /api/oncall/schedules/:id/shifts":     "班次读",
+	"GET /api/oncall/policies":                 "升级策略读",
+	"GET /api/oncall/policies/:id":             "升级策略读",
+	"GET /api/oncall/current":                  "当前值班人",
+	"GET /api/runbooks":                        "Runbook 读",
+	"GET /api/runbooks/:id":                    "Runbook 读",
+	"GET /api/runbooks/recommend":              "Runbook 推荐（只读）",
+	"GET /api/diagnostics/assets/:id/timeline": "资产时间线（只读）",
+	"GET /api/postmortem/assets/:id/report":    "复盘报告（只读，文件名 sanitize）",
+}
+
+// concretePath 把路径模板里的 :id / :shift_id 换成具体 UUID（发请求用）
+func concretePath(p string) string {
+	p = strings.ReplaceAll(p, ":shift_id", uuid.NewString())
+	return strings.ReplaceAll(p, ":id", uuid.NewString())
+}
+
+// requestAs 以指定角色发一次请求
+func requestAs(t *testing.T, r *gin.Engine, method, path, role string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("Authorization", "Bearer "+genTokenWithRole(t, role))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code, "只读状态查询应为 200（只断言 !=403 会把 500 也放行）")
+	return w
 }
 
-// TestRoutes_D6_admin可进handler admin 令牌应能通过 d6AdminOnlyRoutes 的**每一条**路由。
-// 与「非 admin 被拒」共用同一张表，避免只抽检两条导致漏检。
-func TestRoutes_D6_admin可进handler(t *testing.T) {
+// TestRoutes_能力矩阵_无权限被拒 逐条断言「没有该能力的角色一律 403」。
+//
+// 注意：本测试用 middleware.Can 决定「谁该被拒」，与被测实现同源 ——
+// 矩阵本身改错时这里**不会红**，兜住它的是 middleware/roles_test.go 的
+// 独立 capabilityMatrix。本测试的职责是「路由挂载与矩阵一致」。
+func TestRoutes_能力矩阵_无权限被拒(t *testing.T) {
 	r := setupTestRouter(t)
-	tok := genValidToken(t) // role=admin
-
-	for _, c := range d6AdminOnlyRoutes {
-		t.Run(c.method+" "+c.path, func(t *testing.T) {
-			req := httptest.NewRequest(c.method, c.path, nil)
-			req.Header.Set("Authorization", "Bearer "+tok)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
-			assert.NotEqual(t, http.StatusForbidden, w.Code, "admin 不应被拒")
-			assert.NotEqual(t, http.StatusUnauthorized, w.Code)
-			if !c.external {
-				assert.Less(t, w.Code, 500, "不应是服务端错误（sqlite 测试 schema 下 handler 应能跑通）")
+	for _, c := range gatedRoutes {
+		denied := 0
+		for _, role := range matrixRoles {
+			if middleware.Can(role, c.cap) {
+				continue
 			}
-		})
+			denied++
+			t.Run(role+"/"+c.method+" "+c.path, func(t *testing.T) {
+				w := requestAs(t, r, c.method, concretePath(c.path), role)
+				assert.Equal(t, http.StatusForbidden, w.Code,
+					"角色 %q 无 %s 能力，应 403", role, c.cap)
+			})
+		}
+		// 每条受控路由至少要有一个「被拒」的角色，否则 matrixRoles 收窄会让本测试静默空转
+		require.NotZero(t, denied, "%s %s 没有任何角色被拒：matrixRoles 是否漏了低权限角色？", c.method, c.path)
 	}
 }
 
-// TestRoutes_D6_只读列表不限admin 防过度收紧：通知渠道只读列表 operator 仍可访问。
-func TestRoutes_D6_只读列表不限admin(t *testing.T) {
+// TestRoutes_能力矩阵_有权限放行 逐条断言「有该能力的角色不被 403/401 拦」。
+// 只断言 !=403 会把 500 也放行，所以额外要求 <500（handlerErrOK 的除外）。
+func TestRoutes_能力矩阵_有权限放行(t *testing.T) {
 	r := setupTestRouter(t)
-	tok := genTokenWithRole(t, "operator")
+	for _, c := range gatedRoutes {
+		allowed := 0
+		for _, role := range matrixRoles {
+			if !middleware.Can(role, c.cap) {
+				continue
+			}
+			allowed++
+			t.Run(role+"/"+c.method+" "+c.path, func(t *testing.T) {
+				w := requestAs(t, r, c.method, concretePath(c.path), role)
+				assert.NotEqual(t, http.StatusForbidden, w.Code,
+					"角色 %q 有 %s 能力，不应被拒", role, c.cap)
+				assert.NotEqual(t, http.StatusUnauthorized, w.Code)
+				if !c.handlerErrOK {
+					assert.Less(t, w.Code, 500, "不应是服务端错误")
+				}
+			})
+		}
+		require.NotZero(t, allowed, "%s %s 没有任何角色被放行：matrixRoles 是否漏了高权限角色？", c.method, c.path)
+	}
+}
 
-	for _, p := range []string{"/api/notification-channels", "/api/integrations/status"} {
+// TestRoutes_所有路由都已分类 反向兜底（Risk#7）：枚举注册的**全部**路由，
+// 任何一条既没挂能力、也不在 ungatedRoutes 白名单 → 失败。
+//
+// 为什么 GET 也要分类：本轮修的就是两个 GET（notification-channels 泄露明文凭据、
+// diagnostics/ping 服务端外连），「新增敏感 GET 忘挂门禁」是同一类缺陷。
+func TestRoutes_所有路由都已分类(t *testing.T) {
+	r := setupTestRouter(t)
+
+	gated := map[string]bool{}
+	for _, c := range gatedRoutes {
+		gated[c.method+" "+c.path] = true
+	}
+
+	for _, rt := range r.Routes() {
+		switch rt.Method {
+		case http.MethodHead, http.MethodOptions:
+			continue
+		}
+		key := rt.Method + " " + rt.Path
+		if gated[key] || ungatedRoutes[key] != "" {
+			continue
+		}
+		t.Errorf("路由 %s 既未挂能力也未列入 ungatedRoutes：新增路由必须分类"+
+			"（docs/FIX-PLAN-AUTHZ.md §3.3）", key)
+	}
+}
+
+// TestRoutes_只读端点未被过度收紧 只读身份必须仍能读非凭据类端点（防过度收紧）。
+func TestRoutes_只读端点未被过度收紧(t *testing.T) {
+	r := setupTestRouter(t)
+	for _, p := range []string{
+		"/api/assets", "/api/alerts", "/api/tickets", "/api/racks", "/api/sites",
+		"/api/dashboard/stats", "/api/integrations/status",
+	} {
 		t.Run(p, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, p, nil)
+			w := requestAs(t, r, http.MethodGet, p, middleware.RoleReadonly)
+			assert.Equal(t, http.StatusOK, w.Code, "只读身份应能读 %s", p)
+		})
+	}
+
+	// /api/topology 在测试 sqlite schema 下 500（testdata 的 assets 表没有 brand 列），
+	// 这里只断言没被权限收紧 —— 状态码 200 属测试夹具缺口，不是鉴权问题。
+	t.Run("/api/topology", func(t *testing.T) {
+		w := requestAs(t, r, http.MethodGet, "/api/topology", middleware.RoleReadonly)
+		assert.NotEqual(t, http.StatusForbidden, w.Code, "只读身份不应被拒")
+	})
+
+	// 凭据例外：通知渠道响应体含明文 webhook token / SMTP 密码 → 已收紧到 manage
+	w := requestAs(t, r, http.MethodGet, "/api/notification-channels", middleware.RoleReadonly)
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"通知渠道含明文凭据，只读身份不应能读（docs/FIX-PLAN-AUTHZ.md §3.2）")
+}
+
+// seedUserWithRole 插一个真实用户行（/auth/me 需要 user_id 能查到用户）
+func seedUserWithRole(t *testing.T, role string) string {
+	t.Helper()
+	id := uuid.NewString()
+	err := database.GetDB().Exec(
+		`INSERT INTO users (id, username, password_hash, role, status) VALUES (?, ?, ?, ?, 'active')`,
+		id, "u-"+id[:8], "$2a$10$seed", role).Error
+	require.NoError(t, err)
+	return id
+}
+
+// TestRoutes_AuthMe下发capabilities 下发给前端的能力集必须与执行侧（middleware.Capabilities）
+// 逐项一致，否则会出现「按钮隐藏但接口放行」的错位。
+//
+// 关键设计：DB 里的角色与 JWT 里的角色**故意不同**。若 handler 改成回查 DB
+// （docs/FIX-PLAN-AUTHZ.md §4.4 明令禁止的做法），本测试会红 —— 这是「同源」的守护。
+func TestRoutes_AuthMe下发capabilities(t *testing.T) {
+	r := setupTestRouter(t)
+
+	for _, role := range matrixRoles {
+		t.Run("role="+role, func(t *testing.T) {
+			decoy := middleware.RoleReadonly
+			if role == middleware.RoleReadonly {
+				decoy = middleware.RoleAdmin
+			}
+			userID := seedUserWithRole(t, decoy)
+			tok, err := middleware.GenerateToken(userID, "me-"+role, role)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 			req.Header.Set("Authorization", "Bearer "+tok)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
-			assert.Equal(t, http.StatusOK, w.Code, "只读列表应为 200")
+			require.Equal(t, http.StatusOK, w.Code, "响应: %s", w.Body.String())
+
+			var resp struct {
+				Data struct {
+					Role         string   `json:"role"`
+					Capabilities []string `json:"capabilities"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+			want := []string{}
+			for _, c := range middleware.Capabilities(role) {
+				want = append(want, string(c))
+			}
+			assert.Equal(t, middleware.CanonicalRole(role), resp.Data.Role)
+			assert.Equal(t, want, resp.Data.Capabilities)
 		})
 	}
 }

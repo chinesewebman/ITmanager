@@ -172,6 +172,14 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 	integrationH := handlers.NewIntegrationHandler(integrationSvc, cfg)
 	postmortemH := handlers.NewPostmortemHandler(postmortemSvc)
 
+	// 能力门禁（docs/FIX-PLAN-AUTHZ.md §3.2）：矩阵实现在 middleware.Can，
+	// 这里只做别名，避免每个路由重复写 middleware.RequireCapability(...)。
+	// 没有 canRead —— read 是地板（未被下面四种能力覆盖的端点默认放行），不挂中间件。
+	canWrite := middleware.RequireCapability(middleware.CapWrite)
+	canManage := middleware.RequireCapability(middleware.CapManage)
+	canAudit := middleware.RequireCapability(middleware.CapAudit)
+	canIdentity := middleware.RequireCapability(middleware.CapIdentity)
+
 	api := r.Group("/api")
 	{
 		// 兼容旧探针：/api/health 内部转发到 liveness（部分 manifest 仍引用旧路径）
@@ -187,11 +195,8 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			// C7: 跳过首次登录强改密 (用户自主选择, dev/test 友好, 不需 admin)
 			auth.POST("/skip-password-change", middleware.AuthMiddleware(), handlers.SkipPasswordChange)
 
-			// 缺陷 D-6：签发/查看/吊销 API Key 一律限 admin（凭据管理，operator 不应自助签发）
-			auth.POST("/api-keys", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.CreateAPIKey)
-			auth.GET("/api-keys", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.ListAPIKeys)
-			auth.DELETE("/api-keys/:id", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.DeleteAPIKey)
-			auth.PUT("/api-keys/:id/revoke", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.RevokeAPIKey)
+			// 注：API Key 路由已移入下方 protected 组 —— 原先挂在 auth 组时没有
+			// AuditLog 中间件，铸造/吊销长期凭据不留痕（docs/FIX-PLAN-AUTHZ.md §4.3）。
 		}
 
 		protected := api.Group("")
@@ -199,32 +204,40 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100)))      // v1.4 默认 100 req/min per IP+path
 		protected.Use(middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()})) // v1.4 审计日志
 		{
-			// 缺陷 D-6：集成配置含 token，写/测试一律限 admin（只读状态查询不限）
-			protected.POST("/integrations/sync", middleware.RequireRole("admin"), integrationH.Sync)
+			// 凭据管理（docs/FIX-PLAN-AUTHZ.md §3.3）：签发/查看/吊销 API Key 限 admin。
+			// 放在 protected 组而非 auth 组，是为了拿到 AuditLog —— 铸造长期凭据必须留痕。
+			protected.POST("/auth/api-keys", canIdentity, handlers.CreateAPIKey)
+			protected.GET("/auth/api-keys", canIdentity, handlers.ListAPIKeys)
+			protected.DELETE("/auth/api-keys/:id", canIdentity, handlers.DeleteAPIKey)
+			protected.PUT("/auth/api-keys/:id/revoke", canIdentity, handlers.RevokeAPIKey)
+
+			// 集成配置含 token，写/测试一律限 manage（只读状态查询不限）
+			protected.POST("/integrations/sync", canManage, integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
 			// v2.2: 三个集成的运行时配置管理（UI Settings 保存按钮 + 测试连通）
-			protected.POST("/integrations/zabbix/test", middleware.RequireRole("admin"), integrationH.TestZabbix)
-			protected.PUT("/integrations/zabbix", middleware.RequireRole("admin"), integrationH.UpdateZabbix)
-			protected.POST("/integrations/netbox/test", middleware.RequireRole("admin"), integrationH.TestNetBox)
-			protected.PUT("/integrations/netbox", middleware.RequireRole("admin"), integrationH.UpdateNetBox)
-			protected.POST("/integrations/glpi/test", middleware.RequireRole("admin"), integrationH.TestGLPI)
-			protected.PUT("/integrations/glpi", middleware.RequireRole("admin"), integrationH.UpdateGLPI)
+			protected.POST("/integrations/zabbix/test", canManage, integrationH.TestZabbix)
+			protected.PUT("/integrations/zabbix", canManage, integrationH.UpdateZabbix)
+			protected.POST("/integrations/netbox/test", canManage, integrationH.TestNetBox)
+			protected.PUT("/integrations/netbox", canManage, integrationH.UpdateNetBox)
+			protected.POST("/integrations/glpi/test", canManage, integrationH.TestGLPI)
+			protected.PUT("/integrations/glpi", canManage, integrationH.UpdateGLPI)
 
 			// v2.0: 审计日志查询端点
-			// 缺陷 D-6 延伸（审计 M-1）：审计日志含用户名/IP/操作轨迹，只读用户也能拉全量
-			protected.GET("/audit-logs", middleware.RequireRole("admin"), auditH.ListAuditLogs)
+			// 审计日志含用户名/IP/操作轨迹 → audit 能力（admin/ops_admin/auditor）。
+			// 修复前挂 RequireRole("admin") 导致 auditor 角色读不到审计日志（角色形同虚设）。
+			protected.GET("/audit-logs", canAudit, auditH.ListAuditLogs)
 
 			assets := protected.Group("/assets")
 			{
 				assets.GET("", assetH.ListAssets)
 				assets.GET("/export", assetH.ExportAssets) // 静态段必须早于 /:id，否则 /export 被当成 :id
 				assets.GET("/:id", assetH.GetAsset)
-				assets.POST("", assetH.CreateAsset)
-				assets.PUT("/:id", assetH.UpdateAsset)
-				assets.DELETE("/:id", assetH.DeleteAsset)
-				// B4: 软退役 + 恢复
-				assets.POST("/:id/retire", assetH.RetireAsset)   // 静态段 /retire 在 /:id 之后, gin 路径匹配 OK
-				assets.POST("/:id/restore", assetH.RestoreAsset) // 同上
+				assets.POST("", canWrite, assetH.CreateAsset)
+				assets.PUT("/:id", canWrite, assetH.UpdateAsset)
+				assets.DELETE("/:id", canManage, assetH.DeleteAsset) // 硬删不可逆
+				// B4: 软退役 + 恢复（可逆 → write）
+				assets.POST("/:id/retire", canWrite, assetH.RetireAsset)   // 静态段 /retire 在 /:id 之后, gin 路径匹配 OK
+				assets.POST("/:id/restore", canWrite, assetH.RestoreAsset) // 同上
 			}
 
 			racks := protected.Group("/racks")
@@ -245,33 +258,33 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			alerts.GET("", alertH.ListAlerts)
 			alerts.GET("/stats", alertH.GetAlertStats)                         // 静态段必须早于 /:id，否则 /stats 被当成 :id
 			alerts.GET("/false-positives/export", alertH.ExportFalsePositives) // 同理：静态段早于 /:id
-			alerts.POST("/bulk-ack", alertH.BulkAcknowledge)
-			alerts.POST("/bulk-resolve", alertH.BulkResolve)
-			alerts.POST("/bulk-delete", alertH.BulkDelete)
+			alerts.POST("/bulk-ack", canWrite, alertH.BulkAcknowledge)
+			alerts.POST("/bulk-resolve", canWrite, alertH.BulkResolve)
+			alerts.POST("/bulk-delete", canManage, alertH.BulkDelete)
 			alerts.GET("/:id", alertH.GetAlert)
-			alerts.PUT("/:id/ack", alertH.AcknowledgeAlert)
-			alerts.PUT("/:id/resolve", alertH.ResolveAlert)
-			alerts.POST("/:id/mark-fp", alertH.MarkFalsePositive) // 小改进 #2：标记/反标记误报
+			alerts.PUT("/:id/ack", canWrite, alertH.AcknowledgeAlert)
+			alerts.PUT("/:id/resolve", canWrite, alertH.ResolveAlert)
+			alerts.POST("/:id/mark-fp", canWrite, alertH.MarkFalsePositive) // 小改进 #2：标记/反标记误报
 
 			rules := protected.Group("/alert-rules")
 			{
 				rules.GET("", alertH.ListAlertRules)
-				rules.POST("", alertH.CreateAlertRule)
-				rules.PUT("/:id", alertH.UpdateAlertRule)
-				rules.DELETE("/:id", alertH.DeleteAlertRule)
+				rules.POST("", canWrite, alertH.CreateAlertRule)
+				rules.PUT("/:id", canWrite, alertH.UpdateAlertRule)
+				rules.DELETE("/:id", canManage, alertH.DeleteAlertRule)
 			}
 
 			tickets := protected.Group("/tickets")
 			{
 				tickets.GET("", ticketH.ListTickets)
 				tickets.GET("/:id", ticketH.GetTicket)
-				tickets.POST("", ticketH.CreateTicket)
-				tickets.PUT("/:id", ticketH.UpdateTicket)
+				tickets.POST("", canWrite, ticketH.CreateTicket)
+				tickets.PUT("/:id", canWrite, ticketH.UpdateTicket)
 			}
 
-			// 缺陷 D-6：用户列表暴露账号/邮箱/角色，限 admin
+			// 用户列表暴露账号/邮箱/角色 → identity（仅 admin）
 			users := protected.Group("/users")
-			users.Use(middleware.RequireRole("admin"))
+			users.Use(canIdentity)
 			{
 				users.GET("", userH.ListUsers)
 				users.GET("/:id", userH.GetUser)
@@ -284,24 +297,26 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				dashboard.GET("/kpis", dashboardH.GetKPIs)
 			}
 
-			// 通知渠道配置含 webhook token / SMTP 凭据，且 /:id/test 由服务端主动外连
-			// （可被用作 SSRF 探测）—— 写/测试限 admin（审计 M-2），只读列表不限。
+			// 通知渠道配置含 webhook token / SMTP 凭据（响应体不脱敏），且 /:id/test
+			// 由服务端主动外连 —— 整组限 manage（docs/FIX-PLAN-AUTHZ.md §3.2 凭据例外）。
 			channels := protected.Group("/notification-channels")
+			channels.Use(canManage)
 			{
 				channels.GET("", channelH.ListChannels)
-				channels.POST("", middleware.RequireRole("admin"), channelH.CreateChannel)
-				channels.PUT("/:id", middleware.RequireRole("admin"), channelH.UpdateChannel)
-				channels.DELETE("/:id", middleware.RequireRole("admin"), channelH.DeleteChannel)
-				channels.PUT("/:id/test", middleware.RequireRole("admin"), channelH.TestChannel)
+				channels.POST("", channelH.CreateChannel)
+				channels.PUT("/:id", channelH.UpdateChannel)
+				channels.DELETE("/:id", channelH.DeleteChannel)
+				channels.PUT("/:id/test", channelH.TestChannel)
 			}
 
 			// 资产诊断（故障时间线 + ping/traceroute 探活）
 			diagnostics := protected.Group("/diagnostics")
 			{
 				diagnostics.GET("/assets/:id/timeline", diagnosticH.GetAssetTimeline)
-				// ping/traceroute 是静态段，无 :id 冲突；放 group 末尾便于阅读
-				diagnostics.GET("/ping", diagnosticH.PingAsset)
-				diagnostics.GET("/traceroute", diagnosticH.TracerouteAsset)
+				// ping/traceroute 是静态段，无 :id 冲突；放 group 末尾便于阅读。
+				// 服务端主动外连（内网可达性探测）→ 要 write，只读身份不应触发。
+				diagnostics.GET("/ping", canWrite, diagnosticH.PingAsset)
+				diagnostics.GET("/traceroute", canWrite, diagnosticH.TracerouteAsset)
 			}
 
 			// 资产复盘 PDF 报告
@@ -315,11 +330,11 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			suppressions := protected.Group("/alert-suppressions")
 			{
 				suppressions.GET("", suppressionH.ListAlertSuppressions)
-				suppressions.POST("/preview", suppressionH.PreviewSuppression)
-				suppressions.POST("", suppressionH.CreateAlertSuppression)
+				suppressions.POST("/preview", suppressionH.PreviewSuppression) // 纯计算无副作用，不挂能力
+				suppressions.POST("", canWrite, suppressionH.CreateAlertSuppression)
 				suppressions.GET("/:id", suppressionH.GetAlertSuppression)
-				suppressions.PUT("/:id", suppressionH.UpdateAlertSuppression)
-				suppressions.DELETE("/:id", suppressionH.DeleteAlertSuppression)
+				suppressions.PUT("/:id", canWrite, suppressionH.UpdateAlertSuppression)
+				suppressions.DELETE("/:id", canManage, suppressionH.DeleteAlertSuppression)
 			}
 
 			// 网络拓扑（P1-1）
@@ -333,32 +348,32 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			{
 				oncall.GET("/current", oncallH.GetCurrentOncall)
 				oncall.GET("/schedules", oncallH.ListSchedules)
-				oncall.POST("/schedules", oncallH.CreateSchedule)
-				oncall.DELETE("/schedules/:id", oncallH.DeleteSchedule)
+				oncall.POST("/schedules", canWrite, oncallH.CreateSchedule)
+				oncall.DELETE("/schedules/:id", canManage, oncallH.DeleteSchedule)
 				oncall.GET("/schedules/:id/shifts", oncallH.ListShifts)
-				oncall.POST("/schedules/:id/shifts", oncallH.CreateShift)
-				oncall.DELETE("/shifts/:shift_id", oncallH.DeleteShift)
+				oncall.POST("/schedules/:id/shifts", canWrite, oncallH.CreateShift)
+				oncall.DELETE("/shifts/:shift_id", canManage, oncallH.DeleteShift)
 				oncall.GET("/policies", oncallH.ListPolicies)
-				oncall.POST("/policies", oncallH.CreatePolicy)
+				oncall.POST("/policies", canWrite, oncallH.CreatePolicy)
 				oncall.GET("/policies/:id", oncallH.GetPolicy)
-				oncall.DELETE("/policies/:id", oncallH.DeletePolicy)
+				oncall.DELETE("/policies/:id", canManage, oncallH.DeletePolicy)
 			}
 
 			// 故障 Runbook（P2-1）
 			runbooks := protected.Group("/runbooks")
 			{
-				runbooks.POST("", runbookH.Create)
+				runbooks.POST("", canWrite, runbookH.Create)
 				runbooks.GET("", runbookH.List)
 				runbooks.GET("/recommend", runbookH.Recommend)
 				runbooks.GET("/:id", runbookH.Get)
-				runbooks.PUT("/:id", runbookH.Update)
-				runbooks.DELETE("/:id", runbookH.Delete)
+				runbooks.PUT("/:id", canWrite, runbookH.Update)
+				runbooks.DELETE("/:id", canManage, runbookH.Delete)
 			}
 
 			// 指标快照（P2-2 Zabbix 兜底）
 			metrics := protected.Group("/metric-snapshots")
 			{
-				metrics.POST("", metricH.BulkInsert)
+				metrics.POST("", canWrite, metricH.BulkInsert)
 				metrics.GET("", metricH.Query)
 				metrics.GET("/latest", metricH.Latest)
 			}

@@ -255,7 +255,7 @@ return "TICKET-" + time.Now().Format("20060102") + "-" + string(rune('A'+count%2
 | # | 风险 / 任务 | 影响 | 状态 |
 |---|------------|------|------|
 | R-1 | **gRPC :50051 无鉴权**（审计 B-2） | 若该端口对外可达，绕过 HTTP 鉴权 | 按 ADR-0003「保留但冻结」；**需用户决策**（是否暴露 / 是否加 mTLS） |
-| R-2 | **角色词表漂移**：DB 种子是 `admin/ops_admin/ops_user/readonly/auditor`，`RequireRole("admin")` 只认 `admin` | `ops_admin` 被 D-6 门禁挡在门外 | 本轮按「只挂 admin」发布，已在 §3.3 写明；归一化 + 权限矩阵另立任务 |
+| R-2 | **角色词表漂移**：DB 种子是 `admin/ops_admin/ops_user/readonly/auditor`，`RequireRole("admin")` 只认 `admin` | `ops_admin` 被 D-6 门禁挡在门外 | ✅ **已修复（2026-09-09）**：权威词表收敛到 `middleware/roles.go`，门禁改为能力矩阵（`RequireCapability`），新增 `cmd/set-role` 打通矩阵可达性。见 `docs/FIX-PLAN-AUTHZ.md`、`docs/adr/0005-角色词表与权限矩阵.md` |
 | R-3 | **JWT 有效期 24h**，无 refresh / 无吊销 | 用户被禁用后旧 token 仍可用满 24h（API Key 已按 M-5 即时失效） | 另立任务 |
 | R-4 | `schema_drift_test` 不校验类型 / NULL / 唯一约束，`liveModels()` 是手工清单 | 新增模型默认不守门 | 真库类型漂移已由 `db_smoke` 覆盖；解析器升级另立任务 |
 | R-5 | `internal/api/testdata/migrations/` 与生产迁移分叉（编号错位、缺 000005~000013） | 集成测试通过 ≠ 生产库可用 | 结构性改造另立任务 |

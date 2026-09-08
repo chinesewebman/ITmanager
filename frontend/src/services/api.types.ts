@@ -38,6 +38,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/skip-password-change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 跳过改密 (非首次场景)
+         * @description C7: 用户在 `/change-password` 页可点"跳过"调本接口。
+         *     写 `password_set_at = NOW()` + 清 `must_change_password = false` + 写 audit_log。
+         *
+         *     主人 7/02 决策: **首次登录强改密不可跳**。
+         *     - `reason=first_login` → 400 (seed admin/admin123 这类必须改)
+         *     - `reason=optional` (或不传) → 允许 (用户主动取消改密, 不算"首次")
+         */
+        post: operations["skipPasswordChange"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dashboard/stats": {
         parameters: {
             query?: never;
@@ -64,6 +89,27 @@ export interface paths {
         };
         /** 获取告警趋势 */
         get: operations["getDashboardTrends"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dashboard/kpis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 获取关键 KPI 指标
+         * @description 返回 MTTR (平均恢复时间)、MTTD (平均检测时间)、告警密度、SLA 达成率。
+         *     days 默认 7，范围 1-90。
+         */
+        get: operations["getKPIs"];
         put?: never;
         post?: never;
         delete?: never;
@@ -170,6 +216,40 @@ export interface paths {
         get?: never;
         /** 解决告警 */
         put: operations["resolveAlert"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{id}/mark-fp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 标记/反标记告警为误报 */
+        post: operations["markFalsePositive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/false-positives/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 导出误报训练集 CSV */
+        get: operations["exportFalsePositives"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -451,6 +531,70 @@ export interface paths {
          *     含 MTTR (平均恢复时间)、open_alerts、open_tickets 等摘要。
          */
         get: operations["getAssetTimeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/diagnostics/ping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 资产 ICMP ping 探活
+         * @description 调用系统 ping 工具探测资产 IP 的可达性。
+         *     count 默认 4，上限 20。响应包含 transmitted/received/loss/min/avg/max ms。
+         */
+        get: operations["pingAsset"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/diagnostics/traceroute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 资产 traceroute 网络路径
+         * @description 调用系统 traceroute 跟踪资产 IP 的网络路径。
+         *     maxHops 默认 30，上限 64。
+         */
+        get: operations["tracerouteAsset"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/postmortem/assets/{id}/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 下载资产复盘 PDF 报告
+         * @description 聚合 alerts / tickets / status 历史生成 1-2 页 PDF 复盘报告。
+         *     报告含：资产概要、可靠性指标（MTTR/告警密度）、事件时间线、Top 5 告警。
+         *     days 默认 30，上限 365。
+         */
+        get: operations["downloadPostmortemReport"];
         put?: never;
         post?: never;
         delete?: never;
@@ -814,6 +958,34 @@ export interface components {
             events?: components["schemas"]["TimelineEvent"][];
             summary?: components["schemas"]["DiagnosticSummary"];
         };
+        PingResult: {
+            host?: string;
+            count?: number;
+            transmitted?: number;
+            received?: number;
+            loss_percent?: number;
+            min_ms?: number;
+            avg_ms?: number;
+            max_ms?: number;
+            stddev_ms?: number;
+            /** Format: int64 */
+            duration_ms?: number;
+        };
+        TracerouteResult: {
+            host?: string;
+            max_hops?: number;
+            reached?: boolean;
+            /** Format: int64 */
+            duration_ms?: number;
+            hops?: components["schemas"]["TracerouteHop"][];
+        };
+        TracerouteHop: {
+            hop?: number;
+            host?: string;
+            ip?: string;
+            rtts?: string[];
+            lossed?: boolean;
+        };
         AlertSuppression: {
             /** Format: uuid */
             id?: string;
@@ -955,6 +1127,8 @@ export interface components {
             data?: {
                 token?: string;
                 user?: components["schemas"]["User"];
+                /** @example false */
+                must_change_password?: boolean;
             };
         };
         DashboardStats: {
@@ -976,6 +1150,35 @@ export interface components {
                     count?: number;
                 }[];
             };
+        };
+        KPI: {
+            /**
+             * Format: int64
+             * @description 平均恢复时间（秒），无已解决告警时为 null
+             */
+            mttr_seconds?: number | null;
+            /**
+             * Format: int64
+             * @description 平均检测时间（秒），无已确认告警时为 null
+             */
+            mttd_seconds?: number | null;
+            /** @description 窗口内每日告警数（alerts/day） */
+            alert_density?: number;
+            /** @description SLA 达成率（已关单中按时比例，0-1），无已关工单时为 null */
+            sla_closed_rate?: number | null;
+            window_days?: number;
+            /** Format: date-time */
+            window_start?: string;
+            /** Format: date-time */
+            window_end?: string;
+            /** Format: int64 */
+            resolved_alerts?: number;
+            /** Format: int64 */
+            acked_alerts?: number;
+            /** Format: int64 */
+            closed_tickets?: number;
+            /** Format: int64 */
+            on_time_tickets?: number;
         };
         Asset: {
             /** Format: uuid */
@@ -1039,6 +1242,14 @@ export interface components {
             resolve_time?: string;
             resolve_user?: string;
             duration?: number;
+            /** @description 是否被标记为误报（小改进 */
+            is_false_positive?: boolean;
+            /** @description 标记人 username */
+            marked_by?: string;
+            /** Format: date-time */
+            marked_at?: string;
+            /** @description 误报标记备注 */
+            false_positive_note?: string;
         };
         AlertList: {
             code?: number;
@@ -1160,7 +1371,7 @@ export interface components {
             nickname?: string;
             email?: string;
             /** @enum {string} */
-            role?: "admin" | "operator" | "viewer";
+            role?: "admin" | "ops_admin" | "ops_user" | "auditor" | "readonly" | "user";
             /** Format: date-time */
             created_at?: string;
         };
@@ -1273,6 +1484,44 @@ export interface operations {
             };
         };
     };
+    skipPasswordChange: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description first_login=必改拒绝; optional=允许跳 (默认)
+                     * @example optional
+                     * @enum {string}
+                     */
+                    reason?: "first_login" | "optional";
+                };
+            };
+        };
+        responses: {
+            /** @description 跳过成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 首次登录必改, 拒绝跳过 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     getDashboardStats: {
         parameters: {
             query?: never;
@@ -1310,6 +1559,36 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DashboardTrends"];
                 };
+            };
+        };
+    };
+    getKPIs: {
+        parameters: {
+            query?: {
+                /** @description 窗口天数，默认 7，范围 1-90 */
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KPI"];
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -1514,6 +1793,67 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    markFalsePositive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description true=标记为误报，false=反标记 */
+                    is_false_positive: boolean;
+                    /** @description 误报备注（如"周期性抖动"） */
+                    note?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 操作成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"];
+                };
+            };
+            /** @description 告警不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    exportFalsePositives: {
+        parameters: {
+            query?: {
+                /** @description 可选 RFC3339 时间，增量导出 marked_at >= since 的记录 */
+                since?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description CSV 文件流 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
             };
         };
     };
@@ -2004,6 +2344,132 @@ export interface operations {
             };
             /** @description 资产不存在 */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pingAsset: {
+        parameters: {
+            query: {
+                /** @description 目标 host（IP 或 hostname） */
+                host: string;
+                /** @description ping 次数，默认 4，上限 20 */
+                count?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PingResult"];
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description ping 执行失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    tracerouteAsset: {
+        parameters: {
+            query: {
+                /** @description 目标 host（IP 或 hostname） */
+                host: string;
+                /** @description 最大跳数，默认 30，上限 64 */
+                maxHops?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TracerouteResult"];
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description traceroute 执行失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    downloadPostmortemReport: {
+        parameters: {
+            query?: {
+                /** @description 查询窗口（天）默认 30，最大 365 */
+                days?: number;
+                /** @description 事件数上限，默认 200，最大 1000 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description PDF 文件流 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 资产不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 报告生成失败 */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

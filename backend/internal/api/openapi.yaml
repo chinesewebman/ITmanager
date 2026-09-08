@@ -2392,7 +2392,9 @@ components:
           type: string
         role:
           type: string
-          enum: [admin, operator, viewer]
+          # 权威词表 = migrations/000001 的 roles.code + 000013 兜底值 user。
+          # 旧值 operator/viewer 仅在存量库里可能见到，服务端会折叠为 ops_user/readonly。
+          enum: [admin, ops_admin, ops_user, auditor, readonly, user]
         created_at:
           type: string
           format: date-time

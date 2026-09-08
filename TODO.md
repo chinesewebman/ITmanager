@@ -29,15 +29,31 @@
 
 ### 待修复缺陷（2026-09-09 实测，见 [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md) §9）
 
-- [ ] **D-1（阻断级）`tickets` 三套 schema 不一致** — 迁移 24 列 / GORM 模型 24 列（交集仅 10 列）/ 测试 schema 与模型一致 → CI 盲。生产走 `migrate.Up`，GORM INSERT 引用迁移里不存在的列 → `POST /tickets` 必然失败
-      修复方向：先定方向 → 写显式迁移 → 改模型与测试 schema；**禁止对生产库 AutoMigrate**；补「用迁移建库跑 POST /tickets」集成测试
-- [ ] **D-2 工单号碰撞** — `generateTicketNumber` 用全表 `Count()%26`，同日第 27 张与第 1 张同号；`ticket_number` 唯一索引导致插入失败。修复须在 D-1 之后
-- [ ] **D-3 `alerts.ticket_id` 悬空** — 注释指向 GLPI 工单，全仓库无写入方。随「告警 → 一键建单」改为指向 `tickets.id`
-- [ ] **D-4（阻断级）`users` 表缺 `role` / `deleted_at` 列** — 模型有、迁移没有；GORM 查询会枚举模型全部字段 + 软删除条件 → **用迁移新建的库连登录都过不去**
-- [ ] **D-5 `audit_logs` 列名漂移** — 模型 `method`/`path`/`ip`/`status` vs 迁移 `event_type`/`ip_address`/`result`；写入失败仅 `slog.Warn` → 静默丢审计
-- [ ] **D-6 `RequireRole` 未挂载** — 定义后无路由调用（仅测试引用）→ 路由级 RBAC 形同虚设
-- [ ] **D-7 API Key `permissions` 未校验** — 字段可写入，鉴权分支不校验 scope
-      *（D-1/D-4/D-5 同一类：模型与迁移各自演化 + CI 无 Postgres。建议一次修完，并加「用迁移建库跑冒烟」的 CI 步骤）*
+- [x] **D-1（阻断级）`tickets` 三套 schema 不一致** — 修复轮 `2ec518c`：补齐式迁移 `000013_schema_align`（非破坏、幂等、带类型守卫）+ `db_smoke` CI job（全新安装 + 存量升级两条路径）
+- [x] **D-2 工单号碰撞** — `2ec518c`：按当日前缀计数 + 进位字母标签，唯一索引兜底
+- [ ] **D-3 `alerts.ticket_id` 悬空** — 字段语义已修（`000013` 补列 + 模型对齐），**写入方仍缺**：随「告警 → 一键建单」落地
+- [x] **D-4（阻断级）`users` 表缺 `role` / `deleted_at` 列** — `2ec518c` + `000013`：先加列后回填再设 DEFAULT（避免存量 admin 降级）
+- [x] **D-5 `audit_logs` 列名漂移** — `2ec518c`：`000013` RENAME 表/列对齐模型
+- [x] **D-6 `RequireRole` 未挂载** — `2ec518c` 挂载 17 条 admin 专属路由；**2026-09-09 进一步升级为能力矩阵**（见下方 AUTHZ 条目）
+- [x] **D-7 API Key `permissions` 未校验** — `2ec518c`：校验自身 scope，关联用户 inactive 立即失效
+
+### AUTHZ 角色词表归一 + 权限矩阵（2026-09-09 完成，对应 FIX-PLAN-D1-D7 §7 R-2）
+
+- [x] **权威词表单点化** — `backend/internal/middleware/roles.go`：`admin/ops_admin/ops_user/auditor/readonly/user`，遗留别名 `operator`→`ops_user`、`viewer`→`readonly`（只读入不写出，v4 清理）
+- [x] **能力矩阵鉴权** — `read/write/manage/audit/identity` 五档；`RequireRole("admin")` 全部替换为 `RequireCapability(...)`；`read` 是地板（未被更高能力覆盖的端点默认放行）
+- [x] **路由清单双向 diff** — `TestRoutes_非GET路由都已分类` 用 `r.Routes()` 反向兜底，新增非 GET 路由忘挂门禁即失败
+- [x] **`/auth/me` 下发 `capabilities`** — 前端不再复制矩阵
+- [x] **`cmd/set-role`** — 打通 `ops_admin`/`ops_user`/`auditor` 的生产分配路径，含「拒绝降级最后一个 admin」防自锁
+- [x] **ADR-0005 + 06 章同步** — `docs/adr/0005-角色词表与权限矩阵.md`、`06-用户权限.md` §6.0.2/§6.2.2
+- [ ] **前端 6 页 token 失效** — `AlertSuppressions`/`Oncall`/`Runbook`/`Topology`/`MetricSnapshot`/`AssetTimeline` 用 `localStorage.getItem('token') ?? ''` 拼 Bearer，而该键自 C-F5 改 httpOnly cookie 后无人写入 → 恒 401 + 静默回退 mock（**单列任务**）
+
+**AUTHZ 审计发现的既有缺陷（本轮记录，未修）**：
+
+- [ ] **`POST /api/auth/skip-password-change` 可被空 body 绕过** — 服务端只拒绝 `reason == "first_login"`；body 为空时 `req.Reason` 为空即清除强改密标记 → seed 的 `admin/admin123` 可保留弱口令。修复：以 DB 的 `user.MustChangePassword` 为准
+- [ ] **write scope 的 API Key 挂在 admin 账号上可签发新 Key** — `apiKeyAllows` 只按 HTTP 方法判定，`identity` 路由的能力来自关联用户角色 → 可铸造远期 Key 作持久化后门。修复：identity 路由额外要求 Key 权限含 `admin`
+- [ ] **`/auth/me` 不在 `openapi.yaml`** — `capabilities` 进不了 `gen:api` 生成类型，前端接入前需先补 spec
+- [ ] **`cmd/set-role` 并发窗口** — 防自锁检查与写入已同事务，但两个并发进程仍可能各自通过（TOCTOU）；该命令是人工运维操作，暂不修
+- [ ] **`GET /api/integrations/status` 回传集成 URL 与 Zabbix 用户名** — 不含 token，属读地板；若需收紧另立任务
 
 ### v1.0.2 已发布（6/17）
 - [x] **README.md**：6 GitHub badges (Release/CI/License/Go/React/Docker) + 状态推进
