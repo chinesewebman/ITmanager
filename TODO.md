@@ -1,9 +1,31 @@
 # 网络运维监控平台 - 开发待办
 
-## 当前状态 (2026-06-17, v1.0.2)
+## 当前状态 (2026-09-09, `git describe` = v2.1.2-12-gdad2b6f)
 
-> 本次更新：v1.0.0 → v1.0.1 → v1.0.2 三连发布（10 PR + 一键部署 + README badges）。详见 [CHANGELOG.md](CHANGELOG.md)。
+> **真实基线**：`v2.1.2-12-gdad2b6f`（最新 tag **v2.1.2**，最后提交 **2026-07-01**）。v2.2 / v2.3 系列（B/C 系列）已在 v2.1.2 之后合入，尚未打 tag。
+> **下一步：v3 架构优化**（R5 → R2 → R1 → R3 → R4），依据 [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md)。
+>
+> 历史状态 (2026-06-17, v1.0.2)：v1.0.0 → v1.0.1 → v1.0.2 三连发布（10 PR + 一键部署 + README badges）。详见 [CHANGELOG.md](CHANGELOG.md)。
 > 优化方向见 [docs/优化路线图.md](docs/优化路线图.md)。
+
+### v2.1.2 之后已合入（B/C 系列，未打 tag）
+
+- [x] **B1-4 TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap
+- [x] **B4 资产软退役 + IP 释放** (`223c11e` 后端 + `20723a3` 前端退役/恢复 UI)
+- [x] **C6 docker-compose healthcheck** (`77bfdd9`) — 7 服务 healthcheck + `depends_on: service_healthy`
+- [x] **C7 首次登录强改密** (`c848ff5` + `dad2b6f`) — 改密页 + 首次跳引导
+- [x] 其余（Zabbix / NetBox / GLPI runtime config UI、Zabbix metric fallback worker、Go 1.25 fmt 重排）见 [CHANGELOG.md](CHANGELOG.md) 「未发布」节
+
+### v3 改造待办（2026-09-09 新增，依据 [docs/v3-架构优化需求.md](docs/v3-架构优化需求.md)）
+
+优先级顺序：**R5 → R2 → R1 → R3 → R4**
+
+- [ ] **R5 文档与仓库卫生**（2-3h）— 版本号对齐 `git describe`；`schema.sql` 拆分（未实现表移入 `docs/schema-planned.sql`）；ADR-0002 的 gRPC 部分作废（ADR-0003）
+      *（README/TODO/CHANGELOG 三处版本号已于 2026-09-09 对齐；schema 拆分 + ADR-0003 待做）*
+- [ ] **R2 专线归属 NetBox Circuits**（3-4h）— 废弃自建 `lines` 四表，专线以 NetBox `Circuit` + `CircuitTermination` 建模，ITmanager 只读渲染
+- [ ] **R1 AI 模块重定位**（4-6h）— 砍自建 LLM 问答/知识库，改为 ITmanager 作为 HolmesGPT 数据源（toolset 端点，只读 token）
+- [ ] **R3 vCenter 纳管**（6-8h）— vCenter → NetBox sync，ITmanager 从 NetBox 读 VM（先 dry-run 一周再开自动清理）
+- [ ] **R4 告警与 Keep 划界**（2h 文档 + 后续实施）— 跨源去重/关联归 Keep；ITmanager 保留人工抑制（维护窗口）+ 值班升级
 
 ### v1.0.2 已发布（6/17）
 - [x] **README.md**：6 GitHub badges (Release/CI/License/Go/React/Docker) + 状态推进

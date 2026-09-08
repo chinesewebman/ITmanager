@@ -7,7 +7,9 @@ vendor/
 dist/
 build/
 bin/
-server
+# 只忽略仓库根的构建产物。勿写成无斜杠的 server —— 那会连
+# backend/cmd/server/ 源码目录一起忽略，且 rg / IDE / codegraph 会静默跳过它。
+/server
 
 # IDE
 .idea/

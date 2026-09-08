@@ -2,6 +2,37 @@
 
 ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.org/)。
 
+## [未发布] — v2.1.2 之后
+
+> 基线：`git describe` = **v2.1.2-12-gdad2b6f**（最新 tag v2.1.2，最后提交 2026-07-01）。
+> 本节按 `git log v2.1.2..HEAD` 的 12 个提交归纳，**只记录 commit 可证实的内容**；尚未打 tag。
+
+### 功能 (feat)
+
+- **Zabbix runtime config UI** (`2dc3367`) — 运行时配置界面 + save/test/sync，release 模式占位符检查
+- **NetBox + GLPI runtime config UI** (`8676297`) — v2.2 follow-up，三家集成统一走运行时配置
+- **Zabbix metric fallback worker** (`03560e8`) — `Zabbix item.get → metric_snapshots` 兜底落库
+- **B4 资产软退役 + IP 释放** (`223c11e` 后端 + `20723a3` 前端退役/恢复 UI)
+- **C7 首次登录强改密** (`c848ff5` 首次登录强改密 + 非首次可跳，`dad2b6f` 改密页 + 首次跳引导)
+
+### 修复 (fix)
+
+- **B1-1 / B1-2 / B1-3 settings 死表单** (`3725f40`) — 修复 + 补 CI 前端测试
+
+### 文档 (docs)
+
+- **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）
+
+### 工程 (chore)
+
+- **C6 docker-compose healthcheck** (`77bfdd9`) — 7 服务加 healthcheck + `depends_on: service_healthy`
+- **Go 1.25 fmt 重排** (`3bae43f` 既有文件 / `96f14d8` metric_sync 文件)
+
+### 版本号缺口 — 待补
+
+- ⚠️ **v2.1.1、v2.1.2 的 CHANGELOG 条目缺失**（tag 已存在，条目未写）—— **待补**，不臆造发布内容。
+- 本文件上一版最新条目为 [v2.1.0]；v2.1.2 之后的提交尚未打 tag，故列于「未发布」。
+
 ## [v2.1.0] - 2026-06-27
 
 🔧 **审计 P2 改进** — 13 项跨模块打磨 (性能 / 一致性 / 可观测 / 数据完整性)
