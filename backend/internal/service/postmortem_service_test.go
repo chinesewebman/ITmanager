@@ -186,10 +186,10 @@ func TestGenerateReport_Renderer失败_返回错误(t *testing.T) {
 func TestFetchIP_IPv4优先(t *testing.T) {
 	db, mock := newMockDB(t)
 	assetID := uuid.New()
-	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv_address"}).
+	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv6_address"}).
 		AddRow("", "2001:db8::1"). // IPv6 first
 		AddRow("10.0.0.5", "")     // IPv4 second, 应优先
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnRows(rows)
 
@@ -203,10 +203,10 @@ func TestFetchIP_IPv4优先(t *testing.T) {
 func TestFetchIP_只有IPv6(t *testing.T) {
 	db, mock := newMockDB(t)
 	assetID := uuid.New()
-	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv_address"}).
+	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv6_address"}).
 		AddRow("", "fe80::1").
 		AddRow("", "2001:db8::42")
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnRows(rows)
 
@@ -219,8 +219,8 @@ func TestFetchIP_只有IPv6(t *testing.T) {
 func TestFetchIP_空网络_返空字符串(t *testing.T) {
 	db, mock := newMockDB(t)
 	assetID := uuid.New()
-	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv_address"}) // 空
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	rows := sqlmock.NewRows([]string{"ipv4_address", "ipv6_address"}) // 空
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnRows(rows)
 
@@ -234,7 +234,7 @@ func TestFetchIP_查询错误_返error(t *testing.T) {
 	db, mock := newMockDB(t)
 	assetID := uuid.New()
 	dbErr := errors.New("relation does not exist")
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnError(dbErr)
 
@@ -256,8 +256,8 @@ func TestGenerateReport_有IP_填入ReportData(t *testing.T) {
 	fetcher := &mockTimelineFetcher{timeline: timeline}
 
 	// 2) fetchIP 的 sqlmock
-	ipRows := sqlmock.NewRows([]string{"ipv4_address", "ipv_address"}).AddRow("192.168.1.100", "")
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	ipRows := sqlmock.NewRows([]string{"ipv4_address", "ipv6_address"}).AddRow("192.168.1.100", "")
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnRows(ipRows)
 
@@ -278,7 +278,7 @@ func TestGenerateReport_IP查不到_不阻塞_空字符串(t *testing.T) {
 	fetcher := &mockTimelineFetcher{timeline: timeline}
 
 	// fetchIP 失败 — GenerateReport 不应阻塞, IP 留空
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv_address FROM "asset_networks"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT ipv4_address, ipv6_address FROM "asset_networks"`)).
 		WithArgs(assetID).
 		WillReturnError(errors.New("permission denied"))
 

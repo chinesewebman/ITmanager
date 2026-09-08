@@ -391,3 +391,109 @@ func TestRoutes_DiagnosticTimeline_无效UUID返400(t *testing.T) {
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+// ==================== 缺陷 D-6：管理端路由限 admin ====================
+
+// genTokenWithRole 生成指定角色的 JWT（genValidToken 固定 admin）
+func genTokenWithRole(t *testing.T, role string) string {
+	t.Helper()
+	tok, err := middleware.GenerateToken(uuid.NewString(), "role-"+role, role)
+	require.NoError(t, err)
+	return tok
+}
+
+// d6AdminOnlyRoutes D-6 限 admin 的路由全集。非 admin 侧与 admin 侧共用同一张表 ——
+// 只测一侧会漏检「把 RequireRole("admin") 写成别的角色」（非 admin 仍 403、admin 也被拒）。
+var d6AdminOnlyRoutes = []struct {
+	method, path string
+	// external: handler 会主动外连（集成 sync/test），沙箱里返 500 属正常，
+	// 对这类路由只断言「不被 403 拦」。
+	external bool
+}{
+	{method: http.MethodGet, path: "/api/users"},
+	{method: http.MethodGet, path: "/api/auth/api-keys"},
+	{method: http.MethodPost, path: "/api/auth/api-keys"},
+	{method: http.MethodDelete, path: "/api/auth/api-keys/" + uuid.NewString()},
+	{method: http.MethodPut, path: "/api/auth/api-keys/" + uuid.NewString() + "/revoke"},
+	{method: http.MethodPost, path: "/api/integrations/sync", external: true},
+	{method: http.MethodPost, path: "/api/integrations/zabbix/test", external: true},
+	{method: http.MethodPut, path: "/api/integrations/zabbix"},
+	{method: http.MethodPost, path: "/api/integrations/netbox/test", external: true},
+	{method: http.MethodPut, path: "/api/integrations/netbox"},
+	{method: http.MethodPost, path: "/api/integrations/glpi/test", external: true},
+	{method: http.MethodPut, path: "/api/integrations/glpi"},
+	// 审计延伸：操作轨迹 / 含凭据且会外连的通知渠道
+	{method: http.MethodGet, path: "/api/audit-logs"},
+	{method: http.MethodPost, path: "/api/notification-channels"},
+	{method: http.MethodPut, path: "/api/notification-channels/" + uuid.NewString()},
+	{method: http.MethodDelete, path: "/api/notification-channels/" + uuid.NewString()},
+	{method: http.MethodPut, path: "/api/notification-channels/" + uuid.NewString() + "/test", external: true},
+}
+
+// TestRoutes_D6_非admin被拒 覆盖 D-6 挂载的每个路由：
+// 凭据管理（API Key）、集成配置写/测试、用户列表、审计日志、通知渠道写操作，operator 一律 403。
+func TestRoutes_D6_非admin被拒(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genTokenWithRole(t, "operator")
+
+	for _, c := range d6AdminOnlyRoutes {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			req := httptest.NewRequest(c.method, c.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusForbidden, w.Code, "非 admin 应 403")
+		})
+	}
+}
+
+// TestRoutes_D6_只读集成状态不限admin 防过度收紧：
+// GET /integrations/status 是只读状态查询，operator 必须仍可访问（且必须真的 200）。
+func TestRoutes_D6_只读集成状态不限admin(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genTokenWithRole(t, "operator")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "只读状态查询应为 200（只断言 !=403 会把 500 也放行）")
+}
+
+// TestRoutes_D6_admin可进handler admin 令牌应能通过 d6AdminOnlyRoutes 的**每一条**路由。
+// 与「非 admin 被拒」共用同一张表，避免只抽检两条导致漏检。
+func TestRoutes_D6_admin可进handler(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t) // role=admin
+
+	for _, c := range d6AdminOnlyRoutes {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			req := httptest.NewRequest(c.method, c.path, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.NotEqual(t, http.StatusForbidden, w.Code, "admin 不应被拒")
+			assert.NotEqual(t, http.StatusUnauthorized, w.Code)
+			if !c.external {
+				assert.Less(t, w.Code, 500, "不应是服务端错误（sqlite 测试 schema 下 handler 应能跑通）")
+			}
+		})
+	}
+}
+
+// TestRoutes_D6_只读列表不限admin 防过度收紧：通知渠道只读列表 operator 仍可访问。
+func TestRoutes_D6_只读列表不限admin(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genTokenWithRole(t, "operator")
+
+	for _, p := range []string{"/api/notification-channels", "/api/integrations/status"} {
+		t.Run(p, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code, "只读列表应为 200")
+		})
+	}
+}

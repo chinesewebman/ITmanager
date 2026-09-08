@@ -95,11 +95,14 @@ type Config struct {
 	Logger         *slog.Logger  // 缺省 slog.Default()
 }
 
-// EventDLQ 死信队列行 (SQLite 表)
+// EventDLQ 死信队列行
+//
+// payload 不写死类型：GORM 按方言推导（Postgres → bytea，SQLite → blob）。
+// 原先写死 `type:blob` 会让 AutoMigrate 在 PostgreSQL 上报 type "blob" does not exist。
 type EventDLQ struct {
 	ID            string    `gorm:"primaryKey;type:text" json:"id"`
 	Topic         string    `gorm:"index;not null" json:"topic"`
-	Payload       []byte    `gorm:"type:blob" json:"payload"`
+	Payload       []byte    `json:"payload"`
 	ErrorMsg      string    `gorm:"type:text" json:"error_msg"`
 	Attempts      int       `json:"attempts"`
 	LastAttemptAt time.Time `json:"last_attempt_at"`

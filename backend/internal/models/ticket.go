@@ -51,8 +51,30 @@ func (t *Ticket) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// generateTicketNumber 生成工单号 TICKET-YYYYMMDD-<序号>。
+//
+// 序号 = 当天已建工单数，转成 A…Z / AA / AB… 的进位标签（原实现用全表 Count()%26，
+// 同一天第 27 张会与第 1 张同号，撞 ticket_number 唯一索引，见缺陷 D-2）。
+// 并发下仍可能算出同一个号 —— 由唯一索引兜底 + TicketService.Create 的冲突重试处理。
 func generateTicketNumber(db *gorm.DB) string {
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
 	var count int64
-	db.Model(&Ticket{}).Count(&count)
-	return "TICKET-" + time.Now().Format("20060102") + "-" + string(rune('A'+count%26))
+	db.Model(&Ticket{}).Where("ticket_number LIKE ?", prefix+"%").Count(&count)
+	return prefix + seqLabel(count)
+}
+
+// seqLabel 把序号转成 Excel 风格字母标签：0→A, 25→Z, 26→AA, 27→AB …
+func seqLabel(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	var buf []byte
+	for {
+		buf = append([]byte{byte('A' + n%26)}, buf...)
+		n = n/26 - 1
+		if n < 0 {
+			break
+		}
+	}
+	return string(buf)
 }

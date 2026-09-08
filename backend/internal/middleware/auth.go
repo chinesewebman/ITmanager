@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"strings"
 	"time"
 
@@ -160,6 +161,14 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 		}
 	}
 
+	// 校验 API Key 自身的 scope（缺陷 D-7：原先只按关联用户的 role 放行，
+	// key.Permissions 从不读取 → 只读 Key 也能写）。写操作端点不得靠 Key 越权。
+	if !apiKeyAllows(key.Permissions, c.Request.Method) {
+		apierr.Forbidden(c, "API Key 权限不足")
+		c.Abort()
+		return
+	}
+
 	// Update last used time (P1-审计: 异步批量写，避免每次 API key 调用都同步写 DB)
 	// 写放大问题：高 QPS API key 调用会产生 N 次 UPDATE，拖慢主请求路径
 	// 改用 in-memory buffer + background flush（30s 间隔或 100 条阈值）
@@ -173,6 +182,14 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 		return
 	}
 
+	// 用户被禁用后，其 API Key 必须立即失效（否则 Key 只要没过期就能永久用，
+	// 与登录路径的 inactive 拦截不一致 —— 见审计 M-5）。
+	if user.Status == "inactive" {
+		apierr.Unauthorized(c, "API Key 关联的用户已被禁用")
+		c.Abort()
+		return
+	}
+
 	// Set context values
 	c.Set("user_id", key.UserID.String())
 	c.Set("username", user.Username)
@@ -180,6 +197,31 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	c.Set("api_key_id", key.ID.String())
 
 	c.Next()
+}
+
+// apiKeyAllows 按 API Key 的 permissions 判定某个 HTTP 方法是否放行。
+//
+// 语义：read 只读；write 可读写；admin 等同 write（保留位）。
+// permissions 为空或全是未知值时按 read 处理（fail-safe：绝不因配置缺失而放行写）。
+func apiKeyAllows(perms models.StringList, method string) bool {
+	hasRead, hasWrite := false, false
+	for _, p := range perms {
+		switch strings.ToLower(strings.TrimSpace(p)) {
+		case "read":
+			hasRead = true
+		case "write", "admin":
+			hasWrite = true
+		}
+	}
+	if !hasRead && !hasWrite {
+		hasRead = true
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return hasRead || hasWrite
+	default:
+		return hasWrite
+	}
 }
 
 // RequireRole 角色权限中间件

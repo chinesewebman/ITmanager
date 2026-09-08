@@ -126,7 +126,7 @@ func newDiagTestDB(t *testing.T) *gorm.DB {
 			mac_address TEXT,
 			ipv4_address TEXT,
 			ipv4_netmask TEXT,
-			ipv_address TEXT,
+			ipv6_address TEXT,
 			speed INTEGER,
 			duplex TEXT,
 			status TEXT,

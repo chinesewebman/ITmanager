@@ -99,12 +99,12 @@ func (s *PostmortemService) GenerateReport(ctx context.Context, w io.Writer, ass
 func (s *PostmortemService) fetchIP(ctx context.Context, assetID uuid.UUID) (string, error) {
 	type ipRow struct {
 		IPv4Address string `gorm:"column:ipv4_address"`
-		IPv6Address string `gorm:"column:ipv_address"` // 真实列名是 ipv_address (见 models.AssetNetwork)
+		IPv6Address string `gorm:"column:ipv6_address"` // GORM 由字段名 IPv6Address 推导: ipv6_address（不是 JSON tag 的 ipv_address）
 	}
 	var rows []ipRow
 	if err := s.db.WithContext(ctx).
 		Table("asset_networks").
-		Select("ipv4_address, ipv_address").
+		Select("ipv4_address, ipv6_address").
 		Where("asset_id = ?", assetID).
 		Order("created_at ASC").
 		Scan(&rows).Error; err != nil {

@@ -49,6 +49,48 @@ jobs:
           name: backend-binaries
           path: backend/bin/
 
+  dbsmoke:
+    name: Postgres smoke (migrations)
+    runs-on: ubuntu-latest
+    # 为什么单独一个 job: 只有「真 Postgres 上跑生产迁移执行器」能抓到 schema 漂移
+    # 与迁移不可重入（DDL 已提交、版本未记录的重放窗口）。单测全绿也挡不住这类缺陷。
+    # 两条路径: 空库全新安装 migrate.Up / 存量库(000001~000012)只应用 000013 + 回滚。
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: smoke_pw
+          POSTGRES_DB: itmanager_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: backend/go.sum
+
+      # 外部模式要用 psql/createdb 造库与灌旧迁移；runner 镜像通常自带，
+      # 缺了就装，避免 dbsmoke job 因环境差异变红。
+      - name: Ensure psql client
+        run: |
+          if ! command -v psql >/dev/null || ! command -v createdb >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          fi
+
+      - name: Migrations smoke (fresh install + legacy upgrade)
+        env:
+          SMOKE_PG_HOST: 127.0.0.1
+          SMOKE_PG_PORT: '5432'
+        run: scripts/db_smoke.sh
+
   frontend:
     name: Frontend (Node)
     runs-on: ubuntu-latest

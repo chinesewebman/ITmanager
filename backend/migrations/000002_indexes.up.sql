@@ -25,9 +25,11 @@ CREATE INDEX IF NOT EXISTS idx_tickets_assignee
     WHERE assignee_id IS NOT NULL;
 
 -- alert_rules: 规则启用状态过滤（ListRules）
+-- 注：000001 建的是 `enabled`，模型用的是 `is_enabled`（列漂移，见 docs/FIX-PLAN）。
+-- 这里先索引已存在的列；模型列 is_enabled 由 000013 补建并另建索引。
 CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
-    ON alert_rules(is_enabled)
-    WHERE is_enabled = true;
+    ON alert_rules(enabled)
+    WHERE enabled = true;
 
 -- api_keys: 按 hash 查询 + 状态过滤（AuthMiddleware 用）
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash_status

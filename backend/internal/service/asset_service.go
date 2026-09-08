@@ -214,7 +214,7 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 			Where("asset_id = ?", uid).
 			Updates(map[string]interface{}{
 				"ipv4_address": "",
-				"ipv_address":  "", // 注意: IPv6Address gorm tag 是 `ipv_address` (T-6/Trap 11 已知)
+				"ipv6_address": "", // 列名由字段名 IPv6Address 推导: ipv6_address（`ipv_address` 只是 JSON tag，不是列）
 			}).Error; err != nil {
 			return err
 		}
@@ -272,7 +272,7 @@ func (s *assetService) Restore(ctx context.Context, id string) (*models.Asset, [
 				Where("id = ?", networks[i].ID).
 				Updates(map[string]interface{}{
 					"ipv4_address": networks[i].IPv4Address,
-					"ipv_address":  networks[i].IPv6Address,
+					"ipv6_address": networks[i].IPv6Address,
 				}).Error; err != nil {
 				return err
 			}

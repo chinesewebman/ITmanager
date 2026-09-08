@@ -104,13 +104,28 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	if t.Tags == "" {
 		t.Tags = "[]"
 	}
-	if err := s.db.WithContext(ctx).Create(t).Error; err != nil {
-		if isUniqueViolation(err) {
+	// 工单号在 BeforeCreate 里按「当天已建数量」生成，并发下两个请求可能算出同一个号。
+	// 唯一索引拒绝后重新生成并重试（最多 5 次），彻底消除竞态（缺陷 D-2）。
+	//
+	// 例外：客户端显式传了工单号（外部系统对接）时不重试 —— 悄悄换一个号会让调用方
+	// 拿到的号与它请求的不一致，语义上是「这个号已被占用」，应原样返回 409。
+	clientSuppliedNumber := t.TicketNumber != ""
+	const maxCreateAttempts = 5
+	for attempt := 1; ; attempt++ {
+		err := s.db.WithContext(ctx).Create(t).Error
+		if err == nil {
+			return nil
+		}
+		if !isUniqueViolation(err) {
+			return err
+		}
+		if clientSuppliedNumber || attempt >= maxCreateAttempts {
 			return ErrAlreadyExists
 		}
-		return err
+		// 清掉自动生成的主键与工单号，让 BeforeCreate 重新生成
+		t.ID = uuid.Nil
+		t.TicketNumber = ""
 	}
-	return nil
 }
 
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {

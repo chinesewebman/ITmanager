@@ -147,7 +147,7 @@ CREATE TABLE racks (
     max_weight      INTEGER,
     floor           VARCHAR(20),
     row             VARCHAR(20),
-    column          VARCHAR(20),
+    "column"        VARCHAR(20),  -- column 是 PG 保留字，必须加引号（GORM 查询时也会自动加引号）
     status          VARCHAR(20) DEFAULT 'active',
     created_at      TIMESTAMP DEFAULT NOW(),
     updated_at      TIMESTAMP DEFAULT NOW(),
@@ -381,21 +381,35 @@ CREATE TABLE metrics (
     tags            JSONB
 );
 
-SELECT create_hypertable('metrics', 'time');
+-- TimescaleDB 是可选依赖：装了就把 metrics 转 hypertable，没装就退化成普通表。
+-- 没有任何 Go 代码引用 metrics / metrics_cpu / metrics_memory（设计预留），
+-- 所以不能让它成为硬依赖——否则 plain PostgreSQL 上 migrate.Up 直接失败。
+DO $$
+BEGIN
+    -- 装了包不等于能用：TimescaleDB 还必须在 shared_preload_libraries 里，
+    -- 否则 CREATE EXTENSION 报 'must be loaded via shared_preload_libraries'，
+    -- 整个迁移回滚 → database.Init 失败 → 服务起不来（审计 中-6）。
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb')
+       AND COALESCE(current_setting('shared_preload_libraries', TRUE), '') ILIKE '%timescaledb%' THEN
+        CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+        PERFORM create_hypertable('metrics', 'time', if_not_exists => TRUE);
+    END IF;
+END
+$$;
 
 CREATE INDEX idx_metrics_asset_time ON metrics(asset_id, time DESC);
 CREATE INDEX idx_metrics_name_time ON metrics(metric_name, time DESC);
 
--- CPU 物化视图
+-- CPU 物化视图（date_trunc 等价于 TimescaleDB 的 time_bucket('1 minute', ...)）
 CREATE MATERIALIZED VIEW metrics_cpu AS
-SELECT time_bucket('1 minute', time) AS bucket,
+SELECT date_trunc('minute', time) AS bucket,
        asset_id, avg(metric_value) as value
 FROM metrics WHERE metric_name = 'cpu_usage'
 GROUP BY bucket, asset_id;
 
 -- 内存物化视图
 CREATE MATERIALIZED VIEW metrics_memory AS
-SELECT time_bucket('1 minute', time) AS bucket,
+SELECT date_trunc('minute', time) AS bucket,
        asset_id, avg(metric_value) as value
 FROM metrics WHERE metric_name = 'memory_usage'
 GROUP BY bucket, asset_id;
@@ -530,8 +544,8 @@ CREATE INDEX idx_discovery_results_asset ON discovery_results(asset_id);
 CREATE TABLE snmp_credential_compliance (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     asset_id            UUID REFERENCES assets(id),
-    snmp_device_id      UUID REFERENCES snmp_devices(id),
-    
+    snmp_device_id      UUID,  -- 外键在 snmp_devices 建表后补加（前向引用，见文件末尾 ALTER）
+
     host                INET NOT NULL,            -- 设备IP
     port                INTEGER DEFAULT 161,     -- SNMP端口
     snmp_version        VARCHAR(10),              -- v1/v2c/v3
@@ -588,6 +602,11 @@ CREATE TABLE snmp_devices (
 );
 
 CREATE INDEX idx_snmp_devices_host ON snmp_devices(host);
+
+-- 补加前向引用外键：snmp_credential_compliance.snmp_device_id → snmp_devices(id)
+ALTER TABLE snmp_credential_compliance
+    ADD CONSTRAINT fk_snmp_compliance_device
+    FOREIGN KEY (snmp_device_id) REFERENCES snmp_devices(id);
 
 -- ============================================================
 -- 第四部分：告警管理

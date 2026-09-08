@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -163,23 +164,95 @@ func TestTicketService_Create_nil指针返回ErrInvalidInput(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
-func TestTicketService_Create_唯一冲突返回ErrAlreadyExists(t *testing.T) {
+func TestTicketService_Create_唯一冲突后重试成功(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	svc := NewTicketService(gormDB)
 	ctx := context.Background()
 
-	tk := &models.Ticket{Title: "dup"}
-	// 构造 PG unique violation 错误（isUniqueViolation 认 'duplicate key' / 'unique constraint'）
+	tk := &models.Ticket{Title: "retry"}
+	// 第 1 次：工单号撞唯一索引 → 回滚
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
 	mock.ExpectRollback()
+	// 第 2 次：重新生成工单号后成功
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`INSERT INTO "tickets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	mock.ExpectCommit()
+
+	require.NoError(t, svc.Create(ctx, tk), "唯一冲突应重试而非直接失败（缺陷 D-2）")
+	// 关键断言：第 2 次必须真的**重新生成**了号（count=1 → B）。只断言 NoError 是假绿 ——
+	// 实现若忘了清空 TicketNumber，第 2 次 INSERT 会用同一个号，mock 照样返回成功。
+	assert.Equal(t, "TICKET-"+time.Now().Format("20060102")+"-B", tk.TicketNumber,
+		"重试时必须清空旧号并由 BeforeCreate 重新生成")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestTicketService_Create_客户端自带工单号冲突不重试 保护外部对接语义：
+// 调用方指定的号被占用时应返回 ErrAlreadyExists(409)，而不是悄悄换一个号返回成功。
+func TestTicketService_Create_客户端自带工单号冲突不重试(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewTicketService(gormDB)
+	ctx := context.Background()
+
+	tk := &models.Ticket{Title: "ext", TicketNumber: "TICKET-20260101-A"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "tickets"`).
+		WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
+	mock.ExpectRollback()
+
+	err := svc.Create(ctx, tk)
+	assert.ErrorIs(t, err, ErrAlreadyExists, "客户端指定的号冲突应 409，不得静默换号")
+	assert.Equal(t, "TICKET-20260101-A", tk.TicketNumber, "不得改写客户端传入的号")
+	assert.NoError(t, mock.ExpectationsWereMet(), "客户端自带号不应进入重试路径")
+}
+
+func TestTicketService_Create_持续唯一冲突返回ErrAlreadyExists(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewTicketService(gormDB)
+	ctx := context.Background()
+
+	tk := &models.Ticket{Title: "dup"}
+	// 连续 5 次都撞唯一索引 → 放弃并返回 ErrAlreadyExists（重试上限）
+	const maxAttempts = 5
+	for i := 0; i < maxAttempts; i++ {
+		mock.ExpectBegin()
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery(`INSERT INTO "tickets"`).
+			WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
+		mock.ExpectRollback()
+	}
 
 	err := svc.Create(ctx, tk)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrAlreadyExists)
+	assert.NoError(t, mock.ExpectationsWereMet(), "应恰好重试 %d 次", maxAttempts)
+}
+
+func TestTicketService_Create_非唯一约束错误不重试(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewTicketService(gormDB)
+	ctx := context.Background()
+
+	tk := &models.Ticket{Title: "boom"}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`INSERT INTO "tickets"`).
+		WillReturnError(errors.New("connection reset"))
+	mock.ExpectRollback()
+
+	err := svc.Create(ctx, tk)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrAlreadyExists, "非唯一冲突应原样透传，不重试")
+	assert.Contains(t, err.Error(), "connection reset")
+	assert.NoError(t, mock.ExpectationsWereMet(), "不应发生第二次 INSERT")
 }
 
 // pqUniqueError 模拟 pq.Error (有 .Error() string)

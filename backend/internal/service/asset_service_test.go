@@ -411,7 +411,7 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 	// 2) Find networks (取 IPv4)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
 		WithArgs(id).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv_address"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, id, "eth0", "192.168.3.50", ""))
 	// 3) Transaction Begin
 	mock.ExpectBegin()
@@ -425,7 +425,7 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 	// 4) 重读 networks (查最终态)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
 		WithArgs(id).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv_address"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, "", ""))
 
 	asset, networks, err := svc.Retire(context.Background(), id.String(), "设备下架", userID)
@@ -501,7 +501,7 @@ func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
 	// 2) Find networks (空 IP 待写回)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
 		WithArgs(id).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv_address"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, id, "eth0", "", ""))
 	// 3) Transaction Begin
 	mock.ExpectBegin()

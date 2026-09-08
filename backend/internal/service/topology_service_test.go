@@ -32,7 +32,7 @@ func newTopologyTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE asset_networks (
 			id TEXT PRIMARY KEY, asset_id TEXT, interface_name TEXT, interface_type TEXT,
-			mac_address TEXT, ipv4_address TEXT, ipv4_netmask TEXT, ipv_address TEXT,
+			mac_address TEXT, ipv4_address TEXT, ipv4_netmask TEXT, ipv6_address TEXT,
 			speed INTEGER, duplex TEXT, status TEXT, connected_to TEXT, connected_port TEXT,
 			purpose TEXT, created_at DATETIME, updated_at DATETIME
 		)`,

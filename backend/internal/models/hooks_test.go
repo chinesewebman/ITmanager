@@ -61,7 +61,9 @@ const userSchema = `CREATE TABLE users (
 
 const ticketSchema = `CREATE TABLE tickets (
 	id TEXT PRIMARY KEY,
-	ticket_number TEXT,
+	-- UNIQUE 是 D-2 论证的前提：并发撞号靠唯一索引拒绝，再靠 service 重试。
+	-- 少了它，本文件的「30 张不重复」用例只验证 seqLabel 进位，验证不了兜底。
+	ticket_number TEXT UNIQUE,
 	title TEXT,
 	description TEXT,
 	ticket_type TEXT,
@@ -232,6 +234,71 @@ func TestTicket_BeforeCreate_第N张工单_字母递增(t *testing.T) {
 	for i := 0; i < len(nums)-1; i++ {
 		assert.NotEqual(t, nums[i], nums[i+1], "第 %d 和第 %d 张 ticket_number 应不同", i, i+1)
 	}
+}
+
+// TestTicket_BeforeCreate_当天30张_编号不重复 是缺陷 D-2 的回归测试：
+// 原实现用全表 Count()%26，同一天第 27 张会与第 1 张同号（都是 -A），
+// 撞 ticket_number 唯一索引后建单失败。
+func TestTicket_BeforeCreate_当天30张_编号不重复(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	const n = 30
+	nums := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		tk := models.Ticket{
+			Title:     "seq-" + uuid.New().String()[:8],
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		require.NoError(t, db.Create(&tk).Error, "第 %d 张工单创建失败", i+1)
+		nums = append(nums, tk.TicketNumber)
+	}
+
+	// 1) 编号全局不重复（D-2 的直接断言）
+	seen := map[string]int{}
+	for i, num := range nums {
+		if first, dup := seen[num]; dup {
+			t.Fatalf("第 %d 张与第 %d 张工单号重复: %s", i+1, first+1, num)
+		}
+		seen[num] = i
+	}
+
+	// 2) 当天序号严格按 A..Z, AA..AD 递增
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	wantLabels := []string{
+		"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+		"N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+		"AA", "AB", "AC", "AD",
+	}
+	for i, label := range wantLabels {
+		assert.Equal(t, prefix+label, nums[i], "第 %d 张工单号", i+1)
+	}
+}
+
+// TestTicket_BeforeCreate_只统计当天 昨天已有工单不占用今天的序号。
+func TestTicket_BeforeCreate_只统计当天(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	yesterday := time.Now().AddDate(0, 0, -1)
+	for i := 0; i < 3; i++ {
+		tk := models.Ticket{
+			Title:        "old-" + uuid.New().String()[:8],
+			TicketNumber: "TICKET-" + yesterday.Format("20060102") + "-" + string(rune('A'+i)),
+			CreatedAt:    yesterday,
+			UpdatedAt:    yesterday,
+		}
+		require.NoError(t, db.Create(&tk).Error)
+	}
+
+	tk := models.Ticket{
+		Title:     "today",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	require.NoError(t, db.Create(&tk).Error)
+
+	assert.Equal(t, "TICKET-"+time.Now().Format("20060102")+"-A", tk.TicketNumber,
+		"昨天的 3 张不应让今天从 -D 开始")
 }
 
 func TestTicket_BeforeCreate_uuid_priority_先uuid后number(t *testing.T) {

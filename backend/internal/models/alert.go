@@ -40,7 +40,9 @@ type Alert struct {
 	FalsePositiveNote *string    `json:"false_positive_note" gorm:"type:text"`
 
 	// 关联
-	TicketID *uuid.UUID `json:"ticket_id" gorm:"type:uuid"` // GLPI 工单
+	// D-3: 指向本系统 tickets.id（ADR-0004 工单 SoT 归位 ITmanager，GLPI 降级为可选只读参考）
+	// 写入方随「告警一键建单」功能落地，当前字段无写入者。
+	TicketID *uuid.UUID `json:"ticket_id" gorm:"type:uuid"`
 	AssetID  *uuid.UUID `json:"asset_id" gorm:"type:uuid;index"`
 
 	// 来源

@@ -187,10 +187,11 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			// C7: 跳过首次登录强改密 (用户自主选择, dev/test 友好, 不需 admin)
 			auth.POST("/skip-password-change", middleware.AuthMiddleware(), handlers.SkipPasswordChange)
 
-			auth.POST("/api-keys", middleware.AuthMiddleware(), handlers.CreateAPIKey)
-			auth.GET("/api-keys", middleware.AuthMiddleware(), handlers.ListAPIKeys)
-			auth.DELETE("/api-keys/:id", middleware.AuthMiddleware(), handlers.DeleteAPIKey)
-			auth.PUT("/api-keys/:id/revoke", middleware.AuthMiddleware(), handlers.RevokeAPIKey)
+			// 缺陷 D-6：签发/查看/吊销 API Key 一律限 admin（凭据管理，operator 不应自助签发）
+			auth.POST("/api-keys", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.CreateAPIKey)
+			auth.GET("/api-keys", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.ListAPIKeys)
+			auth.DELETE("/api-keys/:id", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.DeleteAPIKey)
+			auth.PUT("/api-keys/:id/revoke", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handlers.RevokeAPIKey)
 		}
 
 		protected := api.Group("")
@@ -198,18 +199,20 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100)))      // v1.4 默认 100 req/min per IP+path
 		protected.Use(middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()})) // v1.4 审计日志
 		{
-			protected.POST("/integrations/sync", integrationH.Sync)
+			// 缺陷 D-6：集成配置含 token，写/测试一律限 admin（只读状态查询不限）
+			protected.POST("/integrations/sync", middleware.RequireRole("admin"), integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
 			// v2.2: 三个集成的运行时配置管理（UI Settings 保存按钮 + 测试连通）
-			protected.POST("/integrations/zabbix/test", integrationH.TestZabbix)
-			protected.PUT("/integrations/zabbix", integrationH.UpdateZabbix)
-			protected.POST("/integrations/netbox/test", integrationH.TestNetBox)
-			protected.PUT("/integrations/netbox", integrationH.UpdateNetBox)
-			protected.POST("/integrations/glpi/test", integrationH.TestGLPI)
-			protected.PUT("/integrations/glpi", integrationH.UpdateGLPI)
+			protected.POST("/integrations/zabbix/test", middleware.RequireRole("admin"), integrationH.TestZabbix)
+			protected.PUT("/integrations/zabbix", middleware.RequireRole("admin"), integrationH.UpdateZabbix)
+			protected.POST("/integrations/netbox/test", middleware.RequireRole("admin"), integrationH.TestNetBox)
+			protected.PUT("/integrations/netbox", middleware.RequireRole("admin"), integrationH.UpdateNetBox)
+			protected.POST("/integrations/glpi/test", middleware.RequireRole("admin"), integrationH.TestGLPI)
+			protected.PUT("/integrations/glpi", middleware.RequireRole("admin"), integrationH.UpdateGLPI)
 
 			// v2.0: 审计日志查询端点
-			protected.GET("/audit-logs", auditH.ListAuditLogs)
+			// 缺陷 D-6 延伸（审计 M-1）：审计日志含用户名/IP/操作轨迹，只读用户也能拉全量
+			protected.GET("/audit-logs", middleware.RequireRole("admin"), auditH.ListAuditLogs)
 
 			assets := protected.Group("/assets")
 			{
@@ -266,7 +269,9 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				tickets.PUT("/:id", ticketH.UpdateTicket)
 			}
 
+			// 缺陷 D-6：用户列表暴露账号/邮箱/角色，限 admin
 			users := protected.Group("/users")
+			users.Use(middleware.RequireRole("admin"))
 			{
 				users.GET("", userH.ListUsers)
 				users.GET("/:id", userH.GetUser)
@@ -279,13 +284,15 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				dashboard.GET("/kpis", dashboardH.GetKPIs)
 			}
 
+			// 通知渠道配置含 webhook token / SMTP 凭据，且 /:id/test 由服务端主动外连
+			// （可被用作 SSRF 探测）—— 写/测试限 admin（审计 M-2），只读列表不限。
 			channels := protected.Group("/notification-channels")
 			{
 				channels.GET("", channelH.ListChannels)
-				channels.POST("", channelH.CreateChannel)
-				channels.PUT("/:id", channelH.UpdateChannel)
-				channels.DELETE("/:id", channelH.DeleteChannel)
-				channels.PUT("/:id/test", channelH.TestChannel)
+				channels.POST("", middleware.RequireRole("admin"), channelH.CreateChannel)
+				channels.PUT("/:id", middleware.RequireRole("admin"), channelH.UpdateChannel)
+				channels.DELETE("/:id", middleware.RequireRole("admin"), channelH.DeleteChannel)
+				channels.PUT("/:id/test", middleware.RequireRole("admin"), channelH.TestChannel)
 			}
 
 			// 资产诊断（故障时间线 + ping/traceroute 探活）
