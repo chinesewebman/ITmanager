@@ -16,7 +16,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          # 跟 go.mod 的 go 指令走（当前 1.25.0）。原先钉 1.21，而 go.mod 要求
+          # 1.25.0 → 每次 CI 都靠 GOTOOLCHAIN=auto 额外下载 ~100MB 工具链，
+          # 多一个网络失败点，且 pin 与实际编译版本不符。
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
       - name: Download modules
@@ -74,7 +77,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          # 跟 go.mod 的 go 指令走（当前 1.25.0）。原先钉 1.21，而 go.mod 要求
+          # 1.25.0 → 每次 CI 都靠 GOTOOLCHAIN=auto 额外下载 ~100MB 工具链，
+          # 多一个网络失败点，且 pin 与实际编译版本不符。
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
       # 外部模式要用 psql/createdb 造库与灌旧迁移；runner 镜像通常自带，
