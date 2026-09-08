@@ -1,6 +1,6 @@
 # ADR-0002: v2.0 范围与技术决策
 
-- 状态: **proposed** (2026-06-17)
+- 状态: **部分作废** —— **gRPC 部分由 [ADR-0003](0003-grpc-作废与三层定位.md) 作废（2026-09-09）**；cursor 分页 / event bus / LRU 缓存 / 单机部署**仍然有效**
 - 日期: 2026-06-17
 - 决策者: 主人 (2077 Ling) + 助手
 - 关联: [v1.4.0 release](https://github.com/chinesewebman/ITmanager/releases/tag/v1.4.0), [roadmap 13-实施规划](../13-实施规划.md)
