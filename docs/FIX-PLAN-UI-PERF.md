@@ -294,6 +294,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev7 | 2026-09-10 | **W1 全部 11 页完成**（末页 AssetTimeline = W1 第 11 页 + W2 `:122` 收口）：去三重兜底，新增 `normalizeTimeline()`；`summary: typeof MOCK_SUMMARY` 类型依赖 mock 的隐患随 mock 删除一并消除（独立 TimelineSummary 接口）；5 变异全红。§8 台账 W1 段整段标全完成 |
 | rev8 | 2026-09-10 | **W2 全站时间格式统一收口**：`pages/Settings.tsx:923` API 密钥表「最后使用」列 `t ? new Date(t).toLocaleString() : '—'`（无 locale + 非法时间显示 "Invalid Date"）→ `formatDateTime(t)`（空/非法 → '—'），与其余 6 页口径一致。1 用例绿，变异回退 `toLocaleString` 红在 `2026-02-14 10:00:00` 断言 |
 | rev9 | 2026-09-10 | **W4-H6 完成**：13 处 `var(--ant-*)` 全未定义（`ConfigProvider` 未开 `cssVar`）→ 方案①实测可行，`App.tsx` 提取 `buildTheme(themeMode)` 纯函数开 `cssVar:true`。实测结论：全量 251→253 用例不破坏；探针确认 `--ant-color-text-secondary`/`--ant-color-primary` 注入。新增 `App.theme.test.tsx` 2 用例（明暗两态 cssVar + 注入），变异删 `cssVar: true` 两用例均红在断言 |
+| rev10 | 2026-09-10 | **W4-H8 完成**：`Settings.tsx:497` 删除通知渠道无二次确认 → 套 Popconfirm 四件套（`AssetTable:163-168` 范本），title 带渠道名、`okButtonProps danger`、`onConfirm` 返回 Promise 自带 loading。1 用例绿，变异（去 Popconfirm 改回直接 onClick）红在 `not.toHaveBeenCalled()` 断言 |
 
 ---
 
@@ -324,14 +325,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | **W1 全部页（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline = 11 页）** | ✅ **全完成** | 见上各行；全仓已无 `MOCK_*`/`mock*` 兜底常量与 `catch { return MOCK_* }` |
 | W2 其余 1 个调用点 `pages/Settings.tsx:923` | ✅ 完成 | API 密钥表「最后使用」列 `toLocaleString()` → `formatDateTime`（空/非法 → '—'）；1 用例绿（断言 `2026-02-14 10:00:00`），变异（回退 `toLocaleString`）红在断言。**W2 全站时间格式统一收口** |
 | W4-H6 cssVar 开启（13 处 `var(--ant-*)` 失效） | ✅ 完成 | 方案① `ConfigProvider theme={{cssVar:true}}` 实测：全量回归不破坏 + 探针确认 `--ant-*` 注入。提取 `buildTheme(themeMode)` 纯函数（`App.tsx`）使「必须开 cssVar」契约可单测；2 用例绿（明暗两态 cssVar + 注入 `--ant-color-text-secondary`），变异（删 `cssVar: true`）两用例均红在断言 |
-| W4 其余 6 项（H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
+| W4-H8 删除通知渠道二次确认 | ✅ 完成 | `Settings.tsx:497` 删除按钮套 Popconfirm 四件套（范本 `AssetTable:163-168`），title 带渠道名 + `okButtonProps danger` + `onConfirm` 返回 Promise；1 用例绿（点删除先弹确认框不调 deleteChannel → 确认后 `deleteChannel("c1")`），变异（去 Popconfirm 改回直接 onClick）红在 `not.toHaveBeenCalled()` 断言 |
+| W4 其余 5 项（H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
-3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。**W4 批 1 剩余 6 项（H8/H9/H10/M4/M5/M6）**。
+3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。**W4 批 1 剩余 5 项（H9/H10/M4/M5/M6）**。
 4. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。

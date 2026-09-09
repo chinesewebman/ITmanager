@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin, Alert } from 'antd'
+import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Popconfirm, Spin, Alert } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
 import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
 import { formatDateTime } from '../utils/time'
@@ -494,9 +494,18 @@ function Settings() {
           <Button type="link" size="small" onClick={() => setChannelModal({ open: true, data: record })}>
             编辑
           </Button>
-          <Button type="link" size="small" danger onClick={() => handleDeleteChannel(record.id)}>
-            删除
-          </Button>
+          {/* H8：删除渠道一键生效，无二次确认 → 套 Popconfirm 四件套（范本 AssetTable:163-168） */}
+          <Popconfirm
+            title={`确认删除渠道「${record.name}」？`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDeleteChannel(record.id)}
+          >
+            <Button type="link" size="small" danger>
+              删除
+            </Button>
+          </Popconfirm>
         </Space>
       ),
     },

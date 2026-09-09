@@ -496,3 +496,48 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     errSpy.mockRestore();
   });
 });
+
+// ==================== W4-H8：删除渠道二次确认 ====================
+describe("H8 删除渠道二次确认", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: {
+        code: 0,
+        data: [
+          { id: "c1", name: "钉钉告警", type: "dingtalk", config: "{}", is_enabled: true },
+        ],
+      },
+    } as any);
+    vi.mocked(notificationApi.deleteChannel).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  it("点删除先弹确认框（不立即调 deleteChannel），确认后才调用", async () => {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+
+    // 列表删除按钮（antd 两个汉字自动插空格 → "删 除"）
+    fireEvent.click(await screen.findByRole("button", { name: /删\s*除/ }));
+
+    // 确认框出现，且 deleteChannel 尚未被调用
+    const title = await screen.findByText(/确认删除渠道「钉钉告警」/);
+    expect(title).toBeInTheDocument();
+    expect(notificationApi.deleteChannel).not.toHaveBeenCalled();
+
+    // 点 Popconfirm 里的确认按钮
+    const popover = title.closest(".ant-popover") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /删\s*除/ }));
+
+    await waitFor(() => {
+      expect(notificationApi.deleteChannel).toHaveBeenCalledWith("c1");
+    });
+  });
+});
