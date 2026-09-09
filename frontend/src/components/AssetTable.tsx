@@ -3,7 +3,7 @@ import { Table, Button, Space, Popconfirm, message } from 'antd'
 import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined, StopOutlined, RollbackOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { assetApi } from '../services/api'
-import { StatusTag } from './StatusTag'
+import { StatusTag, statusLabel } from './StatusTag'
 import { EmptyState } from './EmptyState'
 
 export interface Asset {
@@ -89,7 +89,7 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
             </span>
           )
         }
-        return <StatusTag value={s} label={s === 'active' ? '在线' : s === 'offline' ? '离线' : s === 'maintenance' ? '维护' : s} />
+        return <StatusTag value={s} label={statusLabel(s)} />
       },
     },
     {

@@ -3,6 +3,7 @@ import { Button, Form, Input, message, Modal, Table, Tag } from 'antd'
 import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
+import { StatusTag, statusLabel } from '../components/StatusTag'
 import { AssetFormModal, type AssetFormValues } from '../components/AssetFormModal'
 import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
@@ -260,9 +261,9 @@ function Assets() {
                     {asset.asset_type} · {asset.ip_address}
                   </div>
                   <div style={{ marginTop: 8 }}>
-                    <Tag color={asset.status === 'active' ? 'green' : 'red'}>
-                      {asset.status === 'active' ? '在线' : '离线'}
-                    </Tag>
+                    {/* H9：原 `status === 'active' ? '在线' : '离线'` 把 maintenance 误标红「离线」，
+                        改走 StatusTag + statusLabel 与桌面端同一口径 */}
+                    <StatusTag value={asset.status} label={statusLabel(asset.status)} />
                     {asset.site_name && <Tag>{asset.site_name}</Tag>}
                     {asset.rack_name && <Tag>{asset.rack_name}</Tag>}
                   </div>

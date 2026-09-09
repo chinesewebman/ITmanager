@@ -6,6 +6,8 @@ const COLOR_MAP: Record<string, string> = {
   // 通用
   active: 'green',
   inactive: 'default',
+  // H9：维护态醒目橙色，区别于「离线」（此前移动端把 maintenance 误标红「离线」）
+  maintenance: 'orange',
   enabled: 'green',
   disabled: 'red',
   // 告警
@@ -25,6 +27,18 @@ const COLOR_MAP: Record<string, string> = {
   // 通知
   success: 'green',
   failed: 'red',
+}
+
+// H9：资产状态中文标签单一出口（后端 asset.go:35 值域 active/offline/maintenance/retired）。
+// 桌面端 AssetTable 与移动端 Assets 卡片共用，避免「维护」被写成「离线」。
+export function statusLabel(s: string): string {
+  return (
+    s === 'active' ? '在线'
+    : s === 'offline' ? '离线'
+    : s === 'maintenance' ? '维护'
+    : s === 'retired' ? '已退役'
+    : s
+  )
 }
 
 export interface StatusTagProps {
