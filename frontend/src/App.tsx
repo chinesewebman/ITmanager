@@ -9,7 +9,7 @@ import {
   Avatar,
   Space,
 } from "antd";
-import type { MenuProps } from "antd";
+import type { MenuProps, ThemeConfig } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import {
   DashboardOutlined,
@@ -53,7 +53,7 @@ import { ThemeSwitcher } from "./components/ThemeSwitcher";
 import { CommandPalette, CommandPaletteTrigger } from "./components/CommandPalette";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { AppBreadcrumb } from "./components/AppBreadcrumb";
-import { useThemeStore } from "./stores";
+import { useThemeStore, type ThemeMode } from "./stores";
 import { authApi } from "./services/api";
 import { AUTH_LOGOUT_EVENT, type AuthLogoutDetail } from "./services/authEvents";
 import { NotFoundPage } from "./pages/StatusPage";
@@ -327,6 +327,17 @@ function AppLayout() {
   );
 }
 
+// H6：cssVar:true 让 antd 把 token 导出为 --ant-* CSS 变量，供 13 处
+// var(--ant-*) 引用（未开 cssVar 时这些变量不注入 → 次要文字色/背景/边框失效）。
+// 提取为纯函数以便单测钉住「必须开 cssVar」契约（变异反证红在断言）。
+export function buildTheme(themeMode: ThemeMode): ThemeConfig {
+  return {
+    cssVar: true,
+    algorithm:
+      themeMode === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
+  };
+}
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -347,10 +358,7 @@ function App() {
   return (
     <ConfigProvider
       locale={zhCN}
-      theme={{
-        algorithm:
-          themeMode === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      }}
+      theme={buildTheme(themeMode)}
     >
       {/* 小改进 #3：Cmd/Ctrl+K 全局搜索面板（登录前后均可用） */}
       <CommandPalette />
