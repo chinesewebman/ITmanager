@@ -10,10 +10,11 @@
 #       模型与迁移的漂移长期不可见。本脚本按生产路径(迁移 DDL)建库再跑。
 #
 # 两条路径:
-#   ① 全新安装 —— 空库上跑生产执行器 migrate.Up, 13 个迁移全应用 + 核心链路
-#      (含类型转换往返 / ticket_number 唯一约束 / 000013 重放幂等)
-#   ② 存量升级 —— 库已到 000012 且有存量 admin, 只跑 000013, 校验 role 回填
-#      (若回填失效, 存量 admin 会被 D-6 的 admin 门禁锁在门外) + 回滚不丢旧列
+#   ① 全新安装 —— 空库上跑生产执行器 migrate.Up, 全部迁移应用 + 核心链路
+#      (含类型转换往返 / ticket_number 唯一约束 / 000013 重放幂等 / jsonb 列默认值)
+#   ② 存量升级 —— 库已到 000012 且有存量 admin 与存量资产, 只跑 000013 之后的迁移,
+#      校验 role 回填(若失效, 存量 admin 会被 D-6 的 admin 门禁锁在门外)、
+#      jsonb 回填(NULL → []/{} 且合法值不被改写) + 回滚不丢旧列
 #
 # 用法:
 #   scripts/db_smoke.sh
@@ -128,7 +129,14 @@ createdb_q "$UPGRADE_DB" >/dev/null
 log "库: $DB_NAME(全新) / $UPGRADE_DB(升级路径)"
 
 # ---- 4. 升级路径库: 先建到 000012, 再伪造 schema_migrations=1..12 + 存量 admin ----
-mapfile -t LEGACY_MIGRATIONS < <(find "$MIGR_DIR" -maxdepth 1 -name '*.up.sql' ! -name '000013_*' | sort)
+# 按**版本号**过滤，不要硬编码 `! -name '000013_*'`：新增 000014 后后者会把 000014
+# 也预应用到这个「存量库」上，于是升级路径上的 000014 变成「在已有默认值的表上再设一次」，
+# 回填恒命中 0 行 —— 用例全绿却什么也没验证（数据完整性审查 阻断项）。
+LEGACY_MIGRATIONS=()
+for f in "$MIGR_DIR"/*.up.sql; do
+  v="$(basename "$f")"; v="${v%%_*}"
+  if (( 10#$v < 13 )); then LEGACY_MIGRATIONS+=("$f"); fi
+done
 [[ "${#LEGACY_MIGRATIONS[@]}" -gt 0 ]] || { fail "没找到 000013 之前的 *.up.sql"; exit 1; }
 log "升级路径库: 用 psql 应用 ${#LEGACY_MIGRATIONS[@]} 个旧迁移(000001~000012)..."
 for f in "${LEGACY_MIGRATIONS[@]}"; do
@@ -153,6 +161,14 @@ INSERT INTO users (username, password_hash) VALUES
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id FROM users u, roles r
 WHERE u.username = 'legacy_admin' AND r.code = 'admin';
+
+-- G-20: 预置两行「升级前就存在」的资产，让 000014 的回填有真实命中对象
+--   legacy-null-jsonb: 两列 NULL → 必须被回填为 []/{}
+--   legacy-json-jsonb: 合法 JSON → 必须原样保留（回填不是全表改写）
+-- 用 asset_name 列（000013 才 RENAME 成 name）
+INSERT INTO assets (asset_type, asset_name, tags, custom_fields) VALUES
+    ('server', 'legacy-null-jsonb', NULL, NULL),
+    ('server', 'legacy-json-jsonb', '["x"]'::jsonb, '{"k":"v"}'::jsonb);
 SQL
 
 # ---- 5. 跑 Go 冒烟测试(两条路径) ----
@@ -164,14 +180,14 @@ log "① 全新安装路径: migrate.Up 从零建库 + 核心链路 (build tag: 
 log "   TEST_DATABASE_URL=postgres://${DB_USER}:***@127.0.0.1:${HOST_PORT}/${DB_NAME}"
 ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$FRESH_DSN" "$GO_BIN" test \
     -tags dbsmoke -count=1 -v \
-    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply' \
+    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_AssetJSONBDefaults' \
     ./tests/ ) || rc=$?
 
 if [[ "$rc" -eq 0 ]]; then
-  log "② 存量升级路径: 只应用 000013, 校验 role 回填 + 回滚不丢旧列"
+  log "② 存量升级路径: 只应用 000013 之后的迁移, 校验 role/jsonb 回填 + 回滚不丢旧列"
   ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$UPGRADE_DSN" SMOKE_EXPECT_UPGRADE=1 "$GO_BIN" test \
       -tags dbsmoke -count=1 -v \
-      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_DownPreservesLegacyColumns' ./tests/ ) || rc=$?
+      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_DownPreservesLegacyColumns' ./tests/ ) || rc=$?
 fi
 
 if [[ "$rc" -eq 0 ]]; then

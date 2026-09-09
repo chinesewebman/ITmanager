@@ -102,6 +102,20 @@
 **现象**: svc=nil 触发的 panic 穿透 testing.tRunner,整个 test 进程 panic 而不是 fail。
 **解法**: test router factory `gin.New()` 之后立即 `r.Use(gin.Recovery())`。
 
+### T-28. gorm `default` tag 对 string 字段是 Go 侧参数替换,不是 DB 默认值
+**状态**: ACTIVE | **类别**: gorm / jsonb 零值 (G-20)
+**现象**: 给 `string` 字段加 `default:'[]'`,以为「零值会被跳过、交给列默认值」。实测 `Create` 时 gorm 把字面量**替换进参数**(DryRun `VARS=[… [] {}]`),列照旧出现在 INSERT 里 —— 该字段不进 `FieldsWithDefaultDBValue`(`schema/schema.go:286-289`),所以只有 `default:(-)`(`schema/field.go:231-232`)才是「省略该列」。两者在 update 路径都不生效:`Updates(结构体)` 的零值被 gorm 跳过(静默 no-op),`Select(...).Updates` / `Updates(map)` 直接写出 `''`。
+**解法**: 写入期不变量用模型钩子(`BeforeSave`)做应用层归一;`ALTER COLUMN ... SET DEFAULT` 只作非 gorm 写入方的兜底。完整写入矩阵见 `docs/FIX-PLAN-ASSET-JSONB.md` §2.3,回归测试 `internal/models/hooks_test.go`。
+
+---
+
+### T-29. 列改名会让引用它的唯一约束**悄悄换语义**(`unique_asset`)
+**状态**: FIXED | **类别**: 迁移 / 唯一约束 / 演示数据 (G-20 轮) | **修复日期**: 2026-09-09
+**现象**: `cmd/seed` 在真 PG 上 `exit 1`,日志 `27 处创建服务器失败 + 9 处创建交换机失败: duplicate key value violates unique constraint "unique_asset"` —— 48 个演示资产只落库 12 个(每站点第一个机柜的 4 个)。
+**根因**: 000001 建的约束是 `UNIQUE (asset_tag, idc_id)`;000013 把 `assets.idc_id` **改名**为 `site_id`,PG 自动把约束重定向到新列名 —— **约束名没变,语义从「全局唯一」变成「站内唯一」**。而 seed 的 `asset_tag` 只含 `site.Code`(`AST-DC-BJ-01-001`),同站点 4 个机柜生成同一个 tag。改名之前 `assets` 的 jsonb 缺陷(G-20)让所有资产插入先失败,把这个缺陷盖住了。
+**检测方法**: ① 任何 `ALTER TABLE ... RENAME COLUMN` 之后,查 `pg_constraint` 确认引用该列的约束/索引是否符合预期(`SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='assets'::regclass`);② 演示数据生成器产出的唯一键字段,必须在**约束的真实列组合**上唯一,不能只靠肉眼「看起来唯一」;③ 真库跑一次 `cmd/seed` 并检查退出码。
+**解法**: `asset_tag` 补上 `rack.Name`(同表 `SN`/`Name` 早已含机柜名,只有 tag 漏网);`cmd/seed/main_test.go` 加「站内唯一 + 48 资产」断言,测试 schema 补 `UNIQUE (asset_tag, site_id)` 镜像真库。**推广**: 「静默吞错的循环 + `exit 0`」会把数据缺陷藏成绿灯 —— 种子/批处理必须让失败计数决定退出码(见 G-20)。
+
 ---
 
 ## 二、前端陷阱
@@ -224,6 +238,8 @@
 | 23 | T-10 | ACTIVE |
 | 24 | T-13 | ACTIVE |
 | 25 | T-14 | ACTIVE |
+| — (G-20 轮) | T-28 | ACTIVE |
+| — (G-20 轮) | T-29 | FIXED |
 
 ---
 

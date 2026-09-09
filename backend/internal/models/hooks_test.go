@@ -29,6 +29,8 @@ func newTestDB(t *testing.T, modelsToCreate ...interface{}) *gorm.DB {
 			require.NoError(t, db.Exec(userSchema).Error)
 		case *models.Ticket, models.Ticket:
 			require.NoError(t, db.Exec(ticketSchema).Error)
+		case *models.Asset, models.Asset:
+			require.NoError(t, db.Exec(assetSchema).Error)
 		default:
 			t.Fatalf("newTestDB 不支持 model 类型 %T", m)
 		}
@@ -89,8 +91,44 @@ const ticketSchema = `CREATE TABLE tickets (
 	deleted_at DATETIME
 )`
 
-// ==================== User.BeforeCreate ====================
+// assetSchema 只覆盖 Asset 模型的列（G-20 用例用；tags/custom_fields 在 sqlite 上是 TEXT，
+// 不校验 JSON —— 所以这里断言的是**钩子改值**，真 PG 的列默认值由 dbsmoke 守）。
+const assetSchema = `CREATE TABLE assets (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	asset_tag TEXT,
+	sn TEXT,
+	asset_type TEXT,
+	brand TEXT,
+	model TEXT,
+	site_id TEXT,
+	site_name TEXT,
+	rack_id TEXT,
+	rack_name TEXT,
+	rack_position TEXT,
+	purchase_date DATETIME,
+	warranty_end DATETIME,
+	vendor TEXT,
+	vendor_contact TEXT,
+	status TEXT DEFAULT 'active',
+	online_time DATETIME,
+	offline_time DATETIME,
+	last_known_ip4 TEXT,
+	last_known_ip6 TEXT,
+	retired_at DATETIME,
+	retired_reason TEXT,
+	retired_by TEXT,
+	business_unit TEXT,
+	service_name TEXT,
+	tags TEXT,
+	custom_fields TEXT,
+	net_box_id INTEGER,
+	source TEXT,
+	created_at DATETIME,
+	updated_at DATETIME
+)`
 
+// ==================== User.BeforeCreate ====================
 func TestUser_BeforeCreate_ID为空时自动赋值(t *testing.T) {
 	db := newTestDB(t, &models.User{})
 
@@ -371,4 +409,103 @@ func TestTicket_BeforeCreate_已有tickets时再Create_字母应递增(t *testin
 
 	// 不依赖具体字母，只验证格式
 	assert.Regexp(t, regexp.MustCompile(`^TICKET-\d{8}-[A-Z]$`), tk.TicketNumber)
+}
+
+// ==================== Asset.BeforeSave (G-20) ====================
+//
+// 缺陷背景：tags/custom_fields 是 jsonb，模型字段是 string，零值 "" 被写进 INSERT
+// → PG 22P02（invalid input syntax for type json）。真 PG 上 seed 的资产全建不出来、
+// POST /api/assets 不带 custom_fields 直接 500；sqlite 不校验 JSON 所以单测全绿。
+
+func TestAsset_BeforeSave_零值归一为合法JSON(t *testing.T) {
+	db := newTestDB(t, &models.Asset{})
+
+	asset := models.Asset{ID: uuid.New(), Name: "srv-zero", AssetType: "server"}
+	require.NoError(t, db.Create(&asset).Error)
+
+	assert.Equal(t, "[]", asset.Tags, "tags 零值应归一为 JSON 数组")
+	assert.Equal(t, "{}", asset.CustomFields, "custom_fields 零值应归一为 JSON 对象")
+
+	// 落库的也必须是归一后的值（钩子在驱动之前改值）
+	var got models.Asset
+	require.NoError(t, db.First(&got, "name = ?", "srv-zero").Error)
+	assert.Equal(t, "[]", got.Tags)
+	assert.Equal(t, "{}", got.CustomFields)
+}
+
+func TestAsset_BeforeSave_纯空白也归一(t *testing.T) {
+	db := newTestDB(t, &models.Asset{})
+
+	asset := models.Asset{ID: uuid.New(), Name: "srv-blank", Tags: "   ", CustomFields: "\t\n"}
+	require.NoError(t, db.Create(&asset).Error)
+
+	assert.Equal(t, "[]", asset.Tags)
+	assert.Equal(t, "{}", asset.CustomFields)
+}
+
+func TestAsset_BeforeSave_显式值不覆盖(t *testing.T) {
+	db := newTestDB(t, &models.Asset{})
+
+	asset := models.Asset{
+		ID:           uuid.New(),
+		Name:         "srv-explicit",
+		Tags:         `["web","production"]`,
+		CustomFields: `{"owner":"yanru"}`,
+	}
+	require.NoError(t, db.Create(&asset).Error)
+
+	assert.Equal(t, `["web","production"]`, asset.Tags, "显式值不应被钩子改写")
+	assert.Equal(t, `{"owner":"yanru"}`, asset.CustomFields)
+}
+
+// TestAsset_BeforeSave_Save路径也归一 是选钩子而非 gorm default tag 的直接理由：
+// default:'[]' 只在 Create 的参数替换里生效，Save/结构体 Updates 不吃，仍会写零值。
+func TestAsset_BeforeSave_Save路径也归一(t *testing.T) {
+	db := newTestDB(t, &models.Asset{})
+
+	asset := models.Asset{ID: uuid.New(), Name: "srv-save", Tags: `["web"]`, CustomFields: `{"a":1}`}
+	require.NoError(t, db.Create(&asset).Error)
+
+	// 模拟 PATCH 把两列清空后再 Save
+	asset.Tags = ""
+	asset.CustomFields = "  "
+	require.NoError(t, db.Save(&asset).Error)
+
+	assert.Equal(t, "[]", asset.Tags)
+	assert.Equal(t, "{}", asset.CustomFields)
+
+	var got models.Asset
+	require.NoError(t, db.First(&got, "name = ?", "srv-save").Error)
+	assert.Equal(t, "[]", got.Tags)
+	assert.Equal(t, "{}", got.CustomFields)
+}
+
+// TestAsset_BeforeSave_Updates路径不在覆盖范围 是 G-20 修复边界的**特征化测试**
+// （记录现状，不是期望行为；边界登记在 TODO G-21）。
+//
+// 实测（gorm v1.30 + sqlite）：
+//   - 结构体 Updates 的零值被 gorm 跳过 → 不写、不报错（静默 no-op）；
+//   - Select(...).Updates / Updates(map) 绕过模型钩子 → 写出 ”，
+//     真 PG 上是 22P02（map 传 JSON 数组会被渲染成 ('x') 同样 22P02，传 nil 则写入 NULL）。
+//
+// 将来若在 UpdateAsset 里做了入参规范化（G-21），本用例应改成断言归一结果。
+func TestAsset_BeforeSave_Updates路径不在覆盖范围(t *testing.T) {
+	db := newTestDB(t, &models.Asset{})
+
+	asset := models.Asset{ID: uuid.New(), Name: "srv-upd", Tags: `["web"]`, CustomFields: `{"a":1}`}
+	require.NoError(t, db.Create(&asset).Error)
+
+	// ① 结构体 Updates 的零值被跳过：原值保留，钩子不参与
+	require.NoError(t, db.Model(&asset).Updates(models.Asset{Tags: "", CustomFields: ""}).Error)
+	var got models.Asset
+	require.NoError(t, db.First(&got, "name = ?", "srv-upd").Error)
+	assert.Equal(t, `["web"]`, got.Tags, "结构体 Updates 的零值应被 gorm 跳过（静默 no-op）")
+	assert.Equal(t, `{"a":1}`, got.CustomFields)
+
+	// ② Select 强制写零值：绕过钩子，落 ''（真 PG 会 22P02）
+	require.NoError(t, db.Model(&asset).Select("tags", "custom_fields").
+		Updates(models.Asset{Tags: "", CustomFields: ""}).Error)
+	require.NoError(t, db.First(&got, "name = ?", "srv-upd").Error)
+	assert.Equal(t, "", got.Tags, "Select(...).Updates 绕过钩子，写出空串（G-21 边界）")
+	assert.Equal(t, "", got.CustomFields)
 }

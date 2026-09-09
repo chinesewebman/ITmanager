@@ -124,7 +124,7 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 			SN:           asset.SN,
 			SiteName:     asset.SiteName,
 			RackName:     asset.RackName,
-			Tags:         "{}",
+			Tags:         "[]",
 			CustomFields: "{}",
 			UpdatedAt:    now,
 		}

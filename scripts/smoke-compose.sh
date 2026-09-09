@@ -111,12 +111,17 @@ n="$(psql_q "select count(*) from user_roles ur join roles r on r.id=ur.role_id 
 [[ "$n" == "1" ]] || fail "set-role 后 user_roles 未同步为 auditor（实际 '$n'）"
 ok "set-role 生效（user_roles=auditor）"
 
-# seed 在独立库上跑：主库已有用户，seed 会跳过用户但刷资产错误（G-20 既存缺陷）
+# seed 在独立库上跑：主库已有用户，seed 会跳过用户直接建资产。
+# G-20：此前资产全建不出来却 exit 0；现在失败即非零退出，且这里再断言资产数与 jsonb 无 NULL。
 dc exec -T postgres createdb -U nmp itmanager_cli_seed
-dc exec -T -e NMP_DATABASE_NAME=itmanager_cli_seed api ./seed >/dev/null || fail "seed 失败"
+dc exec -T -e NMP_DATABASE_NAME=itmanager_cli_seed api ./seed >/dev/null || fail "seed 失败（G-20：非零退出）"
 n="$(psql_q "select count(*) from users where username='admin'" itmanager_cli_seed)"
 [[ "$n" == "1" ]] || fail "seed 未建出 admin（实际 '$n'）"
-ok "seed 生效（独立库 itmanager_cli_seed）"
+assets="$(psql_q 'select count(*) from assets' itmanager_cli_seed)"
+[[ "$assets" -gt 0 ]] || fail "seed 未建出任何资产（G-20 回归）"
+nulls="$(psql_q 'select count(*) from assets where tags is null or custom_fields is null' itmanager_cli_seed)"
+[[ "$nulls" == "0" ]] || fail "seed 资产里有 NULL jsonb（G-20 回归，实际 $nulls 行）"
+ok "seed 生效（独立库 itmanager_cli_seed：资产 $assets 行，NULL jsonb 0 行）"
 
 step "6. 经 nginx 登录（伪造 XFF）"
 login() {
@@ -129,6 +134,25 @@ login() {
 code="$(login "$ADMIN_PW")"
 [[ "$code" == "200" ]] || fail "经 nginx 的登录期望 200，实际 $code（链路或凭据有问题，不能放行）"
 ok "登录成功（200）"
+
+step "6b. 建资产：只给 name（G-20 端到端）"
+# 用 smokeadmin2 而不是 smokeadmin：step 5 的 set-role 已把 smokeadmin 降为 auditor，
+# auditor 无写权限（routes.go:286 的 canWrite → middleware/roles.go:124 → 403）。
+# 登录拿 httpOnly cookie（middleware/auth.go:101 读 auth_token），再调受保护接口。
+JAR="$WORK/cookies.txt"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -c "$JAR" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"smokeadmin2\",\"password\":\"$ADMIN_PW\"}" \
+  http://localhost:3000/api/auth/login)"
+[[ "$code" == "200" ]] || fail "6b 登录失败（$code）"
+code="$(curl -sS -o "$WORK/asset.json" -w '%{http_code}' -b "$JAR" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"smoke-asset-jsonb","asset_type":"server"}' \
+  http://localhost:3000/api/assets)"
+[[ "$code" == "201" ]] || { cat "$WORK/asset.json" >&2; fail "POST /api/assets 期望 201，实际 $code（G-20 回归）"; }
+grep -qF '"tags":"[]"' "$WORK/asset.json" || fail "响应 tags 不是 []：$(cat "$WORK/asset.json")"
+grep -qF '"custom_fields":"{}"' "$WORK/asset.json" || fail "响应 custom_fields 不是 {}：$(cat "$WORK/asset.json")"
+ok "资产创建成功（201，tags=[] custom_fields={}）"
 
 step "7. 审计 IP：伪造的 XFF 必须未被采信（G-7 端到端）"
 audit_ip() { psql_q "select ip from audit_logs where path='/api/auth/login' order by created_at desc limit 1"; }

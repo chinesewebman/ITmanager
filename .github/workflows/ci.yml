@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     # 为什么单独一个 job: 只有「真 Postgres 上跑生产迁移执行器」能抓到 schema 漂移
     # 与迁移不可重入（DDL 已提交、版本未记录的重放窗口）。单测全绿也挡不住这类缺陷。
-    # 两条路径: 空库全新安装 migrate.Up / 存量库(000001~000012)只应用 000013 + 回滚。
+    # 两条路径: 空库全新安装 migrate.Up / 存量库(000001~000012)只应用 000013 之后的迁移 + 回滚。
     services:
       postgres:
         image: postgres:18-alpine
@@ -122,7 +122,7 @@ jobs:
           set -euo pipefail
           q() { PGPASSWORD=smoke_pw psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -tAc "$1" "${@:2}"; }
 
-          # ① admin-bootstrap：空库 → 注入的 MigrationsFS 跑完 13 个迁移并建出种子角色
+          # ① admin-bootstrap：空库 → 注入的 MigrationsFS 跑完全部迁移并建出种子角色
           PGPASSWORD=smoke_pw createdb -h 127.0.0.1 -U postgres itmanager_cli_admin
           NMP_DATABASE_NAME=itmanager_cli_admin go run ./cmd/admin-bootstrap
           test "$(q "select count(*) from users where username='ciadmin'" itmanager_cli_admin)" = "1"
@@ -138,11 +138,13 @@ jobs:
           test "$(q "select role from users where username='ciadmin'" itmanager_cli_admin)" = "admin"
 
           # ③ seed：另一个空库，验证演示数据路径可用。
-          # 只断言用户路径——seed 的资产插入在真 PG 上另有既存缺陷（jsonb 空串，
-          # TODO G-20），且它失败时不改退出码，故这里不把资产纳入断言。
+          # G-20 后 seed 失败会以非零码退出（此前是静默 exit 0），所以这一步本身就是
+          # 「资产能不能建出来」的门禁；再断言资产数与 jsonb 无 NULL。
           PGPASSWORD=smoke_pw createdb -h 127.0.0.1 -U postgres itmanager_cli_seed
           NMP_DATABASE_NAME=itmanager_cli_seed go run ./cmd/seed
           test "$(q "select count(*) from users where username='admin'" itmanager_cli_seed)" = "1"
+          test "$(q "select count(*) from assets" itmanager_cli_seed)" -gt 0
+          test "$(q "select count(*) from assets where tags is null or custom_fields is null" itmanager_cli_seed)" = "0"
 
   frontend:
     name: Frontend (Node)

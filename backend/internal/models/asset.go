@@ -1,9 +1,11 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Asset 资产
@@ -58,6 +60,24 @@ type Asset struct {
 
 func (a *Asset) TableName() string {
 	return "assets"
+}
+
+// BeforeSave 把两个 jsonb 列的空值归一为合法 JSON 字面量（TODO G-20）。
+//
+// 为什么不用 gorm 的 default tag：
+//   - default:'[]' 只在 Create 时把字面量替换进参数（Save/Updates 不吃），仍会写出零值；
+//   - default:(-) 把保证寄托在「000014 迁移一定跑过」上，dev AutoMigrate 下会静默落 NULL。
+//
+// 钩子是应用层显式保证，覆盖 Create / Save / 结构体 Updates，且 sqlite 单测可断言。
+// 列默认值（migrations/000014）仍要保留，用于兜住非 gorm 写入方与受限 Select 插入。
+func (a *Asset) BeforeSave(tx *gorm.DB) error {
+	if strings.TrimSpace(a.Tags) == "" {
+		a.Tags = "[]"
+	}
+	if strings.TrimSpace(a.CustomFields) == "" {
+		a.CustomFields = "{}"
+	}
+	return nil
 }
 
 // AssetNetwork 网络接口

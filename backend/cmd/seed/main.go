@@ -28,11 +28,23 @@ func main() {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 
-	seedData(db)
+	// 种子失败必须以非零码退出：否则 make deploy / CI 会把「半种子状态」当成功
+	// （G-20 正是这么藏住的——资产全建不出来，进程仍 exit 0）。
+	if failures := seedData(db); failures > 0 {
+		log.Fatalf("❌ 初始数据有 %d 处失败（原因见上方日志）", failures)
+	}
 	log.Println("✅ 初始数据创建完成")
 }
 
-func seedData(db *gorm.DB) {
+// seedData 建演示数据，返回失败处数（0 = 全部成功）。
+func seedData(db *gorm.DB) int {
+	failures := 0
+	// fail 记录一处失败：计入计数并打印原因，末尾由 main 统一非零退出。
+	fail := func(what string, err error) {
+		failures++
+		log.Printf("%s: %v", what, err)
+	}
+
 	// 创建默认管理员用户
 	var userCount int64
 	db.Model(&models.User{}).Count(&userCount)
@@ -40,8 +52,8 @@ func seedData(db *gorm.DB) {
 		// 加密密码
 		hash, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
 		if err != nil {
-			log.Printf("密码加密失败: %v", err)
-			return
+			fail("密码加密失败", err)
+			return failures
 		}
 
 		admin := models.User{
@@ -56,8 +68,8 @@ func seedData(db *gorm.DB) {
 			MustChangePassword: true,
 		}
 		if err := db.Create(&admin).Error; err != nil {
-			log.Printf("创建管理员用户失败: %v", err)
-			return
+			fail("创建管理员用户失败", err)
+			return failures
 		}
 		log.Printf("创建管理员用户: admin (密码: admin123) — ⚠️ 首次登录需改密")
 
@@ -76,7 +88,9 @@ func seedData(db *gorm.DB) {
 			// C7: seed 用默认密码 user123 — 首次登录强改密
 			MustChangePassword: true,
 		}
-		db.Create(&operator)
+		if err := db.Create(&operator).Error; err != nil {
+			fail("创建普通用户失败", err)
+		}
 		log.Printf("创建普通用户: operator (密码: user123)")
 
 		readonly := models.User{
@@ -87,7 +101,9 @@ func seedData(db *gorm.DB) {
 			Role:         "readonly",
 			Status:       "active",
 		}
-		db.Create(&readonly)
+		if err := db.Create(&readonly).Error; err != nil {
+			fail("创建只读用户失败", err)
+		}
 		log.Printf("创建只读用户: viewer (密码: user123)")
 	}
 
@@ -95,7 +111,7 @@ func seedData(db *gorm.DB) {
 	db.Model(&models.Site{}).Count(&userCount)
 	if userCount > 0 {
 		log.Println("数据库已有数据，跳过初始化")
-		return
+		return failures
 	}
 
 	// ========== 创建机房 ==========
@@ -106,7 +122,7 @@ func seedData(db *gorm.DB) {
 	}
 	for _, site := range sites {
 		if err := db.Create(&site).Error; err != nil {
-			log.Printf("创建机房失败: %v", err)
+			fail("创建机房失败", err)
 			continue
 		}
 		log.Printf("创建机房: %s", site.Name)
@@ -120,7 +136,7 @@ func seedData(db *gorm.DB) {
 		}
 		for _, rack := range racks {
 			if err := db.Create(&rack).Error; err != nil {
-				log.Printf("创建机柜失败: %v", err)
+				fail("创建机柜失败", err)
 				continue
 			}
 			log.Printf("创建机柜: %s", rack.Name)
@@ -129,13 +145,13 @@ func seedData(db *gorm.DB) {
 			warrantyEnd := time.Now().AddDate(3, 0, 0)
 			purchaseDate := time.Now()
 			servers := []models.Asset{
-				{Name: fmt.Sprintf("web-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-001", site.Code), SN: fmt.Sprintf("SN-WEB-%s-001", rack.Name), AssetType: "server", Brand: "Dell", Model: "PowerEdge R740", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "1U", Vendor: "Dell Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "互联网业务", ServiceName: "Web服务", Tags: `["web", "production"]`},
-				{Name: fmt.Sprintf("app-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-002", site.Code), SN: fmt.Sprintf("SN-APP-%s-001", rack.Name), AssetType: "server", Brand: "HP", Model: "ProLiant DL380 Gen10", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "2U", Vendor: "HP Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "互联网业务", ServiceName: "应用服务", Tags: `["app", "production"]`},
-				{Name: fmt.Sprintf("db-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-003", site.Code), SN: fmt.Sprintf("SN-DB-%s-001", rack.Name), AssetType: "server", Brand: "Huawei", Model: "RH2288H V3", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "3U", Vendor: "Huawei Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "数据服务", ServiceName: "数据库", Tags: `["database", "production"]`},
+				{Name: fmt.Sprintf("web-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-001", site.Code, rack.Name), SN: fmt.Sprintf("SN-WEB-%s-001", rack.Name), AssetType: "server", Brand: "Dell", Model: "PowerEdge R740", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "1U", Vendor: "Dell Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "互联网业务", ServiceName: "Web服务", Tags: `["web", "production"]`},
+				{Name: fmt.Sprintf("app-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-002", site.Code, rack.Name), SN: fmt.Sprintf("SN-APP-%s-001", rack.Name), AssetType: "server", Brand: "HP", Model: "ProLiant DL380 Gen10", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "2U", Vendor: "HP Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "互联网业务", ServiceName: "应用服务", Tags: `["app", "production"]`},
+				{Name: fmt.Sprintf("db-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-003", site.Code, rack.Name), SN: fmt.Sprintf("SN-DB-%s-001", rack.Name), AssetType: "server", Brand: "Huawei", Model: "RH2288H V3", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "3U", Vendor: "Huawei Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "数据服务", ServiceName: "数据库", Tags: `["database", "production"]`},
 			}
 			for _, server := range servers {
 				if err := db.Create(&server).Error; err != nil {
-					log.Printf("创建服务器失败: %v", err)
+					fail("创建服务器失败", err)
 					continue
 				}
 				log.Printf("创建服务器: %s", server.Name)
@@ -147,18 +163,20 @@ func seedData(db *gorm.DB) {
 					{AssetID: server.ID, InterfaceName: "eth2", InterfaceType: "ethernet", IPv4Address: fmt.Sprintf("192.168.%s.12", rack.Row), MACAddress: generateMAC(), Status: "up", Purpose: "backup"},
 				}
 				for _, net := range networks {
-					db.Create(&net)
+					if err := db.Create(&net).Error; err != nil {
+						fail("创建网络接口失败", err)
+					}
 				}
 			}
 
 			// 创建网络设备
 			warrantyEndSwitch := time.Now().AddDate(5, 0, 0)
 			switches := []models.Asset{
-				{Name: fmt.Sprintf("switch-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-NET01", site.Code), SN: fmt.Sprintf("SN-SW-%s-001", rack.Name), AssetType: "switch", Brand: "Cisco", Model: "Catalyst 2960X-48FPS-L", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "40U", Vendor: "Cisco Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEndSwitch, BusinessUnit: "网络基础设施", ServiceName: "接入交换", Tags: `["switch", "access"]`},
+				{Name: fmt.Sprintf("switch-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-NET01", site.Code, rack.Name), SN: fmt.Sprintf("SN-SW-%s-001", rack.Name), AssetType: "switch", Brand: "Cisco", Model: "Catalyst 2960X-48FPS-L", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "40U", Vendor: "Cisco Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEndSwitch, BusinessUnit: "网络基础设施", ServiceName: "接入交换", Tags: `["switch", "access"]`},
 			}
 			for _, sw := range switches {
 				if err := db.Create(&sw).Error; err != nil {
-					log.Printf("创建交换机失败: %v", err)
+					fail("创建交换机失败", err)
 					continue
 				}
 				log.Printf("创建交换机: %s", sw.Name)
@@ -169,7 +187,9 @@ func seedData(db *gorm.DB) {
 						AssetID: sw.ID, InterfaceName: fmt.Sprintf("GigabitEthernet1/0/%d", i),
 						InterfaceType: "ethernet", IPv4Address: "", MACAddress: generateMAC(), Status: "up", Purpose: "access",
 					}
-					db.Create(&net)
+					if err := db.Create(&net).Error; err != nil {
+						fail("创建交换机端口失败", err)
+					}
 				}
 			}
 		}
@@ -200,7 +220,7 @@ func seedData(db *gorm.DB) {
 		alert.RepeatCount = 0
 
 		if err := db.Create(&alert).Error; err != nil {
-			log.Printf("创建告警失败: %v", err)
+			fail("创建告警失败", err)
 		}
 	}
 	log.Printf("创建 %d 条告警数据", len(alerts))
@@ -215,7 +235,7 @@ func seedData(db *gorm.DB) {
 	}
 	for _, rule := range rules {
 		if err := db.Create(&rule).Error; err != nil {
-			log.Printf("创建告警规则失败: %v", err)
+			fail("创建告警规则失败", err)
 		}
 	}
 	log.Printf("创建 %d 条告警规则", len(rules))
@@ -228,7 +248,7 @@ func seedData(db *gorm.DB) {
 	}
 	for _, ch := range channels {
 		if err := db.Create(&ch).Error; err != nil {
-			log.Printf("创建通知渠道失败: %v", err)
+			fail("创建通知渠道失败", err)
 		}
 	}
 	log.Printf("创建 %d 个通知渠道", len(channels))
@@ -243,12 +263,13 @@ func seedData(db *gorm.DB) {
 	for _, ticket := range tickets {
 		ticket.Tags = `["` + ticket.TicketType + `"]`
 		if err := db.Create(&ticket).Error; err != nil {
-			log.Printf("创建工单失败: %v", err)
+			fail("创建工单失败", err)
 		}
 	}
 	log.Printf("创建 %d 个工单", len(tickets))
 
 	log.Printf("创建完成")
+	return failures
 }
 
 // Helper functions

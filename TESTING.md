@@ -14,7 +14,7 @@
 | 包级语句覆盖 | `internal/middleware` **89.2%**、`internal/service` **83.3%**、`internal/migrate` **74.6%**、`internal/models` **43.4%**（models 多为纯结构体/标签，无逻辑可覆盖） |
 | 口径说明 | Go **没有分支覆盖工具**（`-covermode` 只有 set/count/atomic，全是语句/块级）。「分支覆盖 ≥80%」的验收意图改由「新增函数语句覆盖 100% + 关键分支表驱动显式枚举」落实 |
 | 新增守门测试 | `tests/schema_drift_test.go`（纯解析，无需 DB，永远跑）、`tests/db_smoke_test.go`（build tag `dbsmoke`，需真 Postgres） |
-| 真库冒烟 | `scripts/db_smoke.sh` —— 起临时 PG 容器跑两条路径：① 空库 `migrate.Up` 建库 + 核心链路 + 类型往返 + 唯一约束 + 迁移重放；② 存量库（000001~000012）只应用 000013 + role 回填 + 回滚不丢旧列。CI 已加 `dbsmoke` job（postgres service，脚本走 `SMOKE_PG_HOST` 外部模式） |
+| 真库冒烟 | `scripts/db_smoke.sh` —— 起临时 PG 容器跑两条路径：① 空库 `migrate.Up` 建库 + 核心链路 + 类型往返 + 唯一约束 + 迁移重放 + jsonb 列默认值；② 存量库（000001~000012，含预置的存量资产/用户）只应用 000013 之后的迁移 + role 回填 + jsonb 回填 + 回滚不丢旧列。CI 已加 `dbsmoke` job（postgres service，脚本走 `SMOKE_PG_HOST` 外部模式） |
 | 为什么加 | 单测走 sqlite/mock，与生产 `migrate.Up` 路径不同 —— 曾出现「psql 跑得通、生产执行器必炸」的假绿；也只有真库能发现类型转换（`inet→varchar` 带 `/32`、TEXT 上二次 JSON 编码）与 role 回填失效 |
 
 > 手工跑真库冒烟：`scripts/db_smoke.sh`（需 docker + 本地 postgres 镜像），或 `SMOKE_PG_HOST=127.0.0.1 SMOKE_PG_PORT=5432 scripts/db_smoke.sh`（复用已有 PG，需本机 psql）。

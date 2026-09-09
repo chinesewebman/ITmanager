@@ -59,7 +59,7 @@ func maskDSN(dsn string) string {
 }
 
 // TestDBSmoke_MigrateRunner 用生产迁移执行器(migrate.Up + embed 的真实 migrations)
-// 在空库上建库, 断言 13 个迁移全部应用成功。
+// 在空库上建库, 断言全部迁移应用成功。
 //
 // 为什么单独立一个用例: 早先的冒烟脚本用 psql 逐文件喂 SQL, 绕过了 internal/migrate
 // 的语句切分(execInTx → splitStatements), 于是 `DO $$ ... $$` 块在真生产路径上会失败
@@ -239,6 +239,84 @@ func TestDBSmoke_UpgradePath(t *testing.T) {
 		before, after, adminRole, plainRole)
 }
 
+// assertJSONB 按列名断言一条资产的 tags/custom_fields。
+//
+// 比较走 `col = $x::jsonb` 的**语义相等**，不是逐字节比 text：PG 把 jsonb 渲染成 text 时
+// 会规范化（`{"k":"v"}` → `{"k": "v"}`，冒号后补空格），键顺序也不保证。比 text 会假红。
+// 失败信息里带上 ::text 便于定位；COALESCE 把 NULL 折成 'NULL' 而不是扫描报错。
+func assertJSONB(t *testing.T, db *gorm.DB, whereVal, wantTags, wantCF string) {
+	t.Helper()
+	var tagsOK, cfOK bool
+	var tags, cf string
+	require.NoError(t, db.Raw(
+		`SELECT COALESCE(tags = ?::jsonb, false),
+		        COALESCE(custom_fields = ?::jsonb, false),
+		        COALESCE(tags::text, 'NULL'),
+		        COALESCE(custom_fields::text, 'NULL')
+		   FROM assets WHERE name = ?`, wantTags, wantCF, whereVal,
+	).Row().Scan(&tagsOK, &cfOK, &tags, &cf), "读取 %s 的 jsonb 列失败", whereVal)
+	assert.True(t, tagsOK, "%s.tags: want jsonb %s, got %s", whereVal, wantTags, tags)
+	assert.True(t, cfOK, "%s.custom_fields: want jsonb %s, got %s", whereVal, wantCF, cf)
+}
+
+// TestDBSmoke_AssetJSONBBackfill 守 000014 的**回填正确性**（升级路径）。
+//
+// 为什么必须预置数据：两条路径在 000014 执行时表里本来都没有资产，
+// `UPDATE ... WHERE tags IS NULL` 恒命中 0 行 —— 用例会变成「删掉回填也是绿」的假绿。
+// 脚本因此在升级库里预插两行：一行两列为 NULL（必须被回填），一行是合法 JSON（必须原样保留）。
+func TestDBSmoke_AssetJSONBBackfill(t *testing.T) {
+	db := openSmokeDB(t)
+
+	const legacyNull, legacyJSON = "legacy-null-jsonb", "legacy-json-jsonb"
+	var n int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM assets WHERE name IN (?, ?)`, legacyNull, legacyJSON).Scan(&n).Error)
+	if n == 0 {
+		if os.Getenv("SMOKE_EXPECT_UPGRADE") == "1" {
+			t.Fatalf("SMOKE_EXPECT_UPGRADE=1 但库里没有预置的存量资产 —— scripts/db_smoke.sh 的 seed 没生效")
+		}
+		t.Skip("非升级路径库（无预置存量资产），跳过")
+	}
+
+	migrate.FS = network_monitor_platform.MigrationsFS
+	require.NoError(t, migrate.Up(db), "存量库上 migrate.Up 失败")
+
+	assertJSONB(t, db, legacyNull, "[]", "{}")           // NULL → 回填
+	assertJSONB(t, db, legacyJSON, `["x"]`, `{"k":"v"}`) // 合法值 → 不被改写
+}
+
+// TestDBSmoke_AssetJSONBDefaults 是 G-20 的真库回归（全新安装路径）：
+// assets.tags / custom_fields 是 jsonb、模型字段是 Go string，零值 "" 被写进 INSERT
+// → PG `invalid input syntax for type json`（22P02）。sqlite 不校验 JSON，单测全绿也挡不住。
+// 本用例覆盖两条独立保证：① 应用层钩子 BeforeSave（gorm 写入路径）；② 列默认值（非 gorm 写入方）。
+func TestDBSmoke_AssetJSONBDefaults(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// ① gorm 建零值资产 —— 就是 cmd/seed 与 POST /api/assets 的路径
+	asset := models.Asset{Name: "jsonb-zero-" + uuid.NewString()[:8], AssetType: "server"}
+	require.NoError(t, db.Create(&asset).Error,
+		"gorm 建零值资产失败 —— BeforeSave 钩子没生效（G-20 回归：PG 报 22P02）")
+	assertJSONB(t, db, asset.Name, "[]", "{}")
+
+	// ② 裸插入省略两列 —— 列默认值必须补上（删掉 000014 的 SET DEFAULT 即红）
+	raw := "jsonb-raw-" + uuid.NewString()[:8]
+	require.NoError(t, db.Exec(
+		`INSERT INTO assets (asset_type, name) VALUES ('server', ?)`, raw).Error,
+		"裸插入省略 jsonb 列失败 —— 000014 的列默认值没生效")
+	assertJSONB(t, db, raw, "[]", "{}")
+
+	// ③ 列默认值本身。只断言「插入不报错」会漏掉「默认值没建」——
+	// 拿掉 SET DEFAULT 后裸插入会落 NULL 而不报错（这也是 down 后的组合状态）。
+	for col, want := range map[string]string{"tags": `'[]'::jsonb`, "custom_fields": `'{}'::jsonb`} {
+		var def *string
+		require.NoError(t, db.Raw(
+			`SELECT column_default FROM information_schema.columns
+			  WHERE table_name = 'assets' AND column_name = ?`, col).Scan(&def).Error)
+		require.NotNil(t, def, "assets.%s 没有列默认值 —— 000014 没跑或 SET DEFAULT 被删", col)
+		assert.Equal(t, want, *def, "assets.%s 的列默认值", col)
+	}
+}
+
 // newSmokeAsset 用迁移后的列名（000013 把 asset_name 改名为 name）插一条最小资产并返回其 id。
 // 返回值走 string 再 uuid.Parse —— 直接 Scan 到 uuid.UUID 会因为驱动返回 string 而报错。
 func newSmokeAsset(t *testing.T, db *gorm.DB, name string) uuid.UUID {
@@ -366,17 +444,31 @@ func TestDBSmoke_MigrationReapply(t *testing.T) {
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。
 //
-// 注意：本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
+// 注意两点：
+//  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
+//     新增 000014 后必须先回滚 14 再回滚 13，否则本用例会静默变成「回滚 000014」的空转。
+//  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 13`).
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 14`).
 		Scan(&applied).Error; err != nil || applied == 0 {
-		t.Skipf("库未应用到 000013，跳过回滚用例: %v", err)
+		t.Skipf("库未应用到 000014，跳过回滚用例: %v", err)
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// 第一次 Down = 回滚 000014：只撤列默认值，数据不动
+	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
+	var def *string
+	require.NoError(t, db.Raw(
+		`SELECT column_default FROM information_schema.columns
+		  WHERE table_name = 'assets' AND column_name = 'tags'`).Scan(&def).Error)
+	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
+	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
+
+	// 第二次 Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool

@@ -139,7 +139,9 @@ func newTestDB(t *testing.T) *gorm.DB {
 			retired_by TEXT,
 			created_at DATETIME,
 			updated_at DATETIME,
-			deleted_at DATETIME
+			deleted_at DATETIME,
+			-- 镜像真库约束（000001 的 unique_asset，000013 改名后指向 site_id）
+			UNIQUE (asset_tag, site_id)
 		)`,
 		`CREATE TABLE asset_networks (
 			id TEXT PRIMARY KEY,
@@ -322,6 +324,27 @@ func TestSeed_空DB_创建3个site(t *testing.T) {
 	assert.True(t, names["北京数据中心A"])
 	assert.True(t, names["上海数据中心B"])
 	assert.True(t, names["广州数据中心C"])
+}
+
+// TestSeed_资产asset_tag站内唯一 守真库约束 unique_asset UNIQUE(asset_tag, site_id)
+// （000001 建的是 (asset_tag, idc_id)，000013 把 assets.idc_id 改名为 site_id，约束随之指向新列）。
+//
+// 反证：把 asset_tag 里的 rack.Name 去掉（退回只带 site.Code + 序号）→ 同站点 4 个机柜的
+// 资产 tag 相同 → 真库 27+9 行 duplicate key。G-20 前这些失败被静默吞掉（exit 0，48 个演示资产
+// 只建出 12 个）；G-20 后 seed 以非零码退出，才让这个存量缺陷浮出。
+func TestSeed_资产asset_tag站内唯一(t *testing.T) {
+	db := newTestDB(t)
+	require.Equal(t, 0, seedData(db), "seedData 不应有任何失败处")
+
+	var dup int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM (SELECT asset_tag, site_id FROM assets
+		    GROUP BY asset_tag, site_id HAVING count(*) > 1)`).Scan(&dup).Error)
+	assert.Zero(t, dup, "同站点内 asset_tag 必须唯一，否则真库 unique_asset 冲突")
+
+	var assets int64
+	require.NoError(t, db.Model(&models.Asset{}).Count(&assets).Error)
+	assert.Equal(t, int64(48), assets, "3 站点 × 4 机柜 × (3 服务器 + 1 交换机) = 48")
 }
 
 func TestSeed_空DB_创建告警(t *testing.T) {
