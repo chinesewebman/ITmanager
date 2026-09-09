@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/redact"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -143,14 +146,15 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 		}
 		sender, err := w.resolver(ch)
 		if err != nil {
-			log.Printf("[notification subscriber] resolver err for channel %s: %v", ch.Name, err)
+			// G-28：第三方 sender（RegisterSender）的构造错误不受我们控制，出口统一脱敏
+			log.Printf("[notification subscriber] resolver err for channel %s: %s", ch.Name, redact.Text(err.Error()))
 			continue
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = sender.Send(sendCtx, recipient, content)
 		cancel()
 		if err != nil {
-			log.Printf("[notification subscriber] send err for channel %s: %v", ch.Name, err)
+			log.Printf("[notification subscriber] send err for channel %s: %s", ch.Name, redact.Text(err.Error()))
 		}
 	}
 	return nil
@@ -269,16 +273,29 @@ func (w *Worker) markSuccess(ctx context.Context, id uuid.UUID) {
 }
 
 func (w *Worker) markFailed(ctx context.Context, id uuid.UUID, errMsg string) {
-	if len(errMsg) > 500 {
-		errMsg = errMsg[:500]
+	// G-28：错误文本可能带凭据（URL 的 query/path/userinfo）→ 先脱敏。
+	// 顺序不是安全边界（脱敏是形状识别，截断后残余部分照样会被识别；实测先截断
+	// 也不泄漏），先脱敏只是为了让截断作用在最终写库的文本上。
+	errMsg = redact.Text(errMsg)
+	// 错误文本来自第三方（SMTP 服务端文本、上游响应体），可能是**非法 UTF-8**。
+	// 非法字节让 PostgreSQL 直接拒收（22021）→ 这一行永远停在 pending 被无限重发，
+	// 且 ≤500 rune 时下面的截断分支根本走不到（审计 P4）。
+	errMsg = strings.ToValidUTF8(errMsg, "�")
+	// 按 rune 截断：列是 varchar(500)（**字符**数，migrations/000009），按字节截断
+	// 会切断多字节字符 → PostgreSQL 拒收（22021）→ 这一行永远停在 pending 被重发。
+	if utf8.RuneCountInString(errMsg) > 500 {
+		errMsg = string([]rune(errMsg)[:500])
 	}
-	w.db.WithContext(ctx).
+	if err := w.db.WithContext(ctx).
 		Model(&models.NotificationLog{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"status":    "failed",
 			"error_msg": errMsg,
-		})
+		}).Error; err != nil {
+		// 旧版丢弃返回值：写库失败无声无息（行留在 pending 被无限重发）
+		log.Printf("[notification worker] markFailed %s: %s", id, redact.Text(err.Error()))
+	}
 }
 
 // markSkipped channel 禁用, 标记 success 不重试

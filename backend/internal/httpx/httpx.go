@@ -26,7 +26,20 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"network-monitor-platform/internal/redact"
 )
+
+// redactedErr 让离开 httpx 的错误文本先过脱敏（TODO G-28）。
+//
+// 为什么在源头做：`http.Client.Do` / `http.NewRequestWithContext` 的失败都是 *url.Error，
+// 其 Error() 含完整 URL——集成 URL 的 query（`?access_token=`）、path（飞书/Slack hook
+// token）、userinfo 都在里面。调用方只会 `log.Printf("%v", err)`，逐个出口接脱敏必然漏，
+// 所以在这里一次性收口；Unwrap 保留错误链，errors.Is/As 照旧。
+type redactedErr struct{ err error }
+
+func (e *redactedErr) Error() string { return redact.Text(e.err.Error()) }
+func (e *redactedErr) Unwrap() error { return e.err }
 
 // Config 客户端配置。
 type Config struct {
@@ -112,7 +125,7 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 		if err := ctx.Err(); err != nil {
 			// 🐛 BUG#11: ctx 取消是用户主动行为，不应该触发熔断计数
 			// （之前 beforeRequest 返过或请求中被 cancel，都不该算服务端失败）
-			return nil, 0, fmt.Errorf("httpx: ctx: %w", err)
+			return nil, 0, &redactedErr{fmt.Errorf("httpx: ctx: %w", err)}
 		}
 
 		// 退避（除首次）
@@ -164,7 +177,7 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 		if resp.StatusCode >= 400 {
 			// 🐛 BUG#11: 4xx 是客户端错（参数错、权限错），不是服务端问题
 			// 不应触发熔断（之前 c.afterFailure 误触）
-			return respBody, resp.StatusCode, fmt.Errorf("httpx: %s %s → %d: %s", method, path, resp.StatusCode, string(respBody))
+			return respBody, resp.StatusCode, &redactedErr{fmt.Errorf("httpx: %s %s → %d: %s", method, path, resp.StatusCode, string(respBody))}
 		}
 
 		// 2xx/3xx → 成功
@@ -173,7 +186,7 @@ func (c *Client) DoWithHeaders(ctx context.Context, method, path string, body io
 	}
 
 	c.afterFailure()
-	return nil, 0, fmt.Errorf("httpx: %s %s 失败 %d 次: %w", method, path, attempts, lastErr)
+	return nil, 0, &redactedErr{fmt.Errorf("httpx: %s %s 失败 %d 次: %w", method, path, attempts, lastErr)}
 }
 
 // applyAuth 注入鉴权 header。

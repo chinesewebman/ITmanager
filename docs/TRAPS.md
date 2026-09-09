@@ -179,6 +179,29 @@
 
 ---
 
+### T-34. 凭据藏在**错误文本**里：`*url.Error` 会带着完整 URL 走遍四个出口
+**状态**: FIXED | **类别**: 凭据泄漏 / 错误值传播 (G-28 轮) | **修复日期**: 2026-09-09
+**现象**：钉钉 webhook 的 token 在 query（`…/robot/send?access_token=SECRET`）、飞书/Slack 的在 path（`/hook/<token>`、`/services/T/B/SECRET`）、自建 webhook 的在 header、集成 URL 可能在 userinfo。发送失败时 Go 返回 `*url.Error`，`Error()` 是 `"%s %q: %s"`（`net/url/url.go:29-36`）——**完整 URL 连凭据一起**。同一个错误值同时流进四个出口：① 应用日志（标准库 `log` 默认 stderr，`log.go:87`，`log.level` 管不到）② `notification_logs.error_msg`（varchar(500)，进备份、只读 DB 账号可见）③ `gin.DefaultErrorWriter`（`apierr.Respond` 5xx 分支）④ HTTP 400 响应体（`apierr.BadRequest` 的 `internalErr` 是 nil，绕开了 5xx 的脱敏分支）。
+**根因**：G-16 堵的是 **SQL 参数**，这是**错误文本**，两条互不相干的路径（同 T-32 的教训）；而「脱敏」如果按参数名做黑名单（`access_token`/`key`/`secret`…），必然漏掉 path、header、userinfo 三种形态。
+**关键事实（实测，别凭直觉）**：
+- `http.Client.do` 的 `stripPassword`（`client.go:624-631`/`:1034`）**只掩 userinfo 的密码**，query 与 path 里的 token 原样保留；`url.Parse` 的失败文本**连 userinfo 都不掩**。
+- 规则必须是**结构性**的：形状像 URL 就塌缩成 `scheme://host`（丢 userinfo/path/query），再做 `Authorization: Bearer|Basic` 与键值形态的值替换。V-5 用 6 类绕过 + 3 类「不误伤」钉住（SQL 约束名、`?page=2`、`monkey=banana` 必须原样返回）。
+- **脱敏与截断的先后不是安全边界**：审查一度把「先截断后脱敏」列为应被捕获的变异（M5），实测四种构造下**两者都不泄漏**——规则 1 是形状识别（URL 被截断后仍是 URL 形状 → `<invalid-url>`），规则 3 的值类以定界符/串尾为界。把顺序写成注释里的「安全理由」是自欺，已改写；变异表移除该条并写明依据。
+- 值类的**边界**是双刃：`access_token=SECRET中中中…` 会把后续汉字一并吞掉（过度脱敏、不泄漏）——测试构造必须在值后加定界符，否则测的不是你想测的东西。
+**检测方法**：
+- 失败要**确定性**：`net.Listen` 拿地址后**只 bind 不 Accept** + 200ms ctx 超时 → `errors.Is(err, context.DeadlineExceeded)` 成立、`*url.Error{Op:"Post"}`（实测）。`connection refused` 的文案跨平台不稳，别拿它当锚。
+- 正向断言必须成对：先 `require.Contains(err, "http://127.0.0.1:")`（`scheme://host` 只可能来自脱敏函数 → 钉住它真被调用），再 `NotContains(SECRET)`。只写 NotContains 会在「错误被吞成空串」时假绿。
+- 入库路径要用**真 sqlite 写+读回**（sqlmock 断不了 map 更新的参数值），并断言 `status="failed"`（证明 UPDATE 真生效——旧版吞掉 `.Error` 会让行停在 pending 被无限重发）。
+- 截断按 **rune**：列是 `varchar(500)`（**字符**数），按字节切会切断多字节字符 → PG 报 `22021` 拒收 → 该行永远 pending。测试用「18 字节键值 + 600 个三字节汉字」让 500 的边界落在字符中间。
+**第二轮（2026-09-09 晚，审计回执）——三条新增教训**：
+- **凭据类错误要在「源头」收口，出口兜底只是补充**：G-28 首轮在 4 个日志出口接脱敏，却漏了 `integration/service.go:282/289/296` 与 `metric_sync.go:111` 四处同类写法（安全审计 H-1，实测集成 URL 的 `?access_token=` 原文落 stderr）。逐个出口补 = 下次新增日志点又漏；正确位置是**错误产生处**（`httpx` 出口包一层 `redactedErr`，`Error()` 过 `redact.Text`、`Unwrap()` 保链），一处覆盖全部消费者。
+- **正则值类的「排除集」要按语义最小化**：值类排除 `'`/`\` 会让 `?auth=AB'CDEF` 的尾部残留（M-3）；排除 `}` `]` `<` `>` 会让 `{"password":"ab}c"}` 漏尾、`password=}SECRET` **整条不匹配**（正确性审计 P1）。判断标准：这个字符**真的**是值的定界符吗？query/JSON 里真正的定界符只有空白、引号、`&,;`。
+- **`scheme://` 不是 URL 的唯一形状**：配置里漏写 scheme 的 `//host/path/SECRET`（M-2）整条不匹配 → 尾部泄漏；`URL()` 还要挡 `https://user:`（net/url 把无密码 userinfo 并进 `Host`，原样返回等于回显凭据）。
+- **错误文本可能是非法 UTF-8**：第三方（SMTP 服务端、上游响应体）可控文本写进 `varchar` 列前必须 `strings.ToValidUTF8`——PG 22021 拒收 → 行停在 `pending` 被**无限重发**（正确性审计 P4；`utf8.ValidString` 在 sqlite 上测得出，PG 上才致命）。
+**推广**：审计一个「值会不会泄漏」时，先列**这个值有几个出口**（日志 / DB 列 / 错误 writer / HTTP body），再列**它能以几种形态出现**（URL query / path / userinfo / header / JSON 键值）——只做其中一格就是假的安全感；最后问一句：**脱敏点是不是在错误产生处**（若不是，列出「还有哪些出口没接」）。
+
+---
+
 ## 二、前端陷阱
 
 ### T-16. Settings.tsx 死表单 (B1-1/B1-2 修复中)
@@ -305,6 +328,7 @@
 | — (G-22 轮) | T-31 | FIXED |
 | — (G-16 轮) | T-32 | FIXED |
 | — (G-16 轮) | T-33 | FIXED |
+| — (G-28 轮) | T-34 | FIXED |
 
 ---
 

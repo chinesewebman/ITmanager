@@ -21,11 +21,36 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"strings"
 	"time"
 
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/redact"
 )
+
+// urlErrCause 剥掉 *url.Error 的外壳。
+//
+// G-28：http.Client.Do 与 http.NewRequestWithContext 的失败都是 *url.Error，其 Error()
+// 含**完整 URL**（钉钉的 access_token 在 query、飞书/Slack 的在 path、集成 URL 可能在
+// userinfo），原样 return 会把凭据带进应用日志与 notification_logs.error_msg。
+// 这里只取底层 cause（`dial tcp …`、`context deadline exceeded`），URL 由调用方用
+// redact.URL 缩成 scheme://host。
+// 重定向链可能嵌套，故递归剥；上限 4 层，内层为 nil 或超限一律返回固定文案 ——
+// 宁可丢诊断信息，也不回传带 URL 的原串。
+func urlErrCause(err error) error {
+	for i := 0; i < 4; i++ {
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			return err
+		}
+		if ue.Err == nil {
+			break
+		}
+		err = ue.Err
+	}
+	return errors.New("未知错误")
+}
 
 // Sender 单一渠道发送器接口
 type Sender interface {
@@ -134,12 +159,14 @@ func (d *DingTalkSender) Send(ctx context.Context, _, content string) error {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.cfg.WebhookURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		// 不包原 err：url.Parse 的失败文本含完整 URL（access_token 就在 query 里）
+		return fmt.Errorf("dingtalk: 无效的 webhook_url: %w", urlErrCause(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return err
+		// G-28：只留 scheme://host + 底层 cause，不带 URL 的 path/query
+		return fmt.Errorf("dingtalk: POST %s: %w", redact.URL(d.cfg.WebhookURL), urlErrCause(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -276,7 +303,8 @@ func (w *WebhookSender) Send(ctx context.Context, _, content string) error {
 	body, _ := json.Marshal(map[string]string{"content": content})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		// 不包原 err：url.Parse 的失败文本含完整 URL（飞书/Slack 的 token 在 path 里）
+		return fmt.Errorf("webhook: 无效的 url: %w", urlErrCause(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if w.cfg.Secret != "" {
@@ -284,7 +312,8 @@ func (w *WebhookSender) Send(ctx context.Context, _, content string) error {
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return err
+		// G-28：只留 scheme://host + 底层 cause，不带 URL 的 path/query
+		return fmt.Errorf("webhook: POST %s: %w", redact.URL(w.cfg.URL), urlErrCause(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -295,4 +296,45 @@ func TestDo_HalfOpen_并发只放一个探针(t *testing.T) {
 		"half-open 探针并发：实际打到的请求应 < 5，实际 %d", calls)
 	t.Logf("half-open 探针并发：实际 %d 次通过，%d 次被熔断",
 		atomic.LoadInt32(&calls), halfOpenRejects)
+}
+
+// TestDo_错误文本不含URL凭据 — TODO G-28 守门用例。
+//
+// 集成层只会 `log.Printf("... %v", err)`（internal/integration/service.go:282/289/296、
+// metric_sync.go:111），而 http.Client.Do / NewRequestWithContext 的失败都是 *url.Error，
+// Error() 里带**完整 URL**（query 的 access_token、path 的 hook token）。逐个出口接脱敏
+// 必然漏，所以在 httpx 出口收口——这两个用例分别钉住两条出错路径。
+func TestDo_错误文本不含URL凭据(t *testing.T) {
+	const secret = "SUPERSECRET"
+
+	t.Run("网络错（重试耗尽）", func(t *testing.T) {
+		cfg := DefaultConfig("http://127.0.0.1:1/api?access_token=" + secret)
+		cfg.MaxRetries = 0 // 不打退避，保持测试快
+		c := New(cfg, "test", &fakeRecorder{status: map[string]int{}})
+		_, _, err := c.Do(testCtx(), "GET", "/x", nil)
+		if err == nil {
+			t.Fatal("期望网络错")
+		}
+		assert.NotContains(t, err.Error(), secret, "URL query 里的 token 不得出现在错误文本里")
+		assert.Contains(t, err.Error(), "http://127.0.0.1:1", "host 保留，便于定位")
+		// 错误链保留：调用方仍能 errors.As 到底层 *url.Error
+		var uerr *url.Error
+		assert.True(t, errors.As(err, &uerr), "Unwrap 必须保留错误链")
+	})
+
+	t.Run("4xx 响应体", func(t *testing.T) {
+		// 上游把请求 URL 回显在 body 里：4xx 分支把 body 拼进错误文本。
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"bad","hook":"https://hooks.slack.com/services/T/B/` + secret + `"}`))
+		}))
+		defer srv.Close()
+		c := New(DefaultConfig(srv.URL), "test", &fakeRecorder{status: map[string]int{}})
+		_, _, err := c.Do(testCtx(), "GET", "/x", nil)
+		if err == nil {
+			t.Fatal("期望 4xx 错")
+		}
+		assert.NotContains(t, err.Error(), secret, "上游响应体里的 URL 凭据也要塌缩")
+		assert.Contains(t, err.Error(), "→ 400")
+	})
 }

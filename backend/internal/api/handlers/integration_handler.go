@@ -8,6 +8,7 @@ import (
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/integration"
+	"network-monitor-platform/internal/redact"
 
 	"github.com/gin-gonic/gin"
 )
@@ -118,7 +119,8 @@ func (h *IntegrationHandler) TestZabbix(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.svc.TestZabbixConnection(ctx); err != nil {
-		apierr.BadRequest(c, "Zabbix 连通失败: "+err.Error())
+		// G-28：BadRequest 的 internalErr 是 nil，不走 apierr 的脱敏分支 → 这里自己过一遍
+		apierr.BadRequest(c, "Zabbix 连通失败: "+redact.Text(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "Zabbix 连通 OK"})
@@ -171,7 +173,7 @@ func (h *IntegrationHandler) TestNetBox(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.svc.TestNetBoxConnection(ctx); err != nil {
-		apierr.BadRequest(c, "NetBox 连通失败: "+err.Error())
+		apierr.BadRequest(c, "NetBox 连通失败: "+redact.Text(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "NetBox 连通 OK"})
@@ -210,7 +212,7 @@ func (h *IntegrationHandler) TestGLPI(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.svc.TestGLPIConnection(ctx); err != nil {
-		apierr.BadRequest(c, "GLPI 连通失败: "+err.Error())
+		apierr.BadRequest(c, "GLPI 连通失败: "+redact.Text(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "GLPI 连通 OK"})

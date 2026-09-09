@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 
+	"network-monitor-platform/internal/redact"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -34,10 +36,11 @@ const (
 // 内部错误（DB / 第三方）只暴露通用文案，原始 err 记到日志。
 func Respond(c *gin.Context, status int, code, message string, internalErr error) {
 	if internalErr != nil && status >= 500 {
-		// 5xx 错误：仅记录原始 err，对外不暴露
+		// 5xx 错误：仅记录原始 err，对外不暴露。
+		// G-28：内部错误文本可能带凭据（*url.Error 的完整 URL、DSN、userinfo）→ 出口脱敏。
 		gin.DefaultErrorWriter.Write([]byte(
 			"[ERR] " + c.Request.Method + " " + c.Request.URL.Path +
-				" code=" + code + " internal=" + internalErr.Error() + "\n",
+				" code=" + code + " internal=" + redact.Text(internalErr.Error()) + "\n",
 		))
 	}
 	c.AbortWithStatusJSON(status, ErrorResponse{

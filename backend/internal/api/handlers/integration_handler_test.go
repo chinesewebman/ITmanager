@@ -9,6 +9,7 @@ import (
 
 	"network-monitor-platform/internal/api/handlers"
 	"network-monitor-platform/internal/config"
+	"network-monitor-platform/internal/integration"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -441,4 +442,53 @@ func TestTestGLPI_svcNil_返500(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// ==================== G-28：连通测试失败回显不泄漏凭据 ====================
+
+// newIntegrationRouterWithRealSvc TestZabbix 需要非 nil svc（nil 会 panic）。
+func newIntegrationRouterWithRealSvc(cfg *config.Config) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := handlers.NewIntegrationHandler(integration.NewIntegrationService(cfg, nil), cfg)
+	r.POST("/integrations/zabbix/test", h.TestZabbix)
+	return r
+}
+
+// zabbixTestMessage 发一次连通测试并解出 message 字段。
+// 注意：HTTP body 里的 < > 会被 JSON 编码成 < / >，不能直接断言原文。
+func zabbixTestMessage(t *testing.T, r *gin.Engine) (int, string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/integrations/zabbix/test", nil))
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "响应必须是合法 JSON")
+	return w.Code, body.Message
+}
+
+// 端口 1 无人监听 → 立刻 refuse（不联网、不等超时）。query 里的 token 是 stdlib
+// stripPassword 不管的（它只掩 userinfo），必须靠 redact 兜住。
+func TestTestZabbix_失败回显不泄漏URL凭据(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://127.0.0.1:1/api_jsonrpc.php?auth=SUPERSECRET", "")
+	code, msg := zabbixTestMessage(t, newIntegrationRouterWithRealSvc(cfg))
+
+	require.Equal(t, http.StatusBadRequest, code)
+	require.Contains(t, msg, "Zabbix 连通失败")
+	require.Contains(t, msg, "http://127.0.0.1:1", "URL 必须塌缩成 scheme://host")
+	assert.NotContains(t, msg, "SUPERSECRET")
+	assert.NotContains(t, msg, "auth=")
+}
+
+// URL 解析失败这条路径没有 http.Client 的 stripPassword，url.Error 原样带 userinfo。
+func TestTestZabbix_非法URL不泄漏userinfo(t *testing.T) {
+	cfg := minimalCfgForTest("", "http://admin:SUPERSECRET@[::1/api_jsonrpc.php", "")
+	code, msg := zabbixTestMessage(t, newIntegrationRouterWithRealSvc(cfg))
+
+	require.Equal(t, http.StatusBadRequest, code)
+	require.Contains(t, msg, "missing ']' in host", "保留 parse 原因，便于排障")
+	assert.NotContains(t, msg, "SUPERSECRET")
+	assert.NotContains(t, msg, "admin:")
 }

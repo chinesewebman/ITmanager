@@ -1,14 +1,21 @@
 package notification
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/models"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -16,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -309,4 +317,208 @@ func TestWorker_Stop_幂等(t *testing.T) {
 	}()
 	w.Stop()
 	cancel()
+}
+
+// ==================== G-28：错误文本不泄漏凭据 ====================
+
+// newDeadListener 起一个只 bind 不 Accept 的 TCP 监听：三次握手在内核 backlog 里完成，
+// 请求写出去后没有响应 → 客户端 ctx 超时。比"连不上"稳（refuse 的文案跨平台不一致）。
+func newDeadListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
+}
+
+// newSQLiteDB 开真 sqlite：markFailed 的断言要看写库后的行，sqlmock 断不了参数值。
+func newSQLiteDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1) // :memory: 每条连接一个独立库
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, db.Exec(`CREATE TABLE notification_logs (
+		id TEXT PRIMARY KEY,
+		alert_id TEXT,
+		channel_id TEXT,
+		channel_name TEXT,
+		recipient TEXT,
+		content TEXT,
+		status TEXT,
+		error_msg TEXT,
+		sent_at DATETIME,
+		created_at DATETIME
+	)`).Error)
+	return db
+}
+
+func TestDingTalkSender_发送失败不泄漏URL凭据(t *testing.T) {
+	ln := newDeadListener(t)
+	secretURL := "http://" + ln.Addr().String() + "/robot/send?access_token=SUPERSECRET"
+	s, err := NewDingTalkSender(&models.NotificationChannel{Config: `{"webhook_url":"` + secretURL + `"}`})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err = s.Send(ctx, "", "内容")
+
+	require.Error(t, err)
+	// 正向：底层 cause 必须保留，别把诊断信息一起丢了
+	require.True(t, errors.Is(err, context.DeadlineExceeded), "应保留底层 ctx 超时: %v", err)
+	// 正向：scheme://host 只可能来自 redact.URL → 钉住它真的被调用
+	require.Contains(t, err.Error(), "http://127.0.0.1:", "URL 必须塌缩成 scheme://host")
+	// 反向：凭据与 URL 细节不得出现
+	assert.NotContains(t, err.Error(), "SUPERSECRET")
+	assert.NotContains(t, err.Error(), "access_token")
+	assert.NotContains(t, err.Error(), "/robot/send")
+}
+
+func TestWebhookSender_发送失败不泄漏URL凭据(t *testing.T) {
+	ln := newDeadListener(t)
+	secretURL := "http://" + ln.Addr().String() + "/services/T000/B000/SECRETPATH"
+	s, err := NewWebhookSender(&models.NotificationChannel{
+		Config: `{"url":"` + secretURL + `","secret":"S3CR3THDR"}`,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err = s.Send(ctx, "", "内容")
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, context.DeadlineExceeded), "应保留底层 ctx 超时: %v", err)
+	require.Contains(t, err.Error(), "http://127.0.0.1:", "URL 必须塌缩成 scheme://host")
+	assert.NotContains(t, err.Error(), "SECRETPATH")
+	assert.NotContains(t, err.Error(), "services")
+	assert.NotContains(t, err.Error(), "S3CR3THDR", "header 里的 secret 也不该出现在错误文本")
+}
+
+// 非法 URL 走的是 NewRequestWithContext（url.Parse）分支：这条路径没有 http.Client
+// 的 stripPassword，url.Error 原样带 userinfo/query。
+func TestDingTalkSender_非法URL不泄漏原串(t *testing.T) {
+	const bad = "http://[::1"
+	s, err := NewDingTalkSender(&models.NotificationChannel{Config: `{"webhook_url":"` + bad + `"}`})
+	require.NoError(t, err)
+
+	err = s.Send(context.Background(), "", "内容")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing ']' in host", "保留 parse 原因，便于排障")
+	assert.NotContains(t, err.Error(), bad)
+}
+
+// TestMarkFailed_脱敏且按rune截断 同时钉三件事：
+//  1. 凭据被 redact.Text 抹掉（变异：去掉脱敏 → SUPERSECRET 泄漏）
+//  2. 按 rune 截断（变异：errMsg[:500] 字节截断 → 切断汉字 → ValidString 红）
+//  3. UPDATE 真的生效（变异：吞掉 .Error → 行停在 pending → status 断言红）
+func TestMarkFailed_脱敏且按rune截断(t *testing.T) {
+	db := newSQLiteDB(t)
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour})
+
+	id := uuid.New()
+	require.NoError(t, db.Create(&models.NotificationLog{ID: id, Status: "pending"}).Error)
+
+	// 18 字节键值（值后有空格定界，否则值类会把汉字一起吞掉）+ 600 个三字节汉字：
+	// 脱敏后 618 rune / 1818 字节，rune 与字节两个维度都超 500，且 500 的边界落在
+	// 汉字中间（500-18=482 不是 3 的倍数）——字节截断必切断字符。
+	w.markFailed(context.Background(), id, "access_token=SUPERSECRET x"+strings.Repeat("中", 600))
+
+	var got models.NotificationLog
+	require.NoError(t, db.First(&got, "id = ?", id).Error, "行必须还在")
+	require.Equal(t, "failed", got.Status, "UPDATE 必须真的写进去了")
+	require.Contains(t, got.ErrorMsg, "access_token=***", "键名保留、值抹掉")
+	assert.NotContains(t, got.ErrorMsg, "SUPERSECRET")
+	assert.Equal(t, 500, utf8.RuneCountInString(got.ErrorMsg), "按 rune 截到 500（varchar(500) 是字符数）")
+	assert.True(t, utf8.ValidString(got.ErrorMsg), "截断不得切断多字节字符（PG 会 22021 拒收）")
+}
+
+// TestMarkFailed_非法UTF8被清理 — 审计 P4：≤500 rune 的非法 UTF-8 旧版原样写库，
+// 真 PG 会 22021 拒收 → 行永远停在 pending 被无限重发（sqlite 测不出编码）。
+func TestMarkFailed_非法UTF8被清理(t *testing.T) {
+	db := newSQLiteDB(t)
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour})
+
+	id := uuid.New()
+	require.NoError(t, db.Create(&models.NotificationLog{ID: id, Status: "pending"}).Error)
+
+	// SMTP 服务端可控文本可携带任意字节（textproto.Error.Msg）
+	w.markFailed(context.Background(), id, "smtp: 535 \xff\xfe auth failed")
+
+	var got models.NotificationLog
+	require.NoError(t, db.First(&got, "id = ?", id).Error)
+	require.Equal(t, "failed", got.Status)
+	assert.True(t, utf8.ValidString(got.ErrorMsg), "非法字节必须被替换，否则 PG 22021 拒收")
+	assert.Contains(t, got.ErrorMsg, "smtp: 535")
+}
+
+// TestURLErrCause_剥壳与兜底 钉住「宁可丢诊断信息也不回传原串」的兜底分支。
+func TestURLErrCause_剥壳与兜底(t *testing.T) {
+	inner := errors.New("dial tcp: refused")
+	// 剥一层：拿到底层 cause
+	assert.Equal(t, inner, urlErrCause(&url.Error{Op: "Post", URL: "http://h/p?token=SECRET", Err: inner}))
+	// 非 url.Error 原样返回
+	assert.Equal(t, inner, urlErrCause(inner))
+	// Err 为 nil → 固定文案，绝不回传带 URL 的原串
+	assert.EqualError(t, urlErrCause(&url.Error{Op: "Post", URL: "http://h/p?token=SECRET", Err: nil}), "未知错误")
+	// 嵌套超过 4 层 → 固定文案
+	var deep error = inner
+	for i := 0; i < 5; i++ {
+		deep = &url.Error{Op: "Post", URL: "http://h/p?token=SECRET", Err: deep}
+	}
+	assert.EqualError(t, urlErrCause(deep), "未知错误")
+}
+
+// markFailed 写库失败必须留痕：旧版丢弃返回值 → 行永远停在 pending 被无限重发。
+func TestMarkFailed_写库失败记日志(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	db, mock := newMockDB(t)
+	// gorm 默认把 Updates 包在事务里：BEGIN → UPDATE（失败）→ ROLLBACK
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE "notification_logs"`).WillReturnError(errors.New("boom: connection refused"))
+	mock.ExpectRollback()
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour})
+	w.markFailed(context.Background(), uuid.New(), "x")
+
+	require.Contains(t, buf.String(), "markFailed", "写库失败必须留痕")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestHandleAlertEvent_发送失败日志不泄漏URL凭据(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	db, mock := newMockDB(t)
+	chID := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(chID.String(), "钉钉群", "dingtalk",
+				`{"webhook_url":"https://oapi.dingtalk.com/robot/send?access_token=x"}`, true))
+
+	// 真实 sender 的错误形状：*url.Error 带完整 URL + 一条键值形态的密钥
+	ms := &mockSender{typ: "dingtalk", err: errors.New(
+		`Post "https://oapi.dingtalk.com/robot/send?access_token=SUPERSECRET": dial tcp: refused; secret=TOPLEVELSECRET`)}
+	RegisterSender("dingtalk", ms)
+	t.Cleanup(func() { delete(customSenders, "dingtalk") })
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	require.NoError(t, w.handleAlertEvent(context.Background(),
+		eventbus.Event{Payload: []byte(`{"event_type":"created","trigger":"t","host_name":"h"}`)}))
+	require.Equal(t, int32(1), atomic.LoadInt32(&ms.hits), "sender 必须真的被调用")
+
+	logged := buf.String()
+	require.Contains(t, logged, "send err for channel", "必须走到失败日志这一行")
+	require.Contains(t, logged, "https://oapi.dingtalk.com", "URL 塌缩成 scheme://host")
+	require.Contains(t, logged, "secret=***", "键值形态的密钥被抹掉")
+	assert.NotContains(t, logged, "SUPERSECRET")
+	assert.NotContains(t, logged, "TOPLEVELSECRET")
+	assert.NotContains(t, logged, "access_token")
 }

@@ -1,6 +1,7 @@
 package apierr
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -204,4 +205,25 @@ func TestEndToEnd_InternalFlow_NoLeak(t *testing.T) {
 	assert.Contains(t, body, "操作失败")
 	assert.NotContains(t, body, "syntax error")
 	assert.NotContains(t, body, "FROM")
+}
+
+// ==================== G-28：5xx 内部日志脱敏 ====================
+
+// 5xx 的 internal err 走 gin.DefaultErrorWriter（stderr）。它不在响应体里，但会落
+// 应用日志 —— 第三方客户端的 *url.Error 带完整 URL（query/path 里的 token）。
+func TestRespond_5xx_InternalErr日志脱敏(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &buf
+	t.Cleanup(func() { gin.DefaultErrorWriter = oldWriter })
+
+	c, _ := newTestCtx()
+	Respond(c, http.StatusInternalServerError, CodeInternal, "服务器内部错误",
+		errors.New(`zabbix: Post "http://127.0.0.1/api_jsonrpc.php?auth=SUPERSECRET": dial tcp: refused`))
+
+	logged := buf.String()
+	require.Contains(t, logged, "internal=", "5xx 必须写内部日志")
+	require.Contains(t, logged, "http://127.0.0.1", "URL 塌缩成 scheme://host")
+	assert.NotContains(t, logged, "SUPERSECRET")
+	assert.NotContains(t, logged, "auth=")
 }
