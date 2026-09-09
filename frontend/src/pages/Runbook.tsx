@@ -163,14 +163,19 @@ function RunbookList() {
           ),
         }}
         columns={[
-          { title: '标题', dataIndex: 'title', key: 'title' },
+          // M2：加前端本地排序。标题/类型字符串 localeCompare；严重度按 severity 数值；
+          // 启用按布尔权重；标签是多值逗号串，排序无意义（同 AlertTable message）不加。
+          { title: '标题', dataIndex: 'title', key: 'title', sorter: (a, b) => a.title.localeCompare(b.title) },
           { title: '类型', dataIndex: 'asset_type', key: 'asset_type', width: 100,
+            sorter: (a, b) => a.asset_type.localeCompare(b.asset_type),
             render: v => <Tag color="blue">{v}</Tag> },
           { title: '严重度', dataIndex: 'severity', key: 'severity', width: 80,
+            sorter: (a, b) => a.severity - b.severity,
             render: v => v > 0 ? <SeverityTag severity={v} /> : <Tag>全部</Tag> },
           { title: '标签', dataIndex: 'tags', key: 'tags',
             render: v => v ? v.split(',').map((t: string) => <Tag key={t}>{t}</Tag>) : null },
           { title: '启用', dataIndex: 'enabled', key: 'enabled', width: 80,
+            sorter: (a, b) => Number(a.enabled) - Number(b.enabled),
             render: v => v ? <Tag color="green">是</Tag> : <Tag>否</Tag> },
           { title: '操作', key: 'actions', width: 200,
             render: (_, rb: Runbook) => (

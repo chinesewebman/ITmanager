@@ -78,6 +78,34 @@ describe('Runbook', () => {
     expect(screen.getByRole('heading', { level: 4, name: '故障 Runbook' })).toBeInTheDocument()
   })
 
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // Runbook 给标题/类型/严重度/启用加前端本地排序（标签多值串不加）；这里验证核心的严重度数值排序。
+  it('M2：严重度列可排序（点击表头后按 severity 数值升序重排）', async () => {
+    h.overrides.list = {
+      data: {
+        items: [
+          { id: 'r1', title: '接入交换机端口 down', asset_type: 'switch', severity: 5, enabled: true, tags: 'network' },
+          { id: 'r2', title: '主库复制延迟排查', asset_type: 'server', severity: 4, enabled: true, tags: 'db,mysql' },
+        ],
+        total: 2,
+      },
+    }
+    const { container } = renderList()
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：接入交换机（severity 5）在前
+    expect(rowTexts()[0]).toContain('接入交换机端口 down')
+
+    // 点「严重度」表头升序 → severity 4 < 5，主库复制延迟排查排前
+    fireEvent.click(screen.getAllByText('严重度')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('主库复制延迟排查')
+    })
+  })
+
   it('显示资产类型 tag + 严重度 tag', () => {
     renderList()
     expect(screen.getAllByText('server').length).toBeGreaterThan(0)
