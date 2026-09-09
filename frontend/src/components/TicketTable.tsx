@@ -38,9 +38,15 @@ export interface TicketTableProps {
   data: Ticket[]
   loading: boolean
   onView: (ticket: Ticket) => void
+  // M3/P5: 服务端分页受控。total 传入时启用受控分页（current/pageSize/onChange 由父组件持有），
+  // 否则回落到 antd 内部分页（前端假分页，仅兼容旧调用方）。
+  total?: number
+  page?: number
+  pageSize?: number
+  onPageChange?: (page: number, pageSize: number) => void
 }
 
-export function TicketTable({ data, loading, onView }: TicketTableProps) {
+export function TicketTable({ data, loading, onView, total, page, pageSize, onPageChange }: TicketTableProps) {
   const columns: ColumnsType<Ticket> = [
     // M2：加前端本地排序。优先级按严重度权重；创建时间按 Date 解析（RFC3339 字符串
     // 字典序会因时区偏移错序）；其余字符串列 localeCompare（assignee 可能为空）。
@@ -101,7 +107,23 @@ export function TicketTable({ data, loading, onView }: TicketTableProps) {
       columns={columns}
       dataSource={data}
       loading={loading}
-      pagination={{ pageSize: 10, showSizeChanger: true }}
+      pagination={
+        total !== undefined
+          ? {
+              current: page ?? 1,
+              pageSize: pageSize ?? 20,
+              total,
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+              pageSizeOptions: ['10', '20', '50', '100'],
+              onChange: (p, ps) => onPageChange?.(p, ps),
+            }
+          : {
+              pageSize: 10,
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+            }
+      }
       locale={{
         emptyText: (
           <EmptyState

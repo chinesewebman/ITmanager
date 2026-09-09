@@ -3,6 +3,7 @@ import { message } from "antd";
 import type {
   AssetListParams,
   AlertListParams,
+  TicketListParams,
   LoginRequest,
 } from "./apiClient";
 import { dispatchAuthLogout } from "./authEvents";
@@ -166,8 +167,7 @@ export const rackApi = {
 // ==================== 工单 ====================
 export const ticketApi = {
   // page_size 供统计卡取全量（后端默认 20 条会截断计数）
-  list: (params?: { status?: string; priority?: string; page_size?: number }) =>
-    api.get("/tickets", { params }),
+  list: (params?: TicketListParams) => api.get("/tickets", { params }),
   get: (id: string) => api.get(`/tickets/${id}`),
   create: (data: any) => api.post("/tickets", data),
   update: (id: string, data: any) => api.put(`/tickets/${id}`, data),

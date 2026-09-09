@@ -2102,6 +2102,8 @@ export interface operations {
             query?: {
                 status?: string;
                 priority?: string;
+                page?: number;
+                page_size?: number;
             };
             header?: never;
             path?: never;

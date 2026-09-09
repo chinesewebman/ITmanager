@@ -70,6 +70,11 @@ export type AlertListParams = typePath<'/alerts', 'get', 'parameters'> extends {
   ? Q
   : never
 
+/** GET /tickets query params */
+export type TicketListParams = typePath<'/tickets', 'get', 'parameters'> extends { query?: infer Q }
+  ? Q
+  : never
+
 // ==================== 错误类型（与 apierr 包契约对齐） ====================
 
 /** 统一错误响应 — 与 backend/apierr.go.ErrorResponse 保持一致 */

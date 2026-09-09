@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   statsOverride: {} as Record<string, unknown>,
   listRefetch: vi.fn(),
   statsRefetch: vi.fn(),
+  lastListKey: null as unknown,
 }))
 
 // 时间串不带时区偏移 → dayjs 按本地解析，断言与 CI 时区无关
@@ -36,7 +37,7 @@ vi.mock('../hooks/useApiQuery', () => ({
     const k = Array.isArray(key) ? key : []
     if (k[1] === 'stats') {
       return {
-        data: STATS_TICKETS,
+        data: { items: STATS_TICKETS, total: STATS_TICKETS.length },
         isLoading: false,
         isError: false,
         error: undefined,
@@ -44,8 +45,10 @@ vi.mock('../hooks/useApiQuery', () => ({
         ...h.statsOverride,
       }
     }
+    // M3/P5：data 结构改为 {items, total}（服务端分页契约）。记录 queryKey 供分页/筛选变化断言。
+    h.lastListKey = key
     return {
-      data: LIST_TICKETS,
+      data: { items: LIST_TICKETS, total: LIST_TICKETS.length },
       isLoading: false,
       isError: false,
       error: undefined,
@@ -67,6 +70,7 @@ beforeEach(() => {
   h.statsOverride = {}
   h.listRefetch.mockClear()
   h.statsRefetch.mockClear()
+  h.lastListKey = null
 })
 
 /** 统计卡值：取标签的前一个兄弟节点（数值 div）。 */
@@ -119,13 +123,41 @@ describe('Tickets page', () => {
     expect(h.statsRefetch).toHaveBeenCalled()
   })
 
-  it('M10：副标题计数用列表行数，筛选后补「（已筛选）」', async () => {
+  // M10 + M3/P5：副标题计数来自服务端 total（默认 = items.length），筛选后补「（已筛选）」。
+  it('M10：副标题计数来自服务端 total，筛选后补「（已筛选）」', async () => {
     render(<Tickets />)
     expect(screen.getByText('共 2 个工单')).toBeInTheDocument()
     // 打开状态下拉并选「新建」
     fireEvent.mouseDown(screen.getAllByRole('combobox')[0])
     fireEvent.click(await screen.findByTitle('新建'))
     expect(screen.getByText('共 2 个工单（已筛选）')).toBeInTheDocument()
+  })
+
+  // M3/P5：服务端分页——total 不再丢弃 + 翻页更新 queryKey（page 变化），筛选变化重置 page。
+  it('M3/P5：服务端分页——翻页更新 queryKey 的 page，筛选重置回第 1 页', async () => {
+    h.listOverride = { data: { items: LIST_TICKETS, total: 100 } }
+    const { container } = render(<Tickets />)
+
+    // 副标题来自服务端 total（覆盖 items.length=2）
+    expect(screen.getByText('共 100 个工单')).toBeInTheDocument()
+
+    // 初始 queryKey 含 page:1/pageSize:20
+    expect((h.lastListKey as any)[2]).toMatchObject({ page: 1, pageSize: 20 })
+
+    // 点「下一页」→ onPageChange(2, 20) → setPage(2) → queryKey page 变 2
+    const next = container.querySelector('.ant-pagination-next')
+    expect(next).toBeTruthy()
+    fireEvent.click(next as Element)
+    await waitFor(() => {
+      expect((h.lastListKey as any)[2]).toMatchObject({ page: 2 })
+    })
+
+    // 筛选状态下沉进 queryKey 并重置 page 回 1
+    fireEvent.mouseDown(screen.getAllByRole('combobox')[0])
+    fireEvent.click(await screen.findByTitle('新建'))
+    await waitFor(() => {
+      expect((h.lastListKey as any)[2]).toMatchObject({ status: 'open', page: 1 })
+    })
   })
 
   // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。

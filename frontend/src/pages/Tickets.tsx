@@ -27,16 +27,21 @@ const EMPTY_STATS: TicketStats = {
 async function fetchTickets(params?: {
   status?: string
   priority?: string
+  page?: number
   page_size?: number
-}): Promise<Ticket[]> {
+}): Promise<{ items: Ticket[]; total: number }> {
   const res: any = await ticketApi.list(params)
-  const raw = res?.data?.data?.items ?? res?.data?.data ?? []
+  const body = res?.data?.data
   // C-F14: requester_name/assignee_name → requester/assignee 兼容映射
-  return (Array.isArray(raw) ? raw : []).map((t: any) => ({
-    ...t,
-    requester: t.requester ?? t.requester_name ?? '',
-    assignee: t.assignee ?? t.assignee_name ?? '',
-  }))
+  const raw = Array.isArray(body?.items) ? body.items : Array.isArray(body) ? body : []
+  return {
+    items: raw.map((t: any) => ({
+      ...t,
+      requester: t.requester ?? t.requester_name ?? '',
+      assignee: t.assignee ?? t.assignee_name ?? '',
+    })),
+    total: body?.total ?? 0,
+  }
 }
 
 function Tickets() {
@@ -44,18 +49,24 @@ function Tickets() {
   const [priorityFilter, setPriorityFilter] = useState<string>('')
   const [createOpen, setCreateOpen] = useState(false)
   const [viewTicket, setViewTicket] = useState<Ticket | null>(null)
+  // M3/P5：服务端分页——page/pageSize 由父组件持有；筛选变化时重置回第 1 页
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
   // C-P9: filter 变化走 queryKey 隔离缓存
-  const filters = { status: statusFilter, priority: priorityFilter }
+  const filters = { status: statusFilter, priority: priorityFilter, page, pageSize }
 
   useDocumentTitle('工单管理')
   // W1：删除 MOCK_TICKETS 回落，失败交给 isError → 区块级错误态
-  const { data, isLoading, isError, error, refetch } = useApiQuery<Ticket[]>(
+  // M3/P5：服务端分页——status/priority/page/page_size 全部下沉到后端，前端不再本地过滤。
+  const { data, isLoading, isError, error, refetch } = useApiQuery<{ items: Ticket[]; total: number }>(
     queryKeys.tickets.list(filters),
     () =>
       fetchTickets({
         status: statusFilter || undefined,
         priority: priorityFilter || undefined,
+        page,
+        page_size: pageSize,
       }),
   )
 
@@ -67,13 +78,13 @@ function Tickets() {
     isError: statsIsError,
     error: statsError,
     refetch: statsRefetch,
-  } = useApiQuery<Ticket[]>(queryKeys.tickets.stats(), () =>
+  } = useApiQuery<{ items: Ticket[]; total: number }>(queryKeys.tickets.stats(), () =>
     fetchTickets({ page_size: STATS_PAGE_SIZE }),
   )
 
   const stats = useMemo<TicketStats>(() => {
     const acc: TicketStats = { ...EMPTY_STATS }
-    for (const t of statsData ?? []) {
+    for (const t of statsData?.items ?? []) {
       // 未知状态（后端新增枚举）忽略，不写入不存在的键
       if (t.status in acc) acc[t.status as keyof TicketStats] += 1
     }
@@ -90,7 +101,9 @@ function Tickets() {
     onError: () => message.error('创建失败'),
   })
 
-  const list = data ?? []
+  // M3/P5：服务端分页后 items/total 直接来自后端，不再前端过滤。
+  const list = data?.items ?? []
+  const total = data?.total ?? 0
   // M10：副标题原本用未过滤总数，与表格行数不符
   const hasFilter = Boolean(statusFilter || priorityFilter)
 
@@ -98,7 +111,7 @@ function Tickets() {
     <div>
       <PageHeader
         title="工单管理"
-        subtitle={`共 ${list.length} 个工单${hasFilter ? '（已筛选）' : ''}`}
+        subtitle={`共 ${total} 个工单${hasFilter ? '（已筛选）' : ''}`}
         onCreate={() => setCreateOpen(true)}
         createText="创建工单"
         extra={
@@ -131,7 +144,7 @@ function Tickets() {
                 placeholder="工单状态"
                 allowClear
                 value={statusFilter || undefined}
-                onChange={(v) => setStatusFilter(v ?? '')}
+                onChange={(v) => { setStatusFilter(v ?? ''); setPage(1) }}
                 style={{ width: 120 }}
                 options={[
                   { label: '新建', value: 'open' },
@@ -145,7 +158,7 @@ function Tickets() {
                 placeholder="优先级"
                 allowClear
                 value={priorityFilter || undefined}
-                onChange={(v) => setPriorityFilter(v ?? '')}
+                onChange={(v) => { setPriorityFilter(v ?? ''); setPage(1) }}
                 style={{ width: 120 }}
                 options={[
                   { label: '紧急', value: 'critical' },
@@ -156,7 +169,15 @@ function Tickets() {
               />
             </Space>
           </div>
-          <TicketTable data={list} loading={isLoading} onView={setViewTicket} />
+          <TicketTable
+            data={list}
+            loading={isLoading}
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={(p, ps) => { setPage(p); setPageSize(ps) }}
+            onView={setViewTicket}
+          />
         </>
       )}
 
