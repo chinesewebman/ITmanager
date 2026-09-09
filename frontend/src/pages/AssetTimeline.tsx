@@ -5,7 +5,7 @@
 //
 // 设计要点：
 //  - 4 种 kind 4 种颜色（alert=红/橙/黄/绿，ticket=蓝，status=灰，link=紫）
-//  - severity 0-5 映射到 color（5=红, 4=橙, 3=黄, 2=蓝, 1=绿, 0=灰）
+//  - severity 0-5 配色统一走 SeverityTag 权威 6 档（P5紫红/P4红/P3橙/P2黄/P1蓝/P0灰）
 //  - 事件点击跳详情（alert → 告警详情，ticket → 工单详情）
 //  - MTTR 缺省值用 "—" 不显示 N/A
 //
@@ -23,6 +23,7 @@ import api from '../services/api'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
+import { SEVERITY_META } from '../components/SeverityTag'
 import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -36,14 +37,10 @@ const KIND_COLOR: Record<string, string> = {
   link_change: 'purple',
 }
 
-// severity → 颜色
+// M11：severity 配色统一到 SeverityTag 权威 6 档（P5紫红/P4红/P3橙/P2黄/P1蓝/P0灰）。
+// 此前自造一套（5红/4橙/3黄/2蓝/1绿/0灰），与告警中心 SeverityTag 不一致：P3/P4/P5 颜色全错。
 function severityColor(sev: number): string {
-  if (sev >= 5) return 'red'
-  if (sev >= 4) return 'orange'
-  if (sev >= 3) return 'gold'
-  if (sev >= 2) return 'blue'
-  if (sev >= 1) return 'green'
-  return 'default'
+  return SEVERITY_META[sev]?.color ?? 'default'
 }
 
 // 事件 sub_kind 中文映射

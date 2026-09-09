@@ -161,4 +161,15 @@ describe('AssetTimeline', () => {
     // 摘要数字兜底为 0
     expect(screen.getByText('事件总数').nextElementSibling?.textContent).toBe('3')
   })
+
+  // M11：alert 严重度配色此前自造一套（severityColor: 5红/4橙/3黄/2蓝/1绿/0灰），
+  // 与告警中心 SeverityTag 权威 6 档（P4红/P3橙/P2黄...）不一致。TL.events[0] severity=4，
+  // 旧代码染成橙色，权威应为红色（P4 严重）。
+  it('M11：alert 严重度配色统一到 SeverityTag（P4→红，非自造橙）', async () => {
+    renderPage()
+    await screen.findByText('内存使用率超阈值')
+    const tag = screen.getByText('触发').closest('.ant-tag') as HTMLElement
+    expect(tag).toHaveClass('ant-tag-red')
+    expect(tag).not.toHaveClass('ant-tag-orange')
+  })
 })
