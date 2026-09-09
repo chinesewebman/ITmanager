@@ -3,6 +3,8 @@ import { siteApi, rackApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { RackGrid, type Rack } from '../components/RackGrid'
 import { RackDeviceList, type RackDevice } from '../components/RackDeviceList'
+import { EmptyState } from '../components/EmptyState'
+import { ErrorState } from '../components/ErrorState'
 import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { useState } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -12,62 +14,64 @@ interface Site {
   name: string
 }
 
-const MOCK_SITES: Site[] = [
-  { id: '1', name: '机房A' },
-  { id: '2', name: '机房B' },
-  { id: '3', name: '机房C' },
-]
-
-function mockRacks(siteId: string): Rack[] {
-  return [
-    { id: `${siteId}-r1`, name: 'Rack-01', site_id: siteId, total_units: 42, used_units: 20 },
-    { id: `${siteId}-r2`, name: 'Rack-02', site_id: siteId, total_units: 42, used_units: 15 },
-    { id: `${siteId}-r3`, name: 'Rack-03', site_id: siteId, total_units: 42, used_units: 25 },
-  ]
+/** 接口列表形状归一：非数组（形状变了 / 后端返回 null）一律当空，不回落 mock。 */
+function asArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v as T[]) : []
 }
 
-function mockDevices(): RackDevice[] {
-  return [
-    { id: '1', name: 'server-01', asset_type: 'server', rack_position: 42, health_status: 'green', alert_count: 0 },
-    { id: '2', name: 'server-02', asset_type: 'server', rack_position: 38, health_status: 'green', alert_count: 0 },
-    { id: '3', name: 'switch-01', asset_type: 'switch', rack_position: 36, health_status: 'red', alert_count: 2 },
-    { id: '4', name: 'patch-panel', asset_type: 'other', rack_position: 34, health_status: 'green', alert_count: 0 },
-    { id: '5', name: 'server-03', asset_type: 'server', rack_position: 30, health_status: 'green', alert_count: 0 },
-  ]
-}
+// W1：`res?.data?.data ?? MOCK_SITES`（站点）、`?? mockRacks(...)`（机柜）、
+// `?? mockDevices()`（设备）三处兜底已删除。原写法在接口失败或形状变化时
+// 静默显示虚构的机房/机柜/设备，运维会在真实机房里对着假机柜排查。
 
 function Racks() {
   useDocumentTitle('机房机柜')
   const [selectedSite, setSelectedSite] = useState<string>('')
   const [selectedRack, setSelectedRack] = useState<Rack | null>(null)
   // C-P9: 站点列表用 React Query（极少变化，缓存 5min）
-  const { data: sitesData } = useApiQuery<Site[]>(
+  const {
+    data: sitesData,
+    isError: sitesIsError,
+    error: sitesError,
+    refetch: sitesRefetch,
+  } = useApiQuery<Site[]>(
     queryKeys.racks.all,
     async () => {
       const res: any = await siteApi.list()
-      return res?.data?.data ?? MOCK_SITES
+      return asArray<Site>(res?.data?.data)
     },
     { staleTime: 5 * 60_000 },
   )
-  const sites = sitesData ?? MOCK_SITES
+  const sites = sitesData ?? []
 
   // 机柜列表按 site 隔离
-  const { data: racksData, isLoading } = useApiQuery<Rack[]>(
+  const {
+    data: racksData,
+    isLoading,
+    isError: racksIsError,
+    error: racksError,
+    refetch: racksRefetch,
+  } = useApiQuery<Rack[]>(
     ['racks', 'list', selectedSite],
     async () => {
       const res: any = await rackApi.list({ site_id: selectedSite })
-      return res?.data?.data ?? mockRacks(selectedSite)
+      return asArray<Rack>(res?.data?.data)
     },
     { enabled: !!selectedSite, staleTime: 30_000 },
   )
   const racks = racksData ?? []
 
   // 设备列表按 rack 隔离
-  const { data: devicesData } = useApiQuery<RackDevice[]>(
+  const {
+    data: devicesData,
+    isLoading: devicesLoading,
+    isError: devicesIsError,
+    error: devicesError,
+    refetch: devicesRefetch,
+  } = useApiQuery<RackDevice[]>(
     queryKeys.racks.devices(selectedRack?.id ?? ''),
     async () => {
       const res: any = await rackApi.getDevices(selectedRack!.id)
-      return res?.data?.data ?? mockDevices()
+      return asArray<RackDevice>(res?.data?.data)
     },
     { enabled: !!selectedRack, staleTime: 30_000 },
   )
@@ -76,20 +80,34 @@ function Racks() {
   return (
     <div>
       <PageHeader title="机房机柜" subtitle="可视化数据中心机柜布局与设备状态" />
-      <div style={{ marginBottom: 16 }}>
-        <Select
-          placeholder="选择机房"
-          value={selectedSite || undefined}
-          onChange={setSelectedSite}
-          style={{ width: 200 }}
-          options={sites.map((s) => ({ label: s.name, value: s.id }))}
-        />
-      </div>
+      {/* 站点列表失败时不能只留一个空下拉——先给出错误态和重试 */}
+      {sitesIsError ? (
+        <ErrorState error={sitesError} onRetry={sitesRefetch} compact />
+      ) : (
+        <div style={{ marginBottom: 16 }}>
+          <Select
+            placeholder="选择机房"
+            value={selectedSite || undefined}
+            onChange={setSelectedSite}
+            style={{ width: 200 }}
+            options={sites.map((s) => ({ label: s.name, value: s.id }))}
+          />
+        </div>
+      )}
 
-      {isLoading ? (
+      {!selectedSite ? (
+        <EmptyState
+          title="请先选择机房"
+          description="选择机房后展示该机房的机柜布局"
+        />
+      ) : racksIsError ? (
+        <ErrorState error={racksError} onRetry={racksRefetch} />
+      ) : isLoading ? (
         <div style={{ textAlign: 'center', padding: 100 }}>
           <Spin size="large" />
         </div>
+      ) : racks.length === 0 ? (
+        <EmptyState preset="no-racks" />
       ) : (
         <RackGrid racks={racks} selectedRackId={selectedRack?.id} onSelect={setSelectedRack} />
       )}
@@ -102,7 +120,17 @@ function Racks() {
         width={600}
         destroyOnClose
       >
-        <RackDeviceList devices={devices} />
+        {devicesIsError ? (
+          <ErrorState error={devicesError} onRetry={devicesRefetch} compact />
+        ) : devicesLoading ? (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <Spin />
+          </div>
+        ) : devices.length === 0 ? (
+          <EmptyState title="该机柜暂无设备" description="机柜里还没有录入设备" compact />
+        ) : (
+          <RackDeviceList devices={devices} />
+        )}
       </Modal>
     </div>
   )

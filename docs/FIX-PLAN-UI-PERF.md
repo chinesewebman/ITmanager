@@ -313,7 +313,8 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W1+W2 `pages/Oncall.tsx` | ✅ 完成 | 10 用例绿；四条变异（值班组去错误分支 / 去空态 / 当前值班时间回退原样渲染 / 升级策略去错误分支）均红在断言。三个 tab 的 `catch { return MOCK_* }` + `data ?? MOCK_*` 双重兜底已删除 |
 | W1 `pages/AlertSuppressions.tsx` | ✅ 完成 | 6 用例绿；三条变异（去错误分支 / 去空态 / 空列表回落虚构规则）均红在断言。`catch { return MOCK_RULES }` + `data: rules = MOCK_RULES` 双重兜底已删除 |
 | W1+W2 `pages/MetricSnapshot.tsx` | ✅ 完成 | 7 用例绿；四条变异（去错误分支 / 去空态 / 时间回退原样渲染 / 空结果回落虚构采样点）均红在断言。`catch { return MOCK_LATEST }` 已删除；W2 补第 5 个遗漏站点（rev5） |
-| W1 其余 4 页（Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W1 `pages/Racks.tsx` | ✅ 完成 | 8 用例绿；五条变异（站点/机柜/设备去错误分支、去机柜空态、空列表回落虚构机柜）均红在断言。三处 `?? MOCK_*`（`MOCK_SITES`/`mockRacks`/`mockDevices`）已删除；新增「请先选择机房」引导空态与机柜/设备空态 |
+| W1 其余 3 页（Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
 | W2 其余 2 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122`（`AlertTable`、`TicketTable`、`TicketDetailModal`、`Oncall` 已完成） |
 | W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
@@ -321,7 +322,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 
 **下一步（按顺序）**：
 1. ~~提交推送当前已完成项~~ → 已完成（`9ae6607`、`0868117`、`f836f94` 已推 main）。
-2. W1 逐页推进，下一页 `pages/Racks.tsx`。
+2. W1 逐页推进，下一页 `pages/Topology.tsx`。
 3. W2 剩余 2 个调用点（可并入各页 W1 的同一小步）。
 4. W4 批 1 剩余 7 项（H6 需先做 `cssVar` 实测）。
 5. W6 批 1 迁移 000016。
