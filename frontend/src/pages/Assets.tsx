@@ -6,6 +6,7 @@ import { AssetTable, type Asset } from '../components/AssetTable'
 import { AssetFormModal, type AssetFormValues } from '../components/AssetFormModal'
 import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
+import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
 import { useState, useMemo } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -19,14 +20,7 @@ const TYPE_OPTIONS = [
   { value: 'storage', label: '存储' },
 ]
 
-// 模拟数据（API 失败时兜底，与旧版行为一致）
-const MOCK_DATA: Asset[] = [
-  { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
-  { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.11', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
-  { id: '3', name: 'switch-core-01', asset_type: 'switch', ip_address: '192.168.1.1', status: 'active', site_name: '机房A', rack_name: 'Rack-03' },
-  { id: '4', name: 'firewall-main', asset_type: 'firewall', ip_address: '192.168.1.254', status: 'active', site_name: '机房B', rack_name: 'Rack-01' },
-  { id: '5', name: 'storage-01', asset_type: 'storage', ip_address: '192.168.2.10', status: 'inactive', site_name: '机房B', rack_name: 'Rack-05' },
-]
+// W1：假数据兜底已删除（原 MOCK_DATA 让 React Query 的 isError 恒为 false，接口失败渲染一屏假资产）。
 
 function Assets() {
   const [editing, setEditing] = useState<Asset | null>(null)
@@ -44,11 +38,13 @@ function Assets() {
   const [traceResult, setTraceResult] = useState<TracerouteResult | null>(null)
 
   // C-P9: React Query 拉取列表（30s 内不重 fetch）
-  const { data, isLoading, refetch } = useApiQuery<Asset[]>(
+  // W1：fetcher 只做形状归一（items 非数组 → 空数组），不吞异常、不回落假数据
+  const { data, isLoading, isError, error, refetch } = useApiQuery<Asset[]>(
     queryKeys.assets.list(),
     async () => {
       const res: any = await assetApi.list()
-      return res?.data?.data?.items ?? []
+      const items = res?.data?.data?.items
+      return Array.isArray(items) ? items : []
     },
   )
 
@@ -156,13 +152,12 @@ function Assets() {
 
   // 前端过滤
   const filtered = useMemo(() => {
-    const list = data ?? MOCK_DATA
-    return list.filter((item) => {
+    return (data ?? []).filter((item) => {
       const kw = filter.keyword.toLowerCase()
       const matchKw =
         !kw ||
         item.name.toLowerCase().includes(kw) ||
-        item.ip_address.includes(filter.keyword)
+        (item.ip_address ?? '').includes(filter.keyword)
       const matchType = !filter.assetType || item.asset_type === filter.assetType
       return matchKw && matchType
     })
@@ -231,11 +226,14 @@ function Assets() {
     })
   }
 
+  // M10：副标题原本用未过滤总数，与表格行数不符
+  const hasFilter = Boolean(filter.keyword || filter.assetType)
+
   return (
     <div>
       <PageHeader
         title="资产管理"
-        subtitle={`共 ${(data ?? MOCK_DATA).length} 台资产`}
+        subtitle={`共 ${filtered.length} 台资产${hasFilter ? '（已筛选）' : ''}`}
         onCreate={handleCreate}
         createText="添加资产"
         extra={
@@ -244,40 +242,46 @@ function Assets() {
           </Button>
         }
       />
-      <div style={{ marginBottom: 16 }}>
-        <AssetFilterBar value={filter} onChange={setFilter} typeOptions={TYPE_OPTIONS} />
-      </div>
-      {isMobile ? (
-        <MobileCardList
-          data={filtered}
-          loading={isLoading}
-          renderCard={(asset: Asset) => (
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 16 }}>{asset.name}</div>
-              <div style={{ color: 'var(--ant-color-text-secondary)', fontSize: 12, marginTop: 4 }}>
-                {asset.asset_type} · {asset.ip_address}
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <Tag color={asset.status === 'active' ? 'green' : 'red'}>
-                  {asset.status === 'active' ? '在线' : '离线'}
-                </Tag>
-                {asset.site_name && <Tag>{asset.site_name}</Tag>}
-                {asset.rack_name && <Tag>{asset.rack_name}</Tag>}
-              </div>
-            </div>
-          )}
-        />
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} />
       ) : (
-        <AssetTable
-          data={filtered}
-          loading={isLoading}
-          onEdit={handleEdit}
-          onChanged={() => refetch()}
-          onDiagnose={handleDiagnose}
-          onPostmortem={handlePostmortem}
-          onRetire={handleRetire}
-          onRestore={handleRestore}
-        />
+        <>
+          <div style={{ marginBottom: 16 }}>
+            <AssetFilterBar value={filter} onChange={setFilter} typeOptions={TYPE_OPTIONS} />
+          </div>
+          {isMobile ? (
+            <MobileCardList
+              data={filtered}
+              loading={isLoading}
+              renderCard={(asset: Asset) => (
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 16 }}>{asset.name}</div>
+                  <div style={{ color: 'var(--ant-color-text-secondary)', fontSize: 12, marginTop: 4 }}>
+                    {asset.asset_type} · {asset.ip_address}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Tag color={asset.status === 'active' ? 'green' : 'red'}>
+                      {asset.status === 'active' ? '在线' : '离线'}
+                    </Tag>
+                    {asset.site_name && <Tag>{asset.site_name}</Tag>}
+                    {asset.rack_name && <Tag>{asset.rack_name}</Tag>}
+                  </div>
+                </div>
+              )}
+            />
+          ) : (
+            <AssetTable
+              data={filtered}
+              loading={isLoading}
+              onEdit={handleEdit}
+              onChanged={() => refetch()}
+              onDiagnose={handleDiagnose}
+              onPostmortem={handlePostmortem}
+              onRetire={handleRetire}
+              onRestore={handleRestore}
+            />
+          )}
+        </>
       )}
       <AssetFormModal
         open={modalOpen}

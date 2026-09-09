@@ -22,7 +22,7 @@ export function AssetFilterBar({ value, onChange, typeOptions }: AssetFilterBarP
       <Input
         allowClear
         prefix={<SearchOutlined />}
-        placeholder="搜索名称 / 资产标签 / SN"
+        placeholder="搜索名称 / IP"
         value={value.keyword}
         onChange={(e) => onChange({ ...value, keyword: e.target.value })}
         style={{ width: 240 }}

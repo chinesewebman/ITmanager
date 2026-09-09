@@ -1,8 +1,15 @@
-// Assets page smoke test
+// Assets page：W1 去假数据兜底 + M9 搜索占位符 + M10 副标题计数。
+// 修前：filtered 用 `data ?? MOCK_DATA` 兜底，接口失败渲染 5 台假资产且 isError 永远看不到。
 import '@testing-library/jest-dom'
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import Assets from './Assets'
+
+// vi.hoisted：mock 工厂在 import 期就会被调用，共享状态必须在提升块里创建
+const h = vi.hoisted(() => ({
+  overrides: {} as Record<string, unknown>,
+  refetch: vi.fn(),
+}))
 
 const mockAssets = [
   { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
@@ -11,7 +18,14 @@ const mockAssets = [
 ]
 
 vi.mock('../hooks/useApiQuery', () => ({
-  useApiQuery: () => ({ data: mockAssets, isLoading: false, refetch: vi.fn() }),
+  useApiQuery: () => ({
+    data: mockAssets,
+    isLoading: false,
+    isError: false,
+    error: undefined,
+    refetch: h.refetch,
+    ...h.overrides,
+  }),
   useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
   queryKeys: { assets: { list: () => ['assets', 'list'] } },
 }))
@@ -67,6 +81,11 @@ vi.mock('../services/api', () => ({
     downloadReport: (...args: any[]) => mockPostmortem(...args),
   },
 }))
+
+beforeEach(() => {
+  h.overrides = {}
+  h.refetch.mockClear()
+})
 
 describe('Assets page', () => {
   it('渲染资产表格 + 关键列（mock 数据）', () => {
@@ -124,5 +143,48 @@ describe('Assets page', () => {
     await waitFor(() => {
       expect(mockPostmortem).toHaveBeenCalledWith(expect.any(String), 30)
     })
+  })
+
+  it('W1：接口失败时显示错误态 + 重试，不回落假资产', () => {
+    h.overrides = { data: undefined, isError: true, error: { response: { status: 500 } } }
+    render(<Assets />)
+    expect(screen.getByText('数据加载失败')).toBeInTheDocument()
+    // 关键回归断言：假兜底资产（MOCK_DATA 里的 web-server-01）必须消失
+    expect(screen.queryByText('web-server-01')).toBeNull()
+    expect(screen.queryByPlaceholderText('搜索名称 / IP')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }))
+    expect(h.refetch).toHaveBeenCalled()
+  })
+
+  it('W1：200 + 空 items 不白屏（走空态，不是假资产）', () => {
+    h.overrides = { data: [] }
+    render(<Assets />)
+    expect(screen.getByText('暂无资产')).toBeInTheDocument()
+    expect(screen.getByText('共 0 台资产')).toBeInTheDocument()
+  })
+
+  it('M10：副标题计数跟随筛选结果，筛选后带「（已筛选）」', () => {
+    render(<Assets />)
+    expect(screen.getByText('共 3 台资产')).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('搜索名称 / IP'), { target: { value: 'web' } })
+    expect(screen.getByText('共 1 台资产（已筛选）')).toBeInTheDocument()
+    expect(screen.getByText('web-server-01')).toBeInTheDocument()
+    expect(screen.queryByText('db-server-01')).toBeNull()
+  })
+
+  it('M9：搜索占位符只承诺「名称 / IP」（不再承诺资产标签/SN）', () => {
+    render(<Assets />)
+    expect(screen.getByPlaceholderText('搜索名称 / IP')).toBeInTheDocument()
+  })
+
+  it('W1：ip_address 为 undefined 时筛选不抛异常', () => {
+    h.overrides = {
+      data: [{ id: '9', name: 'ghost', asset_type: 'server', ip_address: undefined, status: 'active' }],
+    }
+    render(<Assets />)
+    expect(() => {
+      fireEvent.change(screen.getByPlaceholderText('搜索名称 / IP'), { target: { value: '192' } })
+    }).not.toThrow()
+    expect(screen.getByText('共 0 台资产（已筛选）')).toBeInTheDocument()
   })
 })

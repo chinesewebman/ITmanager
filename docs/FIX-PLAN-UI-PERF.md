@@ -169,8 +169,8 @@ formatRelativeTime(iso?: string | null): string   // '3 分钟前'，空/非法 
 | M4 | MED | 提交按钮无 loading → 连点重复创建 | `AlertSuppressions.tsx:160,194`、`Oncall.tsx:103,156`、`Runbook.tsx:180`、`Settings.tsx:741` | 加 `submitting` state + `confirmLoading`（范本 `AssetFormModal.tsx:64`）；`finally` 复位 |
 | M5 | MED | 危险操作确认质量不一致 | `AlertSuppressions.tsx:145`、`Runbook.tsx:167`、`Oncall.tsx:101,154` | 统一 `title` 带对象名 + `okText="删除"` + `okButtonProps={{danger:true}}` |
 | M6 | MED | 14 处 `required` 无 `message`，提示语气不一致 | `Settings.tsx:772,775,794,797,802,808,811,820,833,840`、`Oncall.tsx:105,158`、`TicketFormModal.tsx:56`、`AssetFormModal.tsx:100` | 统一句式「请输入/请选择 XXX」 |
-| M9 | MED | 搜索占位符承诺搜「资产标签/SN」，实际只搜 name/ip | `AssetFilterBar.tsx:25` / `Assets.tsx:162-165` | 占位符改「搜索名称 / IP」（`Asset` 类型里没有 `asset_tag`/`sn`，补搜索属扩功能） |
-| M10 | MED | 副标题计数用未过滤总数，与表格行数不符 | `Assets.tsx:238`、`Tickets.tsx:64` | 改用 `filtered.length`；有筛选时补「（已筛选）」 |
+| M9 | MED | 搜索占位符承诺搜「资产标签/SN」，实际只搜 name/ip | `AssetFilterBar.tsx:25` / `Assets.tsx:162-165` | ✅ 已改「搜索名称 / IP」（`Asset` 类型里没有 `asset_tag`/`sn`，补搜索属扩功能） |
+| M10 | MED | 副标题计数用未过滤总数，与表格行数不符 | `Assets.tsx:238`、`Tickets.tsx:64` | ✅ Assets 已改 `filtered.length` +「（已筛选）」；`Tickets.tsx:64` 待随 Tickets 页处理 |
 
 ### 4.2 批 2（下一轮，不在本轮范围）
 
@@ -303,18 +303,18 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W5-P2 `echarts/core` + 测试 | ✅ 完成 | 构建实测 Dashboard chunk 1,059,595→514,130（gzip 351k→176k）；3 用例绿，变异（删 LineChart）红在断言 |
 | W4-H1 命令面板资产路由 404 | ✅ 完成 | 断言 `navigate('/assets/a1/diagnostics')` |
 | W1+W2 `pages/Alerts.tsx` + `AlertTable` | ✅ 完成 | 7 用例绿；两条变异（去 isError 分支 / 去 stats 守卫）均红在断言 |
-| W1 其余 9 页（Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W1+M9+M10 `pages/Assets.tsx` + `AssetFilterBar` | ✅ 完成 | 11 用例绿；三条变异（去 isError 分支 / 副标题回落未过滤计数 / 去 ip_address 守卫）均红在断言 |
+| W1 其余 8 页（Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
 | W2 其余 5 个调用点 | ⬜ 未开始 | `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62`（`AlertTable` 已随 Alerts 一并完成） |
-| W4 其余 9 项（H6/H8/H9/H10/M4/M5/M6/M9/M10） | ⬜ 未开始 | 见 §4.1 |
+| W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
-| 提交推送本轮已完成部分 | ⬜ 未开始 | 见「下一步」 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
-1. ~~提交推送当前已完成项~~ → 已完成（commit `9ae6607` 已推 main）。
-2. W1 逐页推进，下一页 `pages/Assets.tsx`（含 M9 占位符、M10 副标题计数）。
+1. ~~提交推送当前已完成项~~ → 已完成（commit `9ae6607`、`0868117` 已推 main）。
+2. W1 逐页推进，下一页 `pages/Tickets.tsx`（含 M10 副标题计数 `Tickets.tsx:64`、W2 `TicketTable`/`TicketDetailModal` 时间格式化）。
 3. W2 剩余 5 个调用点（可并入各页 W1 的同一小步）。
-4. W4 批 1 剩余 9 项。
+4. W4 批 1 剩余 7 项（H6 需先做 `cssVar` 实测）。
 5. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：无。
