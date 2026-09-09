@@ -662,19 +662,19 @@ func mustJSON(t *testing.T, v any) string {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000016，故四次 Down = 16 → 15 → 14 → 13。
+//     当前最高版本是 000017，故五次 Down = 17 → 16 → 15 → 14 → 13。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
-	// 前置 1：必须已应用到 000016（本用例回滚 16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
+	// 前置 1：必须已应用到 000017（本用例回滚 17→16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 16`).
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 17`).
 		Scan(&applied).Error; err != nil {
 		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
 	}
 	if applied == 0 {
-		t.Fatalf("库未应用到 000016 —— 本用例要回滚 16→15→14→13，前置不满足")
+		t.Fatalf("库未应用到 000017 —— 本用例要回滚 17→16→15→14→13，前置不满足")
 	}
 
 	// 前置 2：必须是**升级路径**库。回滚链里要断言 000014 的回填值仍在（assertJSONB），
@@ -691,7 +691,15 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// 第一次 Down = 回滚 000016：删除 pending 部分索引
+	// 第一次 Down = 回滚 000017：删除 problem_start 索引
+	require.NoError(t, migrate.Down(db), "回滚 000017 失败")
+	var psIdxExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_alerts_problem_start')`).
+		Scan(&psIdxExists).Error)
+	assert.False(t, psIdxExists, "down 000017 应 DROP idx_alerts_problem_start")
+
+	// 第二次 Down = 回滚 000016：删除 pending 部分索引
 	require.NoError(t, migrate.Down(db), "回滚 000016 失败")
 	var pendingIdxExists bool
 	require.NoError(t, db.Raw(
@@ -699,11 +707,11 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&pendingIdxExists).Error)
 	assert.False(t, pendingIdxExists, "down 000016 应 DROP idx_notification_logs_pending")
 
-	// 第二次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
+	// 第三次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
 	require.NoError(t, migrate.Down(db), "回滚 000015 失败")
 	assertNetBoxIDIndexUnique(t, db, false)
 
-	// 第三次 Down = 回滚 000014：只撤列默认值，数据不动
+	// 第四次 Down = 回滚 000014：只撤列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
 	var def *string
 	require.NoError(t, db.Raw(
@@ -712,7 +720,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
 	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
 
-	// 第四次 Down = 回滚 000013：本用例真正要守的那个
+	// 第五次 Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool
@@ -786,4 +794,34 @@ func TestDBSmoke_NotificationPendingIndex(t *testing.T) {
 		`EXPLAIN (COSTS OFF) SELECT * FROM notification_logs WHERE status = 'pending' ORDER BY sent_at ASC LIMIT 100`)
 	assert.Contains(t, plan, "idx_notification_logs_pending",
 		"pending 轮询查询应走部分索引：\n%s", plan)
+}
+
+// TestDBSmoke_AlertsProblemStartIndex 守 000017 的 problem_start 索引（W6 P14）。
+//
+// dashboard/kpis 的 4 条聚合（MTTR/MTTD/密度/计数）都按 `problem_start >= ?`
+// 过滤时间窗，无索引时每次扫全表（审计实测合计 ~1.1s）。真 PG 两层断言：
+// ① 索引形态（列 problem_start）；② EXPLAIN 走该索引（范围查询）。
+func TestDBSmoke_AlertsProblemStartIndex(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 17`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000017（idx_alerts_problem_start）—— 本用例前置不满足")
+	}
+
+	// ① 索引形态：普通索引，列 problem_start
+	var def string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_alerts_problem_start'`).
+		Scan(&def).Error)
+	require.NotEmpty(t, def, "idx_alerts_problem_start 不存在 —— 000017 没跑？")
+	assert.Contains(t, def, "problem_start", "索引应建在 problem_start 上：%s", def)
+
+	// ② EXPLAIN 断言：KPI 时间窗过滤走该索引（dashboard_service.go:156-207 同款）
+	plan := explainSeqScanOff(t, db,
+		`EXPLAIN (COSTS OFF) SELECT COUNT(*) FROM alerts WHERE problem_start >= '2026-01-01'::timestamp`)
+	assert.Contains(t, plan, "idx_alerts_problem_start",
+		"problem_start 范围查询应走索引：\n%s", plan)
 }
