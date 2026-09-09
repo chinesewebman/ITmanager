@@ -310,6 +310,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev23 | 2026-09-10 | **W6 批 1 第 1 步 P13 完成**：通知 worker 每 5s 轮询 `status='pending'` 全表扫（286.6ms）→ 迁移 000016 加 `idx_notification_logs_pending (sent_at) WHERE status='pending'` 部分索引（与 000009 的 failed 索引互补）。真 PG dbsmoke 两层断言：① 索引形态（pg_indexes.indexdef 含 sent_at/status/'pending'）；② EXPLAIN（`enable_seqscan=off` 强制走索引，验证谓词/列匹配）。`DownPreservesLegacyColumns` 三次→四次 Down（16→15→14→13）。变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。**决策：批 1 六索引拆 000016–000021 每索引一迁移**（失败隔离/独立回滚/小步可验证），P20 pg_trgm 顺延 000022 |
 | rev24 | 2026-09-10 | **W6 批 1 第 2 步 P14 完成**：`/dashboard/kpis` 4 条聚合（MTTR/MTTD/密度/计数）都按 `problem_start >= ?` 过滤时间窗、无索引扫全表（合计 ~1.1s）→ 迁移 000017 加 `idx_alerts_problem_start (problem_start)`。dbsmoke 形态 + EXPLAIN（`enable_seqscan=off` 范围查询走索引）断言；Down 链四次→五次（17→16→15→14→13）；变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。下一 000018=P15 `alerts.trigger_id` |
 | rev25 | 2026-09-10 | **W6 批 1 第 3 步 P15 完成**：Zabbix 同步预查 `alerts WHERE trigger_id IN (...)` 无索引扫全表（294.8ms）→ 迁移 000018 加 `idx_alerts_trigger_id (trigger_id)`。dbsmoke 形态 + EXPLAIN 断言；Down 链五次→六次（18→17→16→15→14→13）；变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。**EXPLAIN 断言细节**：真实查询带 `AND status='problem'` 时，空表上优化器会改选已存在的 `idx_alerts_status_created`（status 索引）——故 EXPLAIN 用纯 `trigger_id IN (...)` 条件验证索引可被命中，`status` 是附加过滤不影响索引存在性。下一 000019=P16 `tickets.external_id` |
+| rev26 | 2026-09-10 | **W6 批 1 第 4 步 P16 完成**：GLPI 同步预查 `tickets WHERE external_id IN (...)` 无索引扫全表（152.2ms）→ 迁移 000019 加 `idx_tickets_external_id (external_id)`。dbsmoke 形态 + EXPLAIN 断言（真实查询单条件，无其它索引竞争，直接走该索引）；Down 链六次→七次（19→18→17→16→15→14→13）；变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。下一 000020=P17 `assets.name` |
 
 ---
 
@@ -356,14 +357,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P13 通知 pending 索引（迁移 000016） | ✅ 完成 | `idx_notification_logs_pending (sent_at) WHERE status='pending'`；dbsmoke 形态 + EXPLAIN 断言；Down 链 16→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P14 alerts problem_start 索引（迁移 000017） | ✅ 完成 | `idx_alerts_problem_start (problem_start)`；dbsmoke 形态 + EXPLAIN 断言；Down 链 17→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P15 alerts trigger_id 索引（迁移 000018） | ✅ 完成 | `idx_alerts_trigger_id (trigger_id)`；dbsmoke 形态 + EXPLAIN 断言（纯 trigger_id 条件，因 status 索引竞争）；Down 链 18→13；变异红在 `NotEmpty` 断言 |
-| W6 批 1 · P16–P19（迁移 000019–000021 + ticket_service 3 行） | ⬜ 未开始 | 后端；每索引一迁移，需 `EXPLAIN` 断言走索引 |
+| W6 批 1 · P16 tickets external_id 索引（迁移 000019） | ✅ 完成 | `idx_tickets_external_id (external_id)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 19→13；变异红在 `NotEmpty` 断言 |
+| W6 批 1 · P17–P19（迁移 000020–000021 + ticket_service 3 行） | ⬜ 未开始 | 后端；每索引一迁移，需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
-4. W6 批 1 逐索引推进（000016=P13 ✅、000017=P14 ✅、000018=P15 ✅，下一 000019=P16）。
+4. W6 批 1 逐索引推进（000016=P13 ✅、000017=P14 ✅、000018=P15 ✅、000019=P16 ✅，下一 000020=P17）。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 
