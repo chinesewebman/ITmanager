@@ -6,6 +6,7 @@ import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { message } from 'antd'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
 const h = vi.hoisted(() => ({
@@ -264,5 +265,22 @@ describe('Oncall', () => {
     fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
     fireEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
     expect(await screen.findByText('请输入名称')).toBeInTheDocument()
+  })
+
+  // M7：升级策略 Levels 是 JSON textarea，非法 JSON 时 JSON.parse 抛 SyntaxError。
+  // 此前 catch 直接 message.error(e.message) → 英文 "Unexpected token..." 技术报错。
+  it('M7：升级策略 Levels 非法 JSON 提示友好中文（apiSend 不调用）', async () => {
+    vi.mocked(message.error).mockClear()
+    renderOncall()
+    openTab('升级策略')
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'policy-x' } })
+    fireEvent.change(screen.getByLabelText('Levels (JSON 数组)'), { target: { value: '{bad json' } })
+    fireEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
+
+    await waitFor(() => {
+      expect(message.error).toHaveBeenCalledWith('Levels JSON 格式错误，请检查后重试')
+    })
+    expect(h.apiSend).not.toHaveBeenCalled()
   })
 })

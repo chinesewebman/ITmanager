@@ -161,7 +161,11 @@ function PoliciesTab() {
       message.success('已创建')
       setModalOpen(false)
       refetch()
-    } catch (e: any) { if (!e?.errorFields && !e?.isAxiosError) message.error(e?.message ?? '失败') }
+    } catch (e: any) {
+      if (e?.errorFields || e?.isAxiosError) return
+      // M7：JSON.parse 抛 SyntaxError 时给友好中文，而非英文技术报错（如 "Unexpected token..."）
+      message.error(e instanceof SyntaxError ? 'Levels JSON 格式错误，请检查后重试' : (e?.message ?? '失败'))
+    }
     finally { setSubmitting(false) }
   }
 
