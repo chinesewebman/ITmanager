@@ -303,6 +303,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev16 | 2026-09-10 | **W4-M4（第 4 步 Settings）完成，M4 全部 4 文件收口**：`Settings.tsx` 渠道 Modal `onOk={handleSaveChannel}` 加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 全部完成（AlertSuppressions/Oncall/Runbook/Settings 共 4 文件 6 提交点） |
 | rev17 | 2026-09-10 | **W4-M5（第 1 步 AlertSuppressions）完成**：删除规则 Popconfirm `title="确定删除？"`（无对象名、无 danger）→ 四件套（范本 `AssetTable:163-168`）`title={`确认删除规则「${record.name}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。1 用例绿（确认框 title 带对象名 + 确认按钮 `ant-btn-dangerous` + 确认后 DELETE `/alert-suppressions/r1`），变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言。M5 剩 Runbook 1 处 + Oncall 2 处待续 |
 | rev18 | 2026-09-10 | **W4-M5（第 2 步 Runbook）完成**：删除 Runbook Popconfirm `title="确定删除?"`（无对象名、无 danger）→ 四件套 `title={`确认删除 Runbook「${rb.title}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。1 用例绿（确认框 title 带对象名 + 确认按钮 `ant-btn-dangerous` + 确认后 DELETE `/runbooks/r1`），变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言。M5 剩 Oncall 2 处待续 |
+| rev19 | 2026-09-10 | **W4-M5（第 3 步 Oncall）完成，M5 全部 4 处收口**：值班组（`SchedulesTab`）+ 升级策略（`PoliciesTab`）两处 Popconfirm `title="删除？"`（无对象名、无 danger）→ 四件套 `title={`确认删除值班组/升级策略「${r.name}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。2 用例绿（两处确认框 title 带对象名 + `ant-btn-dangerous` + 确认后 DELETE `/oncall/schedules/s1`、`/oncall/policies/p1`），变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处完成（AlertSuppressions/Runbook/Oncall×2）** |
 
 ---
 
@@ -342,7 +343,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M4 提交按钮 loading · Settings.tsx | ✅ 完成 | 渠道 Modal（`onOk={handleSaveChannel}`）加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在断言。**M4 全部 4 文件收口** |
 | W4-M5 危险操作确认 · AlertSuppressions.tsx | ✅ 完成 | 删除规则 Popconfirm 四件套（title 带对象名 + `okButtonProps danger`）；1 用例绿，变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言 |
 | W4-M5 危险操作确认 · Runbook.tsx | ✅ 完成 | 删除 Runbook Popconfirm 四件套（title 带 `rb.title` + `okButtonProps danger`）；1 用例绿，变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言 |
-| W4-M5 危险操作确认 · Oncall.tsx（2 处） | ⬜ 未开始 | Oncall.tsx:114 值班组（`r.name`）、Oncall.tsx:181 升级策略（`r.name`）统一四件套 |
+| W4-M5 危险操作确认 · Oncall.tsx（2 处） | ✅ 完成 | 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两处 Popconfirm 四件套（title 带 `r.name` + `okButtonProps danger`）；2 用例绿，变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处收口** |
 | W4-M6 14 处 required 无 message | ⬜ 未开始 | Settings.tsx:772…、Oncall.tsx:105,158、TicketFormModal.tsx:56、AssetFormModal.tsx:100 统一「请输入/请选择 XXX」 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
@@ -350,7 +351,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
-3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。**W4 批 1 剩余：M5/M6**。
+3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。**W4 批 1 剩余：M6（14 处 required 无 message）**。
 4. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。

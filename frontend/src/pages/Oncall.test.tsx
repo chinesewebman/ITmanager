@@ -4,7 +4,7 @@
 // W2：当前值班时间此前用无 locale 的 toLocaleString('zh-CN')。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
@@ -201,5 +201,49 @@ describe('Oncall', () => {
     expect(h.apiSend).toHaveBeenCalledTimes(1)
 
     resolveSend(undefined)
+  })
+
+  // M5：危险操作确认统一——title 带对象名 + okText="删除" + okButtonProps danger
+  // （范本 AssetTable Popconfirm 四件套）。此前两处 title 都只有「删除？」不带对象名，无 danger。
+  it('M5：删除值班组确认框带对象名 + danger 确认按钮', async () => {
+    h.apiSend.mockResolvedValue(undefined)
+    renderOncall()
+    openTab('值班组')
+
+    // 第一行（dev-team）的删除按钮
+    fireEvent.click(screen.getAllByRole('button', { name: /删\s*除/ })[0])
+
+    const title = await screen.findByText(/确认删除值班组「dev-team」/)
+    expect(title).toBeInTheDocument()
+
+    const popover = title.closest('.ant-popover') as HTMLElement
+    const okBtn = within(popover).getByRole('button', { name: /删\s*除/ })
+    expect(okBtn).toHaveClass('ant-btn-dangerous')
+
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/oncall/schedules/s1')
+    })
+  })
+
+  it('M5：删除升级策略确认框带对象名 + danger 确认按钮', async () => {
+    h.apiSend.mockResolvedValue(undefined)
+    renderOncall()
+    openTab('升级策略')
+
+    // 唯一一行（critical）的删除按钮
+    fireEvent.click(screen.getAllByRole('button', { name: /删\s*除/ })[0])
+
+    const title = await screen.findByText(/确认删除升级策略「critical」/)
+    expect(title).toBeInTheDocument()
+
+    const popover = title.closest('.ant-popover') as HTMLElement
+    const okBtn = within(popover).getByRole('button', { name: /删\s*除/ })
+    expect(okBtn).toHaveClass('ant-btn-dangerous')
+
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/oncall/policies/p1')
+    })
   })
 })

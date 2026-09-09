@@ -111,7 +111,17 @@ function SchedulesTab() {
             { title: '时区', dataIndex: 'timezone', render: (v) => v ?? 'Asia/Shanghai' },
             { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
             { title: '说明', dataIndex: 'description' },
-            { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
+            { title: '操作', key: 'actions', render: (_, r) => (
+              <Popconfirm
+                title={`确认删除值班组「${r.name}」？`}
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => r.id && onDelete(r.id)}
+              >
+                <Button danger size="small" icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>
+            ) },
           ]} />
       )}
       <Modal title="新建值班组" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
@@ -178,7 +188,17 @@ function PoliciesTab() {
                 ))}
               </Space>
             ) },
-            { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
+            { title: '操作', key: 'actions', render: (_, r) => (
+              <Popconfirm
+                title={`确认删除升级策略「${r.name}」？`}
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => r.id && onDelete(r.id)}
+              >
+                <Button danger size="small" icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>
+            ) },
           ]} />
       )}
       <Modal title="新建升级策略" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
