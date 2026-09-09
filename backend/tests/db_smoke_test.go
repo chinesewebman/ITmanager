@@ -662,19 +662,19 @@ func mustJSON(t *testing.T, v any) string {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000015，故三次 Down = 15 → 14 → 13。
+//     当前最高版本是 000016，故四次 Down = 16 → 15 → 14 → 13。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
-	// 前置 1：必须已应用到 000015（本用例回滚 15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
+	// 前置 1：必须已应用到 000016（本用例回滚 16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 16`).
 		Scan(&applied).Error; err != nil {
 		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
 	}
 	if applied == 0 {
-		t.Fatalf("库未应用到 000015 —— 本用例要回滚 15→14→13，前置不满足")
+		t.Fatalf("库未应用到 000016 —— 本用例要回滚 16→15→14→13，前置不满足")
 	}
 
 	// 前置 2：必须是**升级路径**库。回滚链里要断言 000014 的回填值仍在（assertJSONB），
@@ -691,11 +691,19 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// 第一次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
+	// 第一次 Down = 回滚 000016：删除 pending 部分索引
+	require.NoError(t, migrate.Down(db), "回滚 000016 失败")
+	var pendingIdxExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_notification_logs_pending')`).
+		Scan(&pendingIdxExists).Error)
+	assert.False(t, pendingIdxExists, "down 000016 应 DROP idx_notification_logs_pending")
+
+	// 第二次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
 	require.NoError(t, migrate.Down(db), "回滚 000015 失败")
 	assertNetBoxIDIndexUnique(t, db, false)
 
-	// 第二次 Down = 回滚 000014：只撤列默认值，数据不动
+	// 第三次 Down = 回滚 000014：只撤列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
 	var def *string
 	require.NoError(t, db.Raw(
@@ -704,7 +712,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
 	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
 
-	// 第三次 Down = 回滚 000013：本用例真正要守的那个
+	// 第四次 Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool
@@ -713,4 +721,69 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		 WHERE table_name = 'tickets' AND column_name = 'ticket_type')`,
 	).Scan(&exists).Error)
 	assert.True(t, exists, "down 不得 DROP 000001 建的 tickets.ticket_type（丢列丢数据）")
+}
+
+// explainSeqScanOff 在**单连接**上禁掉顺序扫描后跑 EXPLAIN，返回完整计划文本。
+//
+// 为什么用单连接：`SET enable_seqscan` 是会话级，走连接池会在 EXPLAIN 时换连接、
+// 设置失效。为什么禁 seqscan：冒烟库几乎为空，优化器对 0 行表默认选 Seq Scan
+// （无数据时索引反而慢），EXPLAIN 断言会假红；禁掉后强制走索引，验证「索引存在
+// 且其谓词/列与查询匹配」。
+func explainSeqScanOff(t *testing.T, db *gorm.DB, query string) string {
+	t.Helper()
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	conn, err := sqlDB.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, err = conn.ExecContext(context.Background(), "SET enable_seqscan = off")
+	require.NoError(t, err, "SET enable_seqscan 失败")
+
+	rows, err := conn.QueryContext(context.Background(), query)
+	require.NoError(t, err, "EXPLAIN 失败")
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var line string
+		require.NoError(t, rows.Scan(&line))
+		lines = append(lines, line)
+	}
+	require.NoError(t, rows.Err())
+	return strings.Join(lines, "\n")
+}
+
+// TestDBSmoke_NotificationPendingIndex 守 000016 的 pending 部分索引（W6 P13）。
+//
+// 为什么必须真 PG：sqlite 单测用本地 GORM AutoMigrate 的 schema，测不到迁移产物
+// 是否真的建了部分索引；而 worker 的轮询查询 `WHERE status='pending' ORDER BY sent_at`
+// 在 000009 只有 failed 部分索引时全表扫（审计实测 286.6ms）。两层断言：
+// ① 索引形态是部分索引（WHERE status='pending'，列 sent_at）；② EXPLAIN 走该索引。
+func TestDBSmoke_NotificationPendingIndex(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 前置不满足必须**红**，不是跳过：本用例是 000016 的唯一真库守门。
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 16`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000016（idx_notification_logs_pending）—— 本用例前置不满足")
+	}
+
+	// ① 索引形态：部分索引 WHERE status='pending'，列 sent_at
+	var def string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_notification_logs_pending'`).
+		Scan(&def).Error)
+	require.NotEmpty(t, def, "idx_notification_logs_pending 不存在 —— 000016 没跑？")
+	assert.Contains(t, def, "sent_at", "索引应建在 sent_at 上：%s", def)
+	assert.Contains(t, def, "status", "部分索引谓词应含 status 列：%s", def)
+	assert.Contains(t, def, "'pending'", "部分索引谓词应是 status='pending'：%s", def)
+
+	// ② EXPLAIN 断言：worker 的 pending 轮询查询走该索引（worker.go:198-206 同款）
+	plan := explainSeqScanOff(t, db,
+		`EXPLAIN (COSTS OFF) SELECT * FROM notification_logs WHERE status = 'pending' ORDER BY sent_at ASC LIMIT 100`)
+	assert.Contains(t, plan, "idx_notification_logs_pending",
+		"pending 轮询查询应走部分索引：\n%s", plan)
 }

@@ -239,7 +239,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 
 | # | 项 | 待确认 |
 |---|---|---|
-| P20 | `pg_trgm` + `idx_assets_trgm`（#3 的 `ILIKE '%x%'` 三列搜索） | 收益最大（1.75s→~0.02s）但**写放大最明显**，且 `CREATE EXTENSION` 权限不足会让整个迁移失败 → 服务起不来。单独 000017 迁移，失败可回滚 |
+| P20 | `pg_trgm` + `idx_assets_trgm`（#3 的 `ILIKE '%x%'` 三列搜索） | 收益最大（1.75s→~0.02s）但**写放大最明显**，且 `CREATE EXTENSION` 权限不足会让整个迁移失败 → 服务起不来。单独 000022 迁移（批 1 六索引占 000016–000021 后顺延），失败可回滚 |
 | P21 | `statsInternal` 30s 缓存 + `KPIs` 缓存（#2/#4） | 接受 30s 滞后；且进程内缓存会跨测试用例串值，必须提供可注入 `nil` 缓存的入口 |
 | P22 | 拓扑接口分页/缓存（#8） | 全量拉 assets + asset_networks，200k 资产响应几十 MB；加 LIMIT 会改产品语义，先与前端定 |
 
@@ -307,6 +307,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev20 | 2026-09-10 | **W4-M6（第 1 步 Settings）完成**：渠道 Modal 10 处 `required: true` 无 message（antd 默认英文「${label} is required」语气不一致）→ 统一句式：name「请输入渠道名称」、type「请选择渠道类型」、smtp_host/port/user/from「请输入SMTP服务器/端口/用户名/发件人」、to「请输入收件人」、dingtalk/wechat/webhook 的 url「请输入Webhook URL」。3 用例绿（顶层不填保存断言 name+type 中文提示；email 条件字段 5 处；dingtalk URL），变异（去 smtp_host message）红在「找不到『请输入SMTP服务器』」断言。M6 剩 Oncall 2 处 + TicketFormModal 1 处 + AssetFormModal 1 处待续 |
 | rev21 | 2026-09-10 | **W4-M6（第 2 步 Oncall）完成**：值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个「名称」`required: true` 无 message → `message: '请输入名称'`。2 用例绿（两处不填名称保存断言「请输入名称」），变异（去值班组名称 message）红在「找不到『请输入名称』」断言。M6 剩 TicketFormModal 1 处 + AssetFormModal 1 处待续 |
 | rev22 | 2026-09-10 | **W4-M6 收口（12 处完成 + 2 处豁免）**：TicketFormModal.tsx:56 priority、AssetFormModal.tsx:100 status 两处 `required` 有默认值预填（`'normal'`/`'active'`）且 Select 无 `allowClear`，校验永不触发（死代码）→ 不加 message，豁免（违反「不为不可能状态写代码」且变异反证无法做）。§4.1 M6 描述与 §8 台账同步记录豁免理由。**M6 全部完成：Settings 10 + Oncall 2 已改，2 处豁免**。W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6） |
+| rev23 | 2026-09-10 | **W6 批 1 第 1 步 P13 完成**：通知 worker 每 5s 轮询 `status='pending'` 全表扫（286.6ms）→ 迁移 000016 加 `idx_notification_logs_pending (sent_at) WHERE status='pending'` 部分索引（与 000009 的 failed 索引互补）。真 PG dbsmoke 两层断言：① 索引形态（pg_indexes.indexdef 含 sent_at/status/'pending'）；② EXPLAIN（`enable_seqscan=off` 强制走索引，验证谓词/列匹配）。`DownPreservesLegacyColumns` 三次→四次 Down（16→15→14→13）。变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。**决策：批 1 六索引拆 000016–000021 每索引一迁移**（失败隔离/独立回滚/小步可验证），P20 pg_trgm 顺延 000022 |
 
 ---
 
@@ -350,14 +351,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M6 required 无 message · Settings.tsx（10 处） | ✅ 完成 | 渠道 Modal name/type/smtp_host/smtp_port/smtp_user/from/to/dingtalk-url/wechat-url/webhook-url 统一「请输入/请选择 XXX」；3 用例绿，变异（去 smtp_host message）红在「请输入SMTP服务器」断言 |
 | W4-M6 required 无 message · Oncall.tsx（2 处） | ✅ 完成 | 值班组 + 升级策略「名称」→ `message: '请输入名称'`；2 用例绿，变异（去值班组名称 message）红在「请输入名称」断言 |
 | W4-M6 required 无 message · TicketFormModal/AssetFormModal（2 处） | ⏭️ 豁免 | priority/status 均默认值预填（`'normal'`/`'active'`）且 Select 无 `allowClear`，required 永不触发（死代码），加 message 违反「不为不可能状态写代码」且变异反证无法做。**M6 实际收口 12 处（Settings 10 + Oncall 2）** |
-| W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
+| W6 批 1 · P13 通知 pending 索引（迁移 000016） | ✅ 完成 | `idx_notification_logs_pending (sent_at) WHERE status='pending'`；dbsmoke 形态 + EXPLAIN 断言；Down 链 16→13；变异红在 `NotEmpty` 断言 |
+| W6 批 1 · P14–P19（迁移 000017–000021 + ticket_service 3 行） | ⬜ 未开始 | 后端；每索引一迁移，需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
-4. W6 批 1 迁移 000016。
+4. W6 批 1 逐索引推进（000016=P13 ✅ 完成，下一 000017=P14）。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 
