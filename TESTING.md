@@ -1,8 +1,23 @@
 # 测试现状报告
 
-**最后更新**: 2026-09-09（本次只增量更新本节与下方「2026-09-09 增量（通知渠道配置契约轮）」的 rev3 数字；其余章节仍是 2026-06-16 快照）
+**最后更新**: 2026-09-09（本次只增量更新本节与下方「通知渠道配置契约轮」的 rev5 数字；其余章节仍是 2026-06-16 快照）
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
-**状态**: ✅ 968 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 170 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
+**状态**: ✅ 981 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 174 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
+
+---
+
+## 🆕 2026-09-09 增量（通知渠道配置契约轮 M2：钉钉加签 + 回执校验，TODO G-33）
+
+| 维度 | 数值 / 说明 |
+|---|---|
+| Backend 测试函数 | **981**（+10；新增 `internal/notification/sender_sign_resp_test.go`：签名向量、端到端加签/不加签、钉钉回执三态、webhook best-effort 9 例、文本卫生、`respBody` 限读） |
+| 签名向量 | 由**独立实现**算得（Python `hmac`+`base64`，secret=`SECtest123`、ts=`1700000000000`）→ `w3RMHXzixTMdzr8OHJUmVLS4IoPJVdu+Ut1LE48MePE=`；同时断言**不等于** key/msg 写反的值（`g422EgUWUUtq1vqcbsWy00w6OM8jnLYKr0K4GIfygTQ=`）。不拿被测代码自证 |
+| 覆盖 | `sanitizeSnippet`/`respBody`/`dingRespErr`/`webhookRespErr`/`dingTalkSignedURL` **100%**，`DingTalkSender.Send` 94.7%（未覆盖为 `NewRequestWithContext` 出错分支） |
+| 变异反证 | **M2-1..M2-8 八条全红在断言上**：key/msg 写反、手拼 query（`+`/`=` 不编码）、钉钉不校验回执、webhook 不校验回执、钉钉回执 fail-open、去 `redact.Text`、按**字节**截断（保持可编译的改法）、无 `sign_secret` 也加签 |
+| 新增 trap 候选 | **变异必须可编译**（T-31 复现）：M2-7 首次写成 `s[:200]` → `unicode/utf8` 变未使用 import → 红在编译上；改成 `_ = utf8.RuneCountInString(s)` 后才红在断言（`expected 200 / actual 68`） |
+| 新增残余 | **R-12**（webhook best-effort 会把 `{"code":200}` 判失败）、**R-13**（钉钉回执非 JSON 走 fail-closed，网关改写响应体会误判）——见 `docs/FIX-PLAN-NOTIFY-CHANNEL.md` §5 |
+
+> 验证口径：`go test ./... -count=1` 27 包全绿、`go vet` / `gofmt -l` 干净；frontend 本轮未改（27 文件 174 测试）。
 
 ---
 

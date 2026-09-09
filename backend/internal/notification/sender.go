@@ -14,16 +14,22 @@ package notification
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/redact"
@@ -130,6 +136,95 @@ func parseConfig(s string) (channelConfig, error) {
 	return c, nil
 }
 
+// maxRespSnippet 第三方回执进错误文本前的 rune 上界。LimitReader 只限**读取量**，
+// 不限嵌入错误文本的长度（安全审计 M-3），故读取后再截断。
+const maxRespSnippet = 200
+
+// sanitizeSnippet 把不可信文本（第三方响应体 / errmsg）规整成可安全嵌入错误文本的片段：
+// 脱敏 → 清理非法 UTF-8（第三方可能回传非 UTF-8 字节）→ 按 rune 截断（按字节截断会
+// 切断多字节字符，口径同 worker.markFailed）。
+func sanitizeSnippet(s string) string {
+	s = redact.Text(strings.TrimSpace(s))
+	s = strings.ToValidUTF8(s, "�")
+	if utf8.RuneCountInString(s) > maxRespSnippet {
+		s = string([]rune(s)[:maxRespSnippet])
+	}
+	return s
+}
+
+// respBody 读响应体（最多 4KiB）——上游响应体一律视为不可信（G-31 残余）。
+func respBody(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 4<<10))
+	return string(b)
+}
+
+// dingTalkSignedURL 返回带 timestamp/sign 的钉钉 webhook URL。
+//
+// 消歧义写法（安全审计 M-4）：key = sign_secret，msg = timestamp + "\n" + sign_secret，
+// sign = base64(HMAC-SHA256(key, msg))。写成 HMAC(key=msg, msg=secret) 这种顺序写反的
+// 记法会得到恒定 310000（钉钉只报「签名校验失败」，不告诉你是顺序问题）。
+//
+// 追加 query 用 url.Values.Encode()（与钉钉的 quote_plus 等价），不手拼 "&timestamp="
+// ——webhook_url 没有 query 时首个参数必须是 "?"。
+//
+// 返回值是**限时凭据**：调用方只能放局部变量，不得回写 cfg、不得进错误文本/日志。
+func dingTalkSignedURL(webhookURL, signSecret string, tsMillis int64) (string, error) {
+	u, err := url.Parse(webhookURL)
+	if err != nil {
+		return "", err
+	}
+	ts := strconv.FormatInt(tsMillis, 10)
+	mac := hmac.New(sha256.New, []byte(signSecret))
+	mac.Write([]byte(ts + "\n" + signSecret))
+	q := u.Query()
+	q.Set("timestamp", ts)
+	q.Set("sign", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// dingRespErr 校验钉钉回执：HTTP 2xx 也可能 errcode != 0（310000 加签错误、关键词不匹配、
+// 频率限制）——只看状态码会把「根本没发出去」记成 success，正是 G-33 的原始问题。
+// 回执不可解析一律按失败处理（fail-closed）：钉钉恒返 JSON，拿到非 JSON 说明中间有代理/网关，
+// 此时无法确认送达。
+func dingRespErr(raw string) error {
+	var r struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return fmt.Errorf("dingtalk 回执不是合法 JSON: %s", sanitizeSnippet(raw))
+	}
+	if r.ErrCode != 0 {
+		return fmt.Errorf("dingtalk errcode=%d: %s", r.ErrCode, sanitizeSnippet(r.ErrMsg))
+	}
+	return nil
+}
+
+// webhookRespErr 通用 webhook 的 **best-effort** 回执校验：仅当响应体是合法 JSON 且含
+// 数值型 errcode/code 且非 0 时视为失败；其余形状维持「只看 HTTP 状态」——不假定第三方协议。
+func webhookRespErr(raw string) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	for _, k := range []string{"errcode", "code"} {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			continue // 非数值型：不判定
+		}
+		if n != 0 {
+			return fmt.Errorf("webhook 回执 %s=%d: %s", k, n, sanitizeSnippet(raw))
+		}
+		return nil
+	}
+	return nil
+}
+
 // ==================== DingTalk Sender ====================
 
 type DingTalkSender struct {
@@ -163,7 +258,17 @@ func (d *DingTalkSender) Send(ctx context.Context, _, content string) error {
 		},
 	}
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.cfg.WebhookURL, bytes.NewReader(body))
+
+	// 加签：target 是限时凭据，只放局部变量 —— 不回写 cfg、不进错误文本/日志/recipient。
+	target := d.cfg.WebhookURL
+	if d.cfg.SignSecret != "" {
+		signed, err := dingTalkSignedURL(target, d.cfg.SignSecret, time.Now().UnixMilli())
+		if err != nil {
+			return fmt.Errorf("dingtalk: 无效的 webhook_url: %w", urlErrCause(err))
+		}
+		target = signed
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		// 不包原 err：url.Parse 的失败文本含完整 URL（access_token 就在 query 里）
 		return fmt.Errorf("dingtalk: 无效的 webhook_url: %w", urlErrCause(err))
@@ -178,7 +283,7 @@ func (d *DingTalkSender) Send(ctx context.Context, _, content string) error {
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("dingtalk http %d", resp.StatusCode)
 	}
-	return nil
+	return dingRespErr(respBody(resp.Body))
 }
 
 // ==================== Email Sender ====================
@@ -325,5 +430,5 @@ func (w *WebhookSender) Send(ctx context.Context, _, content string) error {
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("webhook http %d", resp.StatusCode)
 	}
-	return nil
+	return webhookRespErr(respBody(resp.Body))
 }
