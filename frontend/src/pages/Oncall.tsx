@@ -6,6 +6,9 @@ import {
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
+import { ErrorState } from '../components/ErrorState'
+import { EmptyState } from '../components/EmptyState'
+import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -17,21 +20,8 @@ interface EscalationPolicy {
   levels: { level: number; target_type: string; target_id: string; wait_minutes: number; notify_methods: string }[]
 }
 
-const MOCK_CURRENT: OncallCurrent[] = [
-  { schedule_id: 's1', schedule_name: 'dev-team', user_name: 'alice', ends_at: new Date(Date.now() + 3 * 3600_000).toISOString() },
-  { schedule_id: 's2', schedule_name: 'ops-team', user_name: 'bob', ends_at: new Date(Date.now() + 1 * 3600_000).toISOString() },
-]
-const MOCK_SCHEDULES: OncallSchedule[] = [
-  { id: 's1', name: 'dev-team', description: '研发组白班', enabled: true },
-  { id: 's2', name: 'ops-team', description: '运维组 7x24', enabled: true },
-]
-const MOCK_POLICIES: EscalationPolicy[] = [
-  { id: 'p1', name: 'critical-alert', enabled: true, levels: [
-    { level: 1, target_type: 'user', target_id: 'alice', wait_minutes: 5, notify_methods: 'email' },
-    { level: 2, target_type: 'user', target_id: 'bob', wait_minutes: 5, notify_methods: 'sms' },
-    { level: 3, target_type: 'channel', target_id: 'all-ops', wait_minutes: 5, notify_methods: 'sms,webhook' },
-  ] },
-]
+// W1：三处 `catch { return MOCK_* }` 已删除。原写法让 isError 恒 false ——
+// 接口失败时页面显示虚构的值班人/值班组/升级策略，运维照着一屏假数据排查。
 
 export function Oncall() {
   useDocumentTitle('值班管理')
@@ -47,19 +37,29 @@ export function Oncall() {
 }
 
 function CurrentTab() {
-  const { data } = useApiQuery<OncallCurrent[]>(['oncall', 'current'] as const,
-    async () => { try { return await apiGet<OncallCurrent[]>('/oncall/current') } catch { return MOCK_CURRENT } })
+  const { data, isLoading, isError, error, refetch } = useApiQuery<OncallCurrent[]>(
+    ['oncall', 'current'] as const,
+    async () => {
+      const items = await apiGet<OncallCurrent[]>('/oncall/current')
+      return Array.isArray(items) ? items : []
+    },
+  )
 
-  const list = data ?? MOCK_CURRENT
+  const list = data ?? []
   return (
-    <Card title="当前在班" size="small">
-      {list.length === 0 ? <Text type="secondary">当前无在班 user</Text> : (
+    <Card title="当前在班" size="small" loading={isLoading}>
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} compact />
+      ) : list.length === 0 ? (
+        <EmptyState title="当前无人在班" description="没有正在进行的值班排班" compact />
+      ) : (
         <Space direction="vertical" style={{ width: '100%' }}>
           {list.map((c) => (
             <Card key={c.schedule_id} size="small" type="inner" title={c.schedule_name}>
               <Text strong style={{ fontSize: 16 }}>{c.user_name}</Text>
               <br />
-              <Text type="secondary">值班至 {new Date(c.ends_at).toLocaleString('zh-CN')}</Text>
+              {/* W2：原先用无 locale 的 toLocaleString('zh-CN')，与其它页口径不一致 */}
+              <Text type="secondary">值班至 {formatDateTime(c.ends_at)}</Text>
             </Card>
           ))}
         </Space>
@@ -71,9 +71,14 @@ function CurrentTab() {
 function SchedulesTab() {
   const [form] = Form.useForm<OncallSchedule>()
   const [modalOpen, setModalOpen] = useState(false)
-  const { data, refetch } = useApiQuery<OncallSchedule[]>(['oncall', 'schedules'] as const,
-    async () => { try { return await apiGet<OncallSchedule[]>('/oncall/schedules') } catch { return MOCK_SCHEDULES } })
-  const list = data ?? MOCK_SCHEDULES
+  const { data, isLoading, isError, error, refetch } = useApiQuery<OncallSchedule[]>(
+    ['oncall', 'schedules'] as const,
+    async () => {
+      const items = await apiGet<OncallSchedule[]>('/oncall/schedules')
+      return Array.isArray(items) ? items : []
+    },
+  )
+  const list = data ?? []
 
   async function onSubmit() {
     try {
@@ -92,14 +97,19 @@ function SchedulesTab() {
 
   return (
     <Card size="small" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setModalOpen(true) }}>新建</Button>}>
-      <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false}
-        columns={[
-          { title: '名称', dataIndex: 'name' },
-          { title: '时区', dataIndex: 'timezone', render: (v) => v ?? 'Asia/Shanghai' },
-          { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
-          { title: '说明', dataIndex: 'description' },
-          { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
-        ]} />
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} compact />
+      ) : (
+        <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false} loading={isLoading}
+          locale={{ emptyText: <EmptyState title="暂无值班组" description="点击「新建」创建第一个值班组" compact /> }}
+          columns={[
+            { title: '名称', dataIndex: 'name' },
+            { title: '时区', dataIndex: 'timezone', render: (v) => v ?? 'Asia/Shanghai' },
+            { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
+            { title: '说明', dataIndex: 'description' },
+            { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
+          ]} />
+      )}
       <Modal title="新建值班组" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
           <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
@@ -115,9 +125,14 @@ function SchedulesTab() {
 function PoliciesTab() {
   const [form] = Form.useForm<EscalationPolicy>()
   const [modalOpen, setModalOpen] = useState(false)
-  const { data, refetch } = useApiQuery<EscalationPolicy[]>(['oncall', 'policies'] as const,
-    async () => { try { return await apiGet<EscalationPolicy[]>('/oncall/policies') } catch { return MOCK_POLICIES } })
-  const list = data ?? MOCK_POLICIES
+  const { data, isLoading, isError, error, refetch } = useApiQuery<EscalationPolicy[]>(
+    ['oncall', 'policies'] as const,
+    async () => {
+      const items = await apiGet<EscalationPolicy[]>('/oncall/policies')
+      return Array.isArray(items) ? items : []
+    },
+  )
+  const list = data ?? []
 
   async function onSubmit() {
     try {
@@ -139,20 +154,25 @@ function PoliciesTab() {
 
   return (
     <Card size="small" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setModalOpen(true) }}>新建</Button>}>
-      <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false}
-        columns={[
-          { title: '名称', dataIndex: 'name' },
-          { title: '层级数', key: 'levels', render: (_, r) => <Tag>{r.levels?.length ?? 0} 级</Tag> },
-          { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
-          { title: '层级详情', key: 'detail', render: (_, r) => (
-            <Space size="small" wrap>
-              {(r.levels ?? []).map((lv) => (
-                <Tag key={lv.level} color="blue">L{lv.level} {lv.target_type}/{lv.target_id} {lv.wait_minutes}m {lv.notify_methods}</Tag>
-              ))}
-            </Space>
-          ) },
-          { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
-        ]} />
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} compact />
+      ) : (
+        <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false} loading={isLoading}
+          locale={{ emptyText: <EmptyState title="暂无升级策略" description="点击「新建」创建第一条升级策略" compact /> }}
+          columns={[
+            { title: '名称', dataIndex: 'name' },
+            { title: '层级数', key: 'levels', render: (_, r) => <Tag>{r.levels?.length ?? 0} 级</Tag> },
+            { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
+            { title: '层级详情', key: 'detail', render: (_, r) => (
+              <Space size="small" wrap>
+                {(r.levels ?? []).map((lv) => (
+                  <Tag key={lv.level} color="blue">L{lv.level} {lv.target_type}/{lv.target_id} {lv.wait_minutes}m {lv.notify_methods}</Tag>
+                ))}
+              </Space>
+            ) },
+            { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
+          ]} />
+      )}
       <Modal title="新建升级策略" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
           <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>

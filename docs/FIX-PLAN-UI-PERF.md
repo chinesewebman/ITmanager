@@ -307,17 +307,20 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W1+W2 `pages/Alerts.tsx` + `AlertTable` | ✅ 完成 | 7 用例绿；两条变异（去 isError 分支 / 去 stats 守卫）均红在断言 |
 | W1+M9+M10 `pages/Assets.tsx` + `AssetFilterBar` | ✅ 完成 | 11 用例绿；三条变异（去 isError 分支 / 副标题回落未过滤计数 / 去 ip_address 守卫）均红在断言 |
 | W1+M10+W2 `pages/Tickets.tsx` + `TicketTable`/`TicketDetailModal`/`TicketStatsCards` | ✅ 完成 | 8 用例绿；四条变异（去列表错误分支 / 统计写死 / 去统计错误分支 / 列表时间原样）均红在断言。统计卡改 5 档真实推导（含 `pending`，见 §1.3-7② rev4 修正） |
-| W1 其余 7 页（Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
-| W2 其余 3 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122` / `Oncall:62`（`AlertTable`、`TicketTable`、`TicketDetailModal` 已完成） |
+| W1+W2 `pages/Oncall.tsx` | ✅ 完成 | 10 用例绿；四条变异（值班组去错误分支 / 去空态 / 当前值班时间回退原样渲染 / 升级策略去错误分支）均红在断言。三个 tab 的 `catch { return MOCK_* }` + `data ?? MOCK_*` 双重兜底已删除 |
+| W1 其余 6 页（AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W2 其余 2 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122`（`AlertTable`、`TicketTable`、`TicketDetailModal`、`Oncall` 已完成） |
 | W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~提交推送当前已完成项~~ → 已完成（`9ae6607`、`0868117`、`f836f94` 已推 main）。
-2. W1 逐页推进，下一页 `pages/Oncall.tsx`（含 W2 `Oncall:62` 时间格式化；该页是 `queryFn` 内 `catch { return MOCK_* }` 三重兜底 + 解构兜底，见 §1.1）。
-3. W2 剩余 3 个调用点（可并入各页 W1 的同一小步）。
+2. W1 逐页推进，下一页 `pages/AlertSuppressions.tsx`。
+3. W2 剩余 2 个调用点（可并入各页 W1 的同一小步）。
 4. W4 批 1 剩余 7 项（H6 需先做 `cssVar` 实测）。
 5. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
+
+**测试盲区（W1 系列共有）**：本批单测 mock 掉 `useApiQuery`，故 `queryFn` 内的形状归一（`Array.isArray(items) ? items : []`）与 `catch` 删除不被单测覆盖。防回归靠两点：① `MOCK_*` 常量已从源码删除，重新引入无法通过编译；② `isError` 分支有断言。接口真实形状逐页核对 handler——`oncall_handler.go:35/124/135` 均返回 `{code,data:[...]}` 裸数组，`apiGet` 解包后即数组。
