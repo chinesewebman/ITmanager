@@ -87,9 +87,10 @@ export async function apiSend<T>(method: string, path: string, body?: any): Prom
 export const authApi = {
   login: (data: LoginRequest) => api.post("/auth/login", data),
   logout: () => api.post("/auth/logout"),
-  // C7: 跳过改密 (非首次场景; reason=first_login 后端会拒绝)
-  skipPasswordChange: (reason: "first_login" | "optional" = "optional") =>
-    api.post("/auth/skip-password-change", { reason }),
+  // C7: 确认无强改密待办（幂等）。
+  // 服务端判据是 DB 的 must_change_password，**不看** reason（reason 已废弃、可省略）；
+  // 强改密态下无论传什么一律 400。见 docs/FIX-PLAN-AUTHZ-LEFTOVER.md §2 D-A。
+  skipPasswordChange: (reason?: string) => api.post("/auth/skip-password-change", { reason }),
   // C7: 改密 (复用 PUT /auth/password; 后端 ChangePassword handler 兼容)
   changePassword: (oldPassword: string, newPassword: string) =>
     api.put("/auth/password", { old_password: oldPassword, new_password: newPassword }),

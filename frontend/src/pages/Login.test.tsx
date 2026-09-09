@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom'  // 补齐 toBeInTheDocument 等 matcher 的类型
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import Login from './Login'
 
 // Mock antd message（避免 jsdom 副作用）
@@ -21,6 +21,13 @@ vi.mock('../services/api', () => ({
 
 import { authApi } from '../services/api'
 
+// ChangePasswordProbe 探针：把目标路由的 query string 渲染出来，
+// 让「跳转参数名」成为真断言（只断言渲染了目标路由，参数写错也测不出来）。
+function ChangePasswordProbe() {
+  const location = useLocation()
+  return <div>{`CHANGE_PASSWORD_TARGET:${location.search}`}</div>
+}
+
 // 用 MemoryRouter 包 Login（因为 Login 现在用 useNavigate/useLocation）
 function renderLogin(initialPath: string = '/login', fromState: { from?: string } | null = null) {
   return render(
@@ -30,7 +37,7 @@ function renderLogin(initialPath: string = '/login', fromState: { from?: string 
         <Route path="/" element={<div>HOME_PAGE</div>} />
         <Route path="/assets" element={<div>ASSETS_PAGE</div>} />
         {/* C7: ChangePassword 占位 (verify Login 跳过来) */}
-        <Route path="/change-password" element={<div>CHANGE_PASSWORD_TARGET</div>} />
+        <Route path="/change-password" element={<ChangePasswordProbe />} />
       </Routes>
     </MemoryRouter>,
   )
@@ -133,7 +140,9 @@ describe('Login page', () => {
   })
 
   // C7: must_change_password 行为
-  it('首次登录 (must_change_password=true) 跳到 /change-password?reason=first-login', async () => {
+  // 参数名必须是 first_login（下划线）：ChangePassword.tsx 用它判断"首次不可跳"，
+  // 写成 first-login 会让判定恒 false → 跳过按钮在强改密时照样显示（S-1b）
+  it('首次登录 (must_change_password=true) 跳到 /change-password?reason=first_login', async () => {
     vi.mocked(authApi.login).mockResolvedValue({
       data: { data: { user: { id: '1', username: 'admin' }, must_change_password: true } },
     } as any)
@@ -145,7 +154,9 @@ describe('Login page', () => {
 
     await waitFor(
       () => {
-        expect(screen.getByText('CHANGE_PASSWORD_TARGET')).toBeInTheDocument()
+        expect(
+          screen.getByText(/CHANGE_PASSWORD_TARGET:\?reason=first_login$/),
+        ).toBeInTheDocument()
       },
       { timeout: 3000 },
     )

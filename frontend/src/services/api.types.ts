@@ -48,13 +48,15 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 跳过改密 (非首次场景)
-         * @description C7: 用户在 `/change-password` 页可点"跳过"调本接口。
-         *     写 `password_set_at = NOW()` + 清 `must_change_password = false` + 写 audit_log。
+         * 确认无强制改密待办 (幂等)
+         * @description C7: 用户在 `/change-password` 页点"跳过"时调用。
          *
-         *     主人 7/02 决策: **首次登录强改密不可跳**。
-         *     - `reason=first_login` → 400 (seed admin/admin123 这类必须改)
-         *     - `reason=optional` (或不传) → 允许 (用户主动取消改密, 不算"首次")
+         *     判据是服务端的 `users.must_change_password`，**不看请求体的 reason**（客户端可伪造）：
+         *     - `must_change_password=true` → 400（主人 7/02 决策：首次登录 / 管理员重置后的强制改密不可跳）
+         *     - `must_change_password=false` → 200，幂等且**不写任何状态**（不再写 password_set_at）
+         *
+         *     修复前只拒绝 `reason=="first_login"` 字面量，空 body 或 `reason=optional` 即可清 flag
+         *     绕过强改密（见 docs/FIX-PLAN-AUTHZ-LEFTOVER.md S-1）。
          */
         post: operations["skipPasswordChange"];
         delete?: never;
@@ -1495,25 +1497,30 @@ export interface operations {
             content: {
                 "application/json": {
                     /**
-                     * @description first_login=必改拒绝; optional=允许跳 (默认)
+                     * @deprecated
+                     * @description 已废弃：服务端不再读取，保留仅为兼容既有客户端请求体
                      * @example optional
-                     * @enum {string}
                      */
-                    reason?: "first_login" | "optional";
+                    reason?: string;
                 };
             };
         };
         responses: {
-            /** @description 跳过成功 */
+            /** @description 当前无强制改密待办 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Error"];
+                    "application/json": {
+                        /** @example 0 */
+                        code?: number;
+                        /** @example 当前无需改密 */
+                        message?: string;
+                    };
                 };
             };
-            /** @description 首次登录必改, 拒绝跳过 */
+            /** @description 当前账号处于强制改密状态, 不允许跳过 */
             400: {
                 headers: {
                     [name: string]: unknown;

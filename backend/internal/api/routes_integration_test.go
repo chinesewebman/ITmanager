@@ -1,11 +1,13 @@
 package api_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,7 @@ import (
 	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/migrate"
+	"network-monitor-platform/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -422,6 +425,9 @@ var gatedRoutes = []struct {
 	{middleware.CapIdentity, http.MethodGet, "/api/users", false},
 	{middleware.CapIdentity, http.MethodGet, "/api/users/:id", false},
 	{middleware.CapIdentity, http.MethodGet, "/api/auth/api-keys", false},
+	// 注：本表用随机 user_id（库里不存在），F-1 守卫会让 handler 返 404 ——
+	// 因此这里只证明「identity 门禁放行 admin」，**不**证明「admin 能铸造成功」。
+	// 后者的正例（真实 201）由 TestRoutes_APIKey不能管理APIKey 的铸造步骤承担。
 	{middleware.CapIdentity, http.MethodPost, "/api/auth/api-keys", false},
 	{middleware.CapIdentity, http.MethodDelete, "/api/auth/api-keys/:id", false},
 	{middleware.CapIdentity, http.MethodPut, "/api/auth/api-keys/:id/revoke", false},
@@ -494,7 +500,7 @@ var ungatedRoutes = map[string]string{
 	"POST /api/auth/login":                "登录入口（限流 5/min）",
 	"POST /api/auth/logout":               "登出（清 cookie）",
 	"PUT /api/auth/password":              "改自己的密码",
-	"POST /api/auth/skip-password-change": "自助跳过强改密（限流 3/min）",
+	"POST /api/auth/skip-password-change": "自助跳过强改密（无待办时幂等，不写状态）",
 	"GET /api/auth/me":                    "读自己的身份与能力集",
 
 	// ---- 非 GET 但无副作用 ----
@@ -561,6 +567,41 @@ func requestAs(t *testing.T, r *gin.Engine, method, path, role string) *httptest
 	return w
 }
 
+// genTokenForUser 生成指定 user_id + 角色的 JWT（API Key 测试需要 Key 关联到真实用户）
+func genTokenForUser(t *testing.T, userID, role string) string {
+	t.Helper()
+	tok, err := middleware.GenerateToken(userID, "user-"+role, role)
+	require.NoError(t, err)
+	return tok
+}
+
+// doJSONAsRaw 以指定 Authorization 头发一次请求（body=nil 时不带 body）
+func doJSONAsRaw(t *testing.T, r *gin.Engine, method, path, authHeader string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		require.NoError(t, err)
+		rdr = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// doJSONAs 以 Bearer token 发一次 JSON 请求
+func doJSONAs(t *testing.T, r *gin.Engine, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return doJSONAsRaw(t, r, method, path, "Bearer "+token, body)
+}
+
 // TestRoutes_能力矩阵_无权限被拒 逐条断言「没有该能力的角色一律 403」。
 //
 // 注意：本测试用 middleware.Can 决定「谁该被拒」，与被测实现同源 ——
@@ -609,6 +650,123 @@ func TestRoutes_能力矩阵_有权限放行(t *testing.T) {
 		}
 		require.NotZero(t, allowed, "%s %s 没有任何角色被放行：matrixRoles 是否漏了高权限角色？", c.method, c.path)
 	}
+}
+
+// TestRoutes_APIKey不能管理APIKey — AUTHZ 遗留缺陷 S-2（长期凭据不得自我复制）
+//
+// 必须用 **write scope** 的 Key 才复现攻击前提：read Key 打 POST/DELETE 会被
+// apiKeyAllows 先挡下（403 "API Key 权限不足"），测不出新中间件。
+// GET /api/auth/api-keys 是唯一「apiKeyAllows 会放行」的判别用例，必须覆盖。
+// PUT /api/auth/password 同理：泄露的 write Key 可直接改掉所属账号的密码。
+func TestRoutes_APIKey不能管理APIKey(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	uid := uuid.NewString()
+	// must_change_password=0：本用例测的是「Key 不能自我复制」，不是强改密收窄；
+	// 默认值 TRUE（migration 000012）会让 CreateAPIKey 提前 403，测不出新中间件
+	require.NoError(t, db.Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, 'key-owner', 'x', 'admin', 'active', 0, 0, datetime('now'), datetime('now'))`,
+		uid).Error)
+	adminToken := genTokenForUser(t, uid, "admin")
+
+	// 会话铸造 write scope Key（这一步本身必须继续可用，否则测不出攻击前提）
+	w := doJSONAs(t, r, http.MethodPost, "/api/auth/api-keys", adminToken, map[string]any{
+		"name": "leaked", "permissions": []string{"write"},
+	})
+	require.Equal(t, http.StatusCreated, w.Code, "会话铸造 Key 应 201: %s", w.Body.String())
+	var created struct {
+		Data struct {
+			APIKey string `json:"api_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Data.APIKey, "响应必须回传一次性明文 Key")
+
+	keyAuth := "X-API-Key " + created.Data.APIKey
+	for _, c := range []struct{ name, method, path string }{
+		{"GET 列举", http.MethodGet, "/api/auth/api-keys"},
+		{"POST 铸造", http.MethodPost, "/api/auth/api-keys"},
+		{"DELETE 吊销", http.MethodDelete, "/api/auth/api-keys/" + uuid.NewString()},
+		{"PUT 吊销", http.MethodPut, "/api/auth/api-keys/" + uuid.NewString() + "/revoke"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var body any
+			if c.method == http.MethodPost {
+				body = map[string]any{"name": "copy", "permissions": []string{"write"}}
+			}
+			res := doJSONAsRaw(t, r, c.method, c.path, keyAuth, body)
+			assert.Equal(t, http.StatusForbidden, res.Code, "API Key 不得管理 API Key")
+			assert.Contains(t, res.Body.String(), "登录会话",
+				"应命中新中间件的文案，而不是 apiKeyAllows 的「API Key 权限不足」")
+		})
+	}
+
+	t.Run("PUT 改密", func(t *testing.T) {
+		res := doJSONAsRaw(t, r, http.MethodPut, "/api/auth/password", keyAuth, map[string]string{
+			"old_password": "x", "new_password": "newpass123",
+		})
+		assert.Equal(t, http.StatusForbidden, res.Code, "API Key 不得改密")
+		assert.Contains(t, res.Body.String(), "登录会话")
+	})
+}
+
+// TestRoutes_强改密窗口内不能铸造APIKey — 安全审计 F-1
+//
+// 攻击路径：seed 的 admin/admin123 未改密（must_change_password=1）→ 用默认口令
+// 登录拿会话 → 立刻铸一把不过期的 Key → 即使之后改密，这把 Key 依然有效。
+// 因此在路由层断言「强改密态下 POST /api/auth/api-keys 一律 403」。
+func TestRoutes_强改密窗口内不能铸造APIKey(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	uid := uuid.NewString()
+	require.NoError(t, db.Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, 'seed-admin', 'x', 'admin', 'active', 0, 1, datetime('now'), datetime('now'))`,
+		uid).Error)
+	token := genTokenForUser(t, uid, "admin")
+
+	// 会话本身有效（能读自己的 Key 列表）——排除「403 是因为没登录」的假通过
+	listRes := doJSONAs(t, r, http.MethodGet, "/api/auth/api-keys", token, nil)
+	assert.Equal(t, http.StatusOK, listRes.Code, "会话应有效: %s", listRes.Body.String())
+
+	res := doJSONAs(t, r, http.MethodPost, "/api/auth/api-keys", token, map[string]any{
+		"name": "pre-change", "permissions": []string{"write"},
+	})
+	assert.Equal(t, http.StatusForbidden, res.Code, "强改密态下不得铸造 Key: %s", res.Body.String())
+	assert.Contains(t, res.Body.String(), "强制改密")
+
+	var n int64
+	require.NoError(t, db.Table("api_keys").Where("user_id = ?", uid).Count(&n).Error)
+	assert.Equal(t, int64(0), n, "强改密态下不得写入 api_keys")
+}
+
+// TestRoutes_跳过强改密留审计 — 回归保护（审计中-1）
+//
+// 该路由的**唯一**改动理由就是「挂到 protected 组拿 AuditLog」；若有人把它挪回
+// auth 组，行为不变、路由分类测试也不会红，但审计留痕会静默消失。故在路由层断言。
+func TestRoutes_跳过强改密留审计(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	uid := uuid.NewString()
+	require.NoError(t, db.Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, 'audit-skip', 'x', 'admin', 'active', 0, 1, datetime('now'), datetime('now'))`,
+		uid).Error)
+	token := genTokenForUser(t, uid, "admin")
+
+	// flag=true → 400（拒绝绕过），且必须留痕
+	res := doJSONAs(t, r, http.MethodPost, "/api/auth/skip-password-change", token, nil)
+	require.Equal(t, http.StatusBadRequest, res.Code, "body=%s", res.Body.String())
+
+	var logs []models.AuditLog
+	require.NoError(t, db.Where("path = ? AND method = ?",
+		"/api/auth/skip-password-change", http.MethodPost).Find(&logs).Error)
+	require.Len(t, logs, 1, "强改密绕过尝试必须留审计（AuditLog 中间件）")
+	assert.Equal(t, http.StatusBadRequest, logs[0].Status)
 }
 
 // TestRoutes_所有路由都已分类 反向兜底（Risk#7）：枚举注册的**全部**路由，

@@ -49,8 +49,11 @@
 
 **AUTHZ 审计发现的既有缺陷（本轮记录，未修）**：
 
-- [ ] **`POST /api/auth/skip-password-change` 可被空 body 绕过** — 服务端只拒绝 `reason == "first_login"`；body 为空时 `req.Reason` 为空即清除强改密标记 → seed 的 `admin/admin123` 可保留弱口令。修复：以 DB 的 `user.MustChangePassword` 为准
-- [ ] **write scope 的 API Key 挂在 admin 账号上可签发新 Key** — `apiKeyAllows` 只按 HTTP 方法判定，`identity` 路由的能力来自关联用户角色 → 可铸造远期 Key 作持久化后门。修复：identity 路由额外要求 Key 权限含 `admin`
+- [x] **`POST /api/auth/skip-password-change` 可被空 body 绕过** — 服务端只拒绝 `reason == "first_login"`；body 为空时 `req.Reason` 为空即清除强改密标记 → seed 的 `admin/admin123` 可保留弱口令。**已修复（2026-09-09）**：判据改为 DB 的 `must_change_password`（flag=true 一律 400，不看客户端自报 reason）；前端 `Login.tsx` 跳转参数 `first-login`→`first_login`（原先与 `ChangePassword.tsx` 的判定不一致，跳过按钮在强改密时照样显示）；该路由移入 `protected` 组以复用 AuditLog；不再写假的 `password_set_at`。见 `docs/FIX-PLAN-AUTHZ-LEFTOVER.md`
+- [x] **write scope 的 API Key 挂在 admin 账号上可签发新 Key** — `apiKeyAllows` 只按 HTTP 方法判定，`identity` 路由的能力来自关联用户角色 → 可铸造远期 Key 作持久化后门。**已修复（2026-09-09）**：新增 `middleware.RejectAPIKeyAuth`（任何 API Key 一律 403，比原计划「要求 Key 权限含 admin」更严——admin scope 的 Key 同样能自我复制），整组挂在 `/auth/api-keys`，并覆盖同类路径 `PUT /auth/password`。见 `docs/FIX-PLAN-AUTHZ-LEFTOVER.md`
+- [ ] **`must_change_password=true` 未在服务端全局强制**（AUTHZ-LEFTOVER G-1）— 登录后拿到的 JWT 仍可调任意端点，「强改密」目前是前端 UX + skip 端点拦截 + **`CreateAPIKey` 定点拒绝**（2026-09-09 审计 F-1 收窄，见 `docs/FIX-PLAN-AUTHZ-LEFTOVER.md` §8.1）。彻底方案需在 `AuthMiddleware` 中查库判定，属性能/架构决策
+- [ ] **API Key 路径不检查 `LockedUntil`**（AUTHZ-LEFTOVER G-2）— 登录路径（`auth_handler.go:58`）检查锁定，API Key 路径（`middleware/auth.go:187-191`）只检查 `status`；账号被锁时 Key 仍可用
+- [ ] **前端密钥管理打不到后端**（AUTHZ-LEFTOVER G-3）— `frontend/src/services/api.ts` 用 `baseURL=/api` + `/api-keys` → 实际 `/api/api-keys`，后端在 `/api/auth/api-keys`，落到 NoRoute 返 index.html
 - [ ] **`/auth/me` 不在 `openapi.yaml`** — `capabilities` 进不了 `gen:api` 生成类型，前端接入前需先补 spec
 - [ ] **`cmd/set-role` 并发窗口** — 防自锁检查与写入已同事务，但两个并发进程仍可能各自通过（TOCTOU）；该命令是人工运维操作，暂不修
 - [ ] **`GET /api/integrations/status` 回传集成 URL 与 Zabbix 用户名** — 不含 token，属读地板；若需收紧另立任务

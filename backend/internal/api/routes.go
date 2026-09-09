@@ -191,9 +191,9 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			auth.POST("/login", middleware.RateLimit(middleware.DefaultRateLimitConfig(5)), handlers.Login)
 			auth.POST("/logout", handlers.Logout)
 			auth.GET("/me", middleware.AuthMiddleware(), handlers.GetCurrentUser)
-			auth.PUT("/password", middleware.AuthMiddleware(), middleware.RateLimit(middleware.DefaultRateLimitConfig(3)), handlers.ChangePassword)
-			// C7: 跳过首次登录强改密 (用户自主选择, dev/test 友好, 不需 admin)
-			auth.POST("/skip-password-change", middleware.AuthMiddleware(), handlers.SkipPasswordChange)
+			// 注：改密 / 跳过改密均已移入下方 protected 组 —— 挂在 auth 组时没有
+			// AuditLog 中间件，凭据变更与强改密绕过的尝试都不留痕
+			// （docs/FIX-PLAN-AUTHZ-LEFTOVER.md §2 D-A / F-2）。
 
 			// 注：API Key 路由已移入下方 protected 组 —— 原先挂在 auth 组时没有
 			// AuditLog 中间件，铸造/吊销长期凭据不留痕（docs/FIX-PLAN-AUTHZ.md §4.3）。
@@ -204,12 +204,28 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		protected.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig(100)))      // v1.4 默认 100 req/min per IP+path
 		protected.Use(middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()})) // v1.4 审计日志
 		{
+			// C7: 跳过首次登录强改密。无待办时幂等（handler 不写任何状态），
+			// 放 protected 组以复用 AuditLog —— 强改密绕过的尝试必须留痕。
+			protected.POST("/auth/skip-password-change", handlers.SkipPasswordChange)
+
+			// 改密：变更账号凭据 → 拒绝 API Key 身份（泄露的 write Key 若同时掌握旧密码
+			// 即可改掉账号密码，吊销 Key 撤销不了；且 API Key 路径不查 LockedUntil，见 G-2）
+			// + 限流 3/min + AuditLog 留痕（原挂 auth 组无审计）。
+			protected.PUT("/auth/password", middleware.RejectAPIKeyAuth(), middleware.RateLimit(middleware.DefaultRateLimitConfig(3)), handlers.ChangePassword)
+
 			// 凭据管理（docs/FIX-PLAN-AUTHZ.md §3.3）：签发/查看/吊销 API Key 限 admin。
 			// 放在 protected 组而非 auth 组，是为了拿到 AuditLog —— 铸造长期凭据必须留痕。
-			protected.POST("/auth/api-keys", canIdentity, handlers.CreateAPIKey)
-			protected.GET("/auth/api-keys", canIdentity, handlers.ListAPIKeys)
-			protected.DELETE("/auth/api-keys/:id", canIdentity, handlers.DeleteAPIKey)
-			protected.PUT("/auth/api-keys/:id/revoke", canIdentity, handlers.RevokeAPIKey)
+			// 再叠一层 RejectAPIKeyAuth：长期凭据不得自我复制 —— write scope 的 Key 挂在
+			// admin 账号上即可铸造新 Key，吊销旧 Key 后新 Key 仍存活（FIX-PLAN-AUTHZ-LEFTOVER.md S-2）。
+			// 整组挂载，未来新增 /auth/api-keys/* 路由自动继承该限制。
+			apiKeys := protected.Group("/auth/api-keys")
+			apiKeys.Use(middleware.RejectAPIKeyAuth())
+			{
+				apiKeys.POST("", canIdentity, handlers.CreateAPIKey)
+				apiKeys.GET("", canIdentity, handlers.ListAPIKeys)
+				apiKeys.DELETE("/:id", canIdentity, handlers.DeleteAPIKey)
+				apiKeys.PUT("/:id/revoke", canIdentity, handlers.RevokeAPIKey)
+			}
 
 			// 集成配置含 token，写/测试一律限 manage（只读状态查询不限）
 			protected.POST("/integrations/sync", canManage, integrationH.Sync)

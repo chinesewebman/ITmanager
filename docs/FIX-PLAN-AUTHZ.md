@@ -145,6 +145,7 @@
 
 - 所有未列入上表的 `GET` 列表/详情、`/api/dashboard/*`、`/api/topology`、`/api/postmortem/*`、`/api/diagnostics/assets/:id/timeline`、`/api/health`、`/healthz`、`/readyz`、`/metrics`。
 - **auth 组自助端点**：`POST /api/auth/login`、`logout`、`PUT /api/auth/password`、`POST /api/auth/skip-password-change` —— 只需认证，不挂能力（否则 `readonly` 连自己的密码都改不了）。
+  - 后续修订（2026-09-09，见 `docs/FIX-PLAN-AUTHZ-LEFTOVER.md`）：`POST /auth/skip-password-change` 已移入 `protected` 组（补 AuditLog 留痕）；`PUT /auth/password` 追加 `RejectAPIKeyAuth`（API Key 不得改密）。二者仍**不挂能力**，readonly 自助改密不受影响。
 - **导出/下载**：`GET /api/assets/export`、`GET /api/alerts/false-positives/export`、`GET /api/postmortem/assets/:id/report` 属读地板（已核实：导出限 500 行、文件名经 `sanitizeFilename`，无路径穿越）。
 
 ---

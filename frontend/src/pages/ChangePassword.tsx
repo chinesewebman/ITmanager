@@ -1,8 +1,10 @@
 // C7: 首次登录强改密页
 // 设计:
 //   - 改密表单: 旧密码 + 新密码 (8+字符, 字母+数字, 跟旧密码不同)
-//   - "本次跳过" 按钮: 只在 ?reason != first-login 时显示
-//   - 首次登录 (?reason=first-login) 强制改, 不显示跳过 (后端也会 400 拒绝)
+//   - "本次跳过" 按钮: 只在 ?reason != first_login 时显示
+//   - 首次登录 (?reason=first_login) 强制改, 不显示跳过 (后端也会 400 拒绝)
+//   注: reason 取值必须与 Login.tsx 的跳转参数、后端 openapi enum 三处同名 —— 曾因
+//   Login 传 first-login(连字符) 而此处比 first_login(下划线), 导致按钮恒显示。
 import { useState, useEffect } from "react";
 import {
   Form,
@@ -28,7 +30,8 @@ function ChangePassword() {
   const [searchParams] = useSearchParams();
 
   // 主人 7/02 决策: 首次登录强改密不可跳
-  // reason=first_login → 隐藏"本次跳过"按钮 (后端会 400 拒绝,前端双保险)
+  // reason=first_login → 隐藏"本次跳过"按钮 (后端也会 400 拒绝: 判据是 DB 的
+  // must_change_password, 不看前端传什么 —— 前端隐藏只是 UX 双保险)
   const reason = searchParams.get("reason") || "optional";
   const isFirstLogin = reason === "first_login";
 
@@ -65,8 +68,8 @@ function ChangePassword() {
     }
   };
 
-  // 跳过 (非首次场景 only) — reason=optional 或不带参数
-  // 调 skipPasswordChange API 写 audit + 清 flag
+  // 跳过（仅非强改密场景）：调 API 确认「无待办」，服务端幂等返回 200。
+  // 注意：服务端**不清 flag、不写 password_set_at**；强改密态下一律 400。
   const handleSkip = async () => {
     setSkipping(true);
     try {

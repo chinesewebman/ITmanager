@@ -224,6 +224,27 @@ func apiKeyAllows(perms models.StringList, method string) bool {
 	}
 }
 
+// RejectAPIKeyAuth 拒绝以 API Key 身份访问本端点（凭据铸造 / 凭据变更类操作专用）。
+//
+// 长期凭据不得自我复制：能力矩阵按「关联用户的角色」放行（handleAPIKeyAuth 里
+// c.Set("role", user.Role)），write scope 的 Key 挂在 admin 账号上就能铸造新 Key ——
+// 旧 Key 被吊销后新 Key 依然有效，形成持久化后门（docs/FIX-PLAN-AUTHZ-LEFTOVER.md S-2）。
+// 改密同理：泄露的 write Key 可直接改掉所属账号的密码，吊销 Key 撤销不了已改的密码。
+// 这类操作必须用交互式登录会话（JWT / httpOnly cookie）。
+//
+// 依赖 AuthMiddleware 先运行（api_key_id 由 handleAPIKeyAuth 设置）；未挂 AuthMiddleware
+// 的路由上该键为空 → 退化为放行，故只能挂在受保护路由上。
+func RejectAPIKeyAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetString("api_key_id") != "" {
+			apierr.Forbidden(c, "API Key 不能执行该操作,请使用登录会话")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequireRole 角色权限中间件。
 //
 // Deprecated: 生产路由一律用 RequireCapability（能力矩阵，见 roles.go）。

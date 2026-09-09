@@ -411,3 +411,48 @@ func TestAuthMiddleware_APIKey_关联用户active放行(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
+
+// ==================== RejectAPIKeyAuth（AUTHZ 遗留缺陷 S-2） ====================
+
+// TestRejectAPIKeyAuth 单测中间件本体：
+//   - API Key 身份（api_key_id 已设置）→ 403 且 handler 不执行
+//   - 会话身份（JWT/cookie，api_key_id 为空）→ 放行
+//
+// 直接构造 context，不依赖 AuthMiddleware 的 DB 查询。
+func TestRejectAPIKeyAuth(t *testing.T) {
+	cases := []struct {
+		name     string
+		apiKeyID string
+		want     int
+	}{
+		{"会话身份放行", "", http.StatusOK},
+		{"API Key 身份拒绝", uuid.NewString(), http.StatusForbidden},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			// 模拟 AuthMiddleware 已运行：API Key 路径设置 api_key_id，JWT 路径不设置
+			r.Use(func(ctx *gin.Context) {
+				if c.apiKeyID != "" {
+					ctx.Set("api_key_id", c.apiKeyID)
+				}
+				ctx.Next()
+			})
+			reached := false
+			r.POST("/api/auth/api-keys", RejectAPIKeyAuth(), func(ctx *gin.Context) {
+				reached = true
+				ctx.String(http.StatusOK, "reached")
+			})
+
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/auth/api-keys", nil))
+
+			assert.Equal(t, c.want, w.Code)
+			assert.Equal(t, c.want == http.StatusOK, reached, "handler 执行与否必须与状态码一致")
+			if c.want == http.StatusForbidden {
+				assert.Contains(t, w.Body.String(), "登录会话")
+			}
+		})
+	}
+}

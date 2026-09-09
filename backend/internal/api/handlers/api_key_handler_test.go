@@ -52,13 +52,20 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_name ON api_keys(user_id, name);
 `
 
+// apiKeyTestSchemaFull = api_keys 表 + 共享 users 表
+// （CreateAPIKey 会查 users.must_change_password 判强改密，见 testschema_test.go）
+const apiKeyTestSchemaFull = apiKeyTestSchema + testUsersDDL
+
+// apiKeyTestDefaultUserID = newAPIKeyTestRouter 硬编码的 user_id
+const apiKeyTestDefaultUserID = "11111111-1111-1111-1111-111111111111"
+
 func setupAPIKeyTestDB(t *testing.T) *gorm.DB {
 	apiKeyTestDBOnce.Do(func() {
 		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := db.Exec(apiKeyTestSchema).Error; err != nil {
+		if err := db.Exec(apiKeyTestSchemaFull).Error; err != nil {
 			t.Fatal(err)
 		}
 		oldDB := database.DB
@@ -73,7 +80,24 @@ func setupAPIKeyTestDB(t *testing.T) *gorm.DB {
 	})
 	// 每个 test 前清表（保证 isolation，shared db 状态干净）
 	require.NoError(t, apiKeyTestDB.Exec("DELETE FROM api_keys").Error)
+	require.NoError(t, apiKeyTestDB.Exec("DELETE FROM users").Error)
+	// 默认用户：newAPIKeyTestRouter 硬编码该 id，CreateAPIKey 需能查到它
+	seedAPIKeyTestUser(t, apiKeyTestDB, apiKeyTestDefaultUserID, false)
 	return apiKeyTestDB
+}
+
+// seedAPIKeyTestUser 插入一行 users（mustChangePassword = 强改密标记）
+func seedAPIKeyTestUser(t *testing.T, db *gorm.DB, id string, mustChangePassword bool) {
+	t.Helper()
+	flag := 0
+	if mustChangePassword {
+		flag = 1
+	}
+	require.NoError(t, db.Exec(
+		`INSERT INTO users (id, username, password_hash, role, status, must_change_password, created_at, updated_at)
+		 VALUES (?, ?, 'x', 'admin', 'active', ?, datetime('now'), datetime('now'))`,
+		id, "u-"+id[:8], flag,
+	).Error)
 }
 
 // setupAPIKeyTestPepper 注入合法 pepper（apikey.Hash 启动时验证）
@@ -82,10 +106,10 @@ func setupAPIKeyTestPepper(t *testing.T) {
 	t.Cleanup(unset)
 }
 
-// createTestUser 插入 user（APIKey.UserID 是外键）
+// createTestUser 插入 user 并返回其 id（CreateAPIKey 需查 users 判强改密）
 func createTestUser(t *testing.T, db *gorm.DB) uuid.UUID {
 	uid := uuid.New()
-	// 简化：APIKey 字段 UserID 是 uuid，不需要真 user（无 FK constraint）
+	seedAPIKeyTestUser(t, db, uid.String(), false)
 	return uid
 }
 
@@ -156,6 +180,39 @@ func TestCreateAPIKey_HappyPath_返回完整key仅一次(t *testing.T) {
 	assert.Contains(t, body, `"prefix"`)
 	// 警告文案
 	assert.Contains(t, body, "妥善保管")
+}
+
+// 强改密窗口内不得铸造长期凭据（FIX-PLAN-AUTHZ-LEFTOVER.md §6.1 / 安全审计 F-1）
+func TestCreateAPIKey_强改密态_拒铸造长期凭据(t *testing.T) {
+	db := setupAPIKeyTestDB(t)
+	setupAPIKeyTestPepper(t)
+
+	t.Run("flag=true_返403且不落库", func(t *testing.T) {
+		uid := uuid.New().String()
+		seedAPIKeyTestUser(t, db, uid, true)
+		r := newAPIKeyTestRouterAsUser(uid)
+		w := doRequest(t, r, "POST", "/api-keys", map[string]any{"name": "sneaky"})
+		assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+		assert.Contains(t, w.Body.String(), "强制改密")
+		// 关键：不能只是不返回，必须真的没落库
+		var n int64
+		require.NoError(t, db.Table("api_keys").Where("user_id = ?", uid).Count(&n).Error)
+		assert.Equal(t, int64(0), n, "强改密态下不得写入 api_keys")
+	})
+
+	t.Run("flag=false_返201", func(t *testing.T) {
+		uid := uuid.New().String()
+		seedAPIKeyTestUser(t, db, uid, false)
+		r := newAPIKeyTestRouterAsUser(uid)
+		w := doRequest(t, r, "POST", "/api-keys", map[string]any{"name": "legit"})
+		assert.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	})
+
+	t.Run("用户不存在_返404", func(t *testing.T) {
+		r := newAPIKeyTestRouterAsUser(uuid.New().String())
+		w := doRequest(t, r, "POST", "/api-keys", map[string]any{"name": "ghost"})
+		assert.Equal(t, http.StatusNotFound, w.Code, "body=%s", w.Body.String())
+	})
 }
 
 func TestCreateAPIKey_缺Name_返400(t *testing.T) {

@@ -115,6 +115,19 @@ func CreateAPIKey(c *gin.Context) {
 		return
 	}
 
+	// 强改密窗口内不得铸造长期凭据：默认口令（seed admin/admin123）登录后立刻铸一把
+	// 不过期的 Key，就能绕过「首次登录必须改密」——之后改密也撤不掉这把 Key。
+	// 这是 S-2「长期凭据不得自我复制」在会话身份上的收窄（FIX-PLAN-AUTHZ-LEFTOVER.md §6.1）。
+	var owner models.User
+	if err := database.DB.First(&owner, "id = ?", uid).Error; err != nil {
+		apierr.NotFound(c, "用户不存在")
+		return
+	}
+	if owner.MustChangePassword {
+		apierr.Forbidden(c, "当前账号处于强制改密状态,请先修改密码再创建 API Key")
+		return
+	}
+
 	// 🐛 BUG#5: IP 白名单严格校验
 	if err := validateIPWhitelist(req.IPWhitelist); err != nil {
 		apierr.BadRequest(c, err.Error())

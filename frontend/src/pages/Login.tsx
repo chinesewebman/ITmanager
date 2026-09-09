@@ -47,10 +47,11 @@ function Login() {
       }
 
       // C7: 首次登录强改密 — 跳到改密页 (后端 must_change_password=true)
-      // reason=first-login 让 ChangePassword 知道"首次不可跳"
+      // reason=first_login 让 ChangePassword 知道"首次不可跳"（参数名与
+      // ChangePassword.tsx / openapi enum 三处必须一致，连字符会让判定恒 false）
       if (must_change_password) {
         message.warning('检测到您首次登录, 请修改默认密码')
-        navigate('/change-password?reason=first-login', { replace: true })
+        navigate('/change-password?reason=first_login', { replace: true })
         return
       }
 

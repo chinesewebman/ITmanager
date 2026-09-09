@@ -29,28 +29,8 @@ import (
 var authUserTestDBOnce sync.Once
 var authUserTestDB *gorm.DB
 
-const authUserTestSchema = `
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    nickname TEXT,
-    email TEXT,
-    phone TEXT,
-    avatar TEXT,
-    department_id TEXT,
-    role TEXT DEFAULT 'user',
-    status TEXT DEFAULT 'active',
-    failed_login INTEGER DEFAULT 0,
-    locked_until DATETIME,
-    last_login DATETIME,
-    last_login_ip TEXT,
-    must_change_password INTEGER DEFAULT 1,
-    password_set_at DATETIME,
-    created_at DATETIME,
-    updated_at DATETIME,
-    deleted_at DATETIME
-);
+// authUserTestSchema = 共享 users DDL（见 testschema_test.go）+ 本文件私有的 audit_logs
+const authUserTestSchema = testUsersDDL + `
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -601,91 +581,85 @@ func TestChangePassword_成功后清除Flag(t *testing.T) {
 	assert.NotNil(t, updated.PasswordSetAt, "改密成功后 password_set_at 必须写入")
 }
 
-// TestSkipPasswordChange_清Flag_写Audit — 跳过 endpoint
-func TestSkipPasswordChange_清Flag_写Audit(t *testing.T) {
+// TestSkipPasswordChange_强制态一律拒绝 — 判据是 DB flag, 不看客户端自报的 reason
+// 主人 7/02 决策「首次登录强改密不可跳」。修复前只拒绝 reason=="first_login" 字面量,
+// 空 body / reason=optional 会被放行并清 flag —— 同一账号状态换个字符串即可绕过 (S-1a)。
+func TestSkipPasswordChange_强制态一律拒绝(t *testing.T) {
+	bodies := map[string]any{
+		"空body":              nil,
+		"空对象":                map[string]string{},
+		"reason=optional":    map[string]string{"reason": "optional"},
+		"reason=first_login": map[string]string{"reason": "first_login"},
+		"伪造未知reason":         map[string]string{"reason": "whatever"},
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			db := setupAuthTestDB(t)
+			uid := seedActiveUser(t, db, "forcedskip", "any-pwd-123")
+			require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+
+			r := newAuthTestRouter()
+			// 「空body」必须是真的不带 body（老 API 兼容承诺），不是 json.Marshal(nil) 的 "null"
+			var w *httptest.ResponseRecorder
+			if body == nil {
+				w = doNoBodyWithUser(t, r, "POST", "/auth/skip-password-change", uid.String())
+			} else {
+				w = doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), body)
+			}
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+
+			// 拒绝路径必须不动 user 表
+			var got models.User
+			require.NoError(t, db.First(&got, "id = ?", uid).Error)
+			assert.True(t, got.MustChangePassword, "拒绝路径必须保留 must_change_password flag")
+			assert.Nil(t, got.PasswordSetAt, "拒绝路径不能写 password_set_at")
+
+			var auditCount int64
+			require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE action = 'skip_password_change' AND user_id = ?`, uid.String()).Scan(&auditCount).Error)
+			assert.Equal(t, int64(0), auditCount, "handler 内不再写 skip audit (改由 AuditLog 中间件按路由留痕)")
+		})
+	}
+}
+
+// TestSkipPasswordChange_无待办幂等且无副作用 — flag=false 时纯确认, 不写任何状态 (S-1c)
+// 修复前会写 password_set_at = NOW()（用户并未改密）, 未来的密码过期策略会被这套假记录绕过。
+func TestSkipPasswordChange_无待办幂等且无副作用(t *testing.T) {
 	db := setupAuthTestDB(t)
-	uid := seedActiveUser(t, db, "skippie", "any-pwd-123")
-	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
+	uid := seedActiveUser(t, db, "noskip", "any-pwd-123")
+	// 测试 schema 的列默认值是 1（与生产 migration 000012 的 DEFAULT TRUE 一致），
+	// 这里显式置 0 模拟「已改过密、无待办」状态
+	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 0 WHERE id = ?`, uid).Error)
 
 	r := newAuthTestRouter()
-	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
-	assert.Equal(t, http.StatusOK, w.Code)
+	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), map[string]string{"reason": "optional"})
+	assert.Equal(t, http.StatusOK, w.Code, "无待办时幂等返回 200")
+	// 真·空 body 也必须 200（文档承诺「body 可空，老 API 兼容」）
+	w = doNoBodyWithUser(t, r, "POST", "/auth/skip-password-change", uid.String())
+	assert.Equal(t, http.StatusOK, w.Code, "空 body 也应 200: %s", w.Body.String())
 
-	// 验证: users 表 flag 清除 + password_set_at 写入
-	var updated models.User
-	require.NoError(t, db.First(&updated, "id = ?", uid).Error)
-	assert.False(t, updated.MustChangePassword, "跳过改密后 must_change_password 必须变 false")
-	assert.NotNil(t, updated.PasswordSetAt, "跳过改密后 password_set_at 必须写入")
+	var got models.User
+	require.NoError(t, db.First(&got, "id = ?", uid).Error)
+	assert.False(t, got.MustChangePassword)
+	assert.Nil(t, got.PasswordSetAt, "跳过改密不得写 password_set_at")
 
-	// 验证: audit_logs 写入一条
 	var auditCount int64
 	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE action = 'skip_password_change' AND user_id = ?`, uid.String()).Scan(&auditCount).Error)
-	assert.Equal(t, int64(1), auditCount, "首次跳过必须写一条 audit log")
-}
-
-// TestSkipPasswordChange_幂等不重复写Audit — 第二次 skip 不刷 audit 噪音
-func TestSkipPasswordChange_幂等不重复写Audit(t *testing.T) {
-	db := setupAuthTestDB(t)
-	uid := seedActiveUser(t, db, "twiceskip", "any-pwd-123")
-	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
-
-	r := newAuthTestRouter()
-	// 第一次 skip
-	w1 := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
-	assert.Equal(t, http.StatusOK, w1.Code)
-
-	// 第二次 skip (此时 flag 已 false, 幂等分支)
-	w2 := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), nil)
-	assert.Equal(t, http.StatusOK, w2.Code)
-
-	// audit 只应有 1 条
-	var auditCount int64
-	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE action = 'skip_password_change' AND user_id = ?`, uid.String()).Scan(&auditCount).Error)
-	assert.Equal(t, int64(1), auditCount, "幂等: 第二次 skip 不写新 audit (wasFlagged=false 跳过)")
-}
-
-// TestSkipPasswordChange_FirstLoginReason_拒绝400 — 主人 7/02 决策
-// 首次登录强改密**不可跳** (reason=first_login 必返 400)
-// 这是 C7 最重要的一条: seed admin/admin123 这种默认密码必须改
-func TestSkipPasswordChange_FirstLoginReason_拒绝400(t *testing.T) {
-	db := setupAuthTestDB(t)
-	uid := seedActiveUser(t, db, "firstlogin", "default-pwd")
-	// 模拟 seed 默认用户: must_change_password=1
-	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
-
-	r := newAuthTestRouter()
-	// 前端首次登录时若 (错误地) 调 skip, 后端必须拒绝
-	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), map[string]string{
-		"reason": "first_login",
-	})
-	assert.Equal(t, http.StatusBadRequest, w.Code, "首次登录 reason=first_login 必须返 400")
-
-	// 验证: must_change_password 没被清 (拒绝路径不动 user 表)
-	var stillFlagged models.User
-	require.NoError(t, db.First(&stillFlagged, "id = ?", uid).Error)
-	assert.True(t, stillFlagged.MustChangePassword, "拒绝路径必须不动 must_change_password flag")
-	assert.Nil(t, stillFlagged.PasswordSetAt, "拒绝路径不能写 password_set_at")
-}
-
-// TestSkipPasswordChange_OptionalReason_允许跳 — 主人 7/02 决策
-// 非首次 (用户在改密页自己点取消) 允许跳, 用 reason=optional 显式标记
-func TestSkipPasswordChange_OptionalReason_允许跳(t *testing.T) {
-	db := setupAuthTestDB(t)
-	uid := seedActiveUser(t, db, "optskip", "any-pwd-456")
-	require.NoError(t, db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, uid).Error)
-
-	r := newAuthTestRouter()
-	w := doJSONWithUser(t, r, "POST", "/auth/skip-password-change", uid.String(), map[string]string{
-		"reason": "optional",
-	})
-	assert.Equal(t, http.StatusOK, w.Code, "reason=optional 允许跳")
-
-	var updated models.User
-	require.NoError(t, db.First(&updated, "id = ?", uid).Error)
-	assert.False(t, updated.MustChangePassword, "reason=optional 跳过后必须清 flag")
+	assert.Equal(t, int64(0), auditCount)
 }
 
 // ==================== 辅助 ====================
+
+// doNoBodyWithUser 发一次**真正不带 body**的请求（区别于 doJSONWithUser(..., nil) 的 "null"）
+func doNoBodyWithUser(t *testing.T, r *gin.Engine, method, path, userID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if userID != "" {
+		req.Header.Set("X-User-Id", userID)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
 
 func doJSONWithUser(t *testing.T, r *gin.Engine, method, path, userID string, body any) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
