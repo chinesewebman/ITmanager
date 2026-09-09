@@ -137,6 +137,33 @@ describe('Oncall', () => {
     expect(screen.getAllByText('ON')).toHaveLength(2)
   })
 
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // 值班组表给名称/时区/启用/说明加前端本地排序；这里验证核心的名称字符串排序。
+  it('M2：值班组「名称」列可排序（点击表头后按字母升序重排）', async () => {
+    h.overrides.schedules = {
+      data: [
+        { id: 's1', name: 'ops-team', description: '运维组', enabled: true },
+        { id: 's2', name: 'dev-team', description: '研发组', enabled: true },
+      ],
+    }
+    const { container } = renderOncall()
+    openTab('值班组')
+    await screen.findByText('ops-team')
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：ops-team 在前
+    expect(rowTexts()[0]).toContain('ops-team')
+
+    // 点「名称」表头升序 → dev-team < ops-team，dev-team 排前
+    fireEvent.click(screen.getAllByText('名称')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('dev-team')
+    })
+  })
+
   it('W1：升级策略失败时显示错误态，不回落 MOCK_POLICIES', () => {
     h.overrides.policies = { data: undefined, isError: true, error: { response: { status: 500 } } }
     renderOncall()
@@ -171,7 +198,7 @@ describe('Oncall', () => {
     openTab('值班组')
 
     fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
-    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'team-a' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: 'team-a' } })
 
     const saveBtn = screen.getByRole('button', { name: /保\s*存/ })
     fireEvent.click(saveBtn)
@@ -196,7 +223,7 @@ describe('Oncall', () => {
     openTab('升级策略')
 
     fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
-    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'policy-a' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: 'policy-a' } })
 
     const saveBtn = screen.getByRole('button', { name: /保\s*存/ })
     fireEvent.click(saveBtn)
@@ -281,7 +308,7 @@ describe('Oncall', () => {
     renderOncall()
     openTab('升级策略')
     fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
-    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'policy-x' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: 'policy-x' } })
     fireEvent.change(screen.getByLabelText('Levels (JSON 数组)'), { target: { value: '{bad json' } })
     fireEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
 

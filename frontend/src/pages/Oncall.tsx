@@ -112,10 +112,12 @@ function SchedulesTab() {
         <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false} loading={isLoading}
           locale={{ emptyText: <EmptyState title="暂无值班组" description="点击「新建」创建第一个值班组" compact /> }}
           columns={[
-            { title: '名称', dataIndex: 'name' },
-            { title: '时区', dataIndex: 'timezone', render: (v) => v ?? 'Asia/Shanghai' },
-            { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
-            { title: '说明', dataIndex: 'description' },
+            // M2：加前端本地排序。名称/说明字符串 localeCompare；时区按实际值（空值默认 Asia/Shanghai）；
+            // 启用按布尔权重。操作列不加。
+            { title: '名称', dataIndex: 'name', sorter: (a: OncallSchedule, b: OncallSchedule) => a.name.localeCompare(b.name) },
+            { title: '时区', dataIndex: 'timezone', sorter: (a: OncallSchedule, b: OncallSchedule) => (a.timezone ?? 'Asia/Shanghai').localeCompare(b.timezone ?? 'Asia/Shanghai'), render: (v) => v ?? 'Asia/Shanghai' },
+            { title: '启用', dataIndex: 'enabled', sorter: (a: OncallSchedule, b: OncallSchedule) => Number(a.enabled) - Number(b.enabled), render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
+            { title: '说明', dataIndex: 'description', sorter: (a: OncallSchedule, b: OncallSchedule) => (a.description ?? '').localeCompare(b.description ?? '') },
             { title: '操作', key: 'actions', render: (_, r) => (
               <Popconfirm
                 title={`确认删除值班组「${r.name}」？`}
