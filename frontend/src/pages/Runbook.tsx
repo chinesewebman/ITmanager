@@ -39,6 +39,8 @@ function RunbookList() {
   const [editing, setEditing] = useState<Runbook | null>(null)
   const [creating, setCreating] = useState(false)
   const [viewing, setViewing] = useState<Runbook | null>(null)
+  // M4：提交按钮 loading，防连点重复创建（范本 AssetFormModal confirmLoading）
+  const [submitting, setSubmitting] = useState(false)
   const [form] = Form.useForm<Runbook>()
 
   const { data, isLoading, isError, error, refetch } = useApiQuery(
@@ -62,6 +64,7 @@ function RunbookList() {
   }
 
   async function onSubmit() {
+    setSubmitting(true)
     try {
       const values = await form.validateFields()
       if (editing) {
@@ -78,6 +81,8 @@ function RunbookList() {
       if (e?.errorFields) return // 表单校验失败，antd 已在字段上提示
       if (e?.isAxiosError) return // 4xx/5xx/网络错误已由响应拦截器提示，不重复弹
       message.error(e?.message ?? '提交失败')
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -181,6 +186,7 @@ function RunbookList() {
         open={creating || !!editing}
         onCancel={() => { setCreating(false); setEditing(null) }}
         onOk={onSubmit}
+        confirmLoading={submitting}
         width={720}
       >
         <Form form={form} layout="vertical">

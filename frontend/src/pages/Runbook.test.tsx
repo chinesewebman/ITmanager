@@ -4,13 +4,20 @@
 // 3 篇虚构 SOP，故障现场运维会照着不存在的手册操作。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
 const h = vi.hoisted(() => ({
   overrides: {} as Record<string, Record<string, unknown>>,
   refetch: {} as Record<string, ReturnType<typeof vi.fn>>,
+  apiSend: vi.fn(),
+}))
+
+// M4：mock apiSend 以断言提交按钮 loading（防连点）。apiGet 由 useApiQuery mock 短路，不触发。
+vi.mock('../services/api', () => ({
+  apiGet: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  apiSend: (...args: unknown[]) => h.apiSend(...args),
 }))
 
 // 标题刻意与已删除的 MOCK_RUNBOOKS 不重名（mock 里是「MySQL 主从延迟告警处理」等），
@@ -54,6 +61,7 @@ function renderList() {
 beforeEach(() => {
   h.overrides = {}
   for (const k of ['list', 'recommend']) h.refetch[k]?.mockClear()
+  h.apiSend.mockReset()
 })
 
 describe('Runbook', () => {
@@ -139,5 +147,28 @@ describe('Runbook', () => {
       ),
     ).not.toThrow()
     expect(screen.getByText('无推荐 Runbook')).toBeInTheDocument()
+  })
+
+  // M4：提交按钮 loading（范本 AssetFormModal confirmLoading）。此前 Modal 无 okText 也无 loading，
+  // 接口慢时连点「OK」会重复创建同一条 Runbook。
+  it('M4：新建 Runbook 提交中 OK 按钮 loading 且防连点（apiSend 只调一次）', async () => {
+    let resolveSend!: (v: unknown) => void
+    h.apiSend.mockImplementationOnce(() => new Promise((resolve) => { resolveSend = resolve }))
+    renderList()
+
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    fireEvent.change(screen.getByPlaceholderText('如: MySQL 主从延迟告警处理'), { target: { value: '测试手册' } })
+
+    const okBtn = screen.getByRole('button', { name: /OK|确\s*定/ })
+    fireEvent.click(okBtn)
+
+    await waitFor(() => {
+      expect(okBtn).toHaveClass('ant-btn-loading')
+    })
+
+    fireEvent.click(okBtn)
+    expect(h.apiSend).toHaveBeenCalledTimes(1)
+
+    resolveSend(undefined)
   })
 })
