@@ -56,7 +56,7 @@ export function MobileCardList<T extends Record<string, any>>({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12 }}>
       {data.map((item, idx) => (
-        <Card key={idx} size="small">
+        <Card key={item.id ?? idx} size="small">
           {renderCard(item, idx)}
         </Card>
       ))}
