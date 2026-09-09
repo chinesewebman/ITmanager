@@ -297,6 +297,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev10 | 2026-09-10 | **W4-H8 完成**：`Settings.tsx:497` 删除通知渠道无二次确认 → 套 Popconfirm 四件套（`AssetTable:163-168` 范本），title 带渠道名、`okButtonProps danger`、`onConfirm` 返回 Promise 自带 loading。1 用例绿，变异（去 Popconfirm 改回直接 onClick）红在 `not.toHaveBeenCalled()` 断言 |
 | rev11 | 2026-09-10 | **W4-H9 完成**：移动端资产卡 `status === 'active' ? '在线' : '离线'` 把 maintenance 误标红「离线」→ 抽 `statusLabel(status)` 单一出口（`StatusTag.tsx` 导出，值域对齐后端 asset.go:35 active/offline/maintenance/retired），桌面端/移动端两处共用；`COLOR_MAP` 补 `maintenance: 'orange'`。顺带发现前端类型漂移：`types/index.ts:31` Asset.status 写 `'inactive'`（应为 `'offline'`），未改（不在 H9 范围）。4 用例绿，两条变异（移动端改回硬编码 / 删 maintenance 分支）均红在断言 |
 | rev12 | 2026-09-10 | **W4-H10 完成**：诊断（Ping/Traceroute）失败时弹窗全白——`handleDiagnose` catch 空实现，失败后 pingResult/traceResult 保持 null，Modal 三条渲染分支（loading/ping/traceroute）全不命中。加 `diagError` 状态（Assets 组件层，规避 `destroyOnHidden` Modal 内 state 被清）+ 弹窗内 `Alert`（message「诊断失败」+ description）+ 重试按钮。1 用例绿，变异（去 `setDiagError`）红在「找不到『诊断失败』」断言 |
+| rev13 | 2026-09-10 | **W4-M4（第 1 步 AlertSuppressions）完成**：提交按钮无 loading → 连点重复创建。`AlertSuppressions.tsx` 两个 Modal（新建/编辑 `onOk={onSubmit}`、模拟评估 `onOk={onPreview}`）加 `submitting`/`previewing` state + `confirmLoading`，`finally` 复位。1 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + loading 期间连点只调一次 apiSend），变异（去 `confirmLoading={submitting}`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩余 Oncall/Runbook/Settings 待续 |
 
 ---
 
@@ -330,14 +331,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-H8 删除通知渠道二次确认 | ✅ 完成 | `Settings.tsx:497` 删除按钮套 Popconfirm 四件套（范本 `AssetTable:163-168`），title 带渠道名 + `okButtonProps danger` + `onConfirm` 返回 Promise；1 用例绿（点删除先弹确认框不调 deleteChannel → 确认后 `deleteChannel("c1")`），变异（去 Popconfirm 改回直接 onClick）红在 `not.toHaveBeenCalled()` 断言 |
 | W4-H9 移动端资产卡「维护」误标红「离线」 | ✅ 完成 | 抽 `statusLabel(status)`（`StatusTag.tsx` 导出，后端 asset.go:35 值域 active/offline/maintenance/retired）桌面端 `AssetTable:92` 与移动端 `Assets.tsx` 卡片共用；`COLOR_MAP` 补 `maintenance: 'orange'`。4 用例绿（statusLabel 映射 + 未知值原样 + orange 色 + 移动端 maintenance 显示「维护」），两条变异（移动端改回硬编码 / 删 statusLabel maintenance 分支）均红在断言 |
 | W4-H10 诊断失败弹窗全白 | ✅ 完成 | `Assets.tsx` 诊断 catch 原空实现 → 失败时 pingResult/traceResult 保持 null 弹窗全白。加 `diagError` 状态（放 Assets 组件层，不放 `destroyOnHidden` 的 Modal 内）+ 弹窗内 `Alert`（message「诊断失败」+ description 错误信息）+ 重试按钮（重调 handleDiagnose）。1 用例绿（Ping 失败显示 Alert + 重试二次调用），变异（去 `setDiagError` 恢复空 catch）红在「找不到『诊断失败』」断言 |
-| W4 其余 3 项（M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
+| W4-M4 提交按钮 loading · AlertSuppressions.tsx | ✅ 完成 | 两个 Modal（规则 `onOk={onSubmit}` + 预览 `onOk={onPreview}`）加 `submitting`/`previewing` state + `confirmLoading`，`finally` 复位（范本 `AssetFormModal`）。1 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading={submitting}`）红在 `toHaveClass('ant-btn-loading')` 断言 |
+| W4-M4 剩余（Oncall/Runbook/Settings）+ M5/M6 | ⬜ 未开始 | M4 剩 Oncall 2 处（值班组/升级策略 onSubmit）+ Runbook 1 处 + Settings 1 处；M5 危险操作确认；M6 required message 统一 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
-3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。**W4 批 1 剩余 3 项（M4/M5/M6）**。
+3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。**W4 批 1 剩余：M4 其余 3 文件（Oncall/Runbook/Settings）+ M5/M6**。
 4. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。

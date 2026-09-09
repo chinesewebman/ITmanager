@@ -43,6 +43,9 @@ export function AlertSuppressions() {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [previewResult, setPreviewResult] = useState<SuppressionMatchResult | null>(null)
   const [previewHost, setPreviewHost] = useState({ severity: 3, host_id: '', host_name: '' })
+  // M4：提交/评估按钮 loading，防连点重复创建（范本 AssetFormModal confirmLoading）
+  const [submitting, setSubmitting] = useState(false)
+  const [previewing, setPreviewing] = useState(false)
 
   useDocumentTitle('告警抑制')
   const { data, isLoading, isError, error, refetch } = useApiQuery<AlertSuppression[]>(
@@ -68,6 +71,7 @@ export function AlertSuppressions() {
   }
 
   async function onSubmit() {
+    setSubmitting(true)
     try {
       const values = await form.validateFields()
       if (editing?.id) {
@@ -83,6 +87,8 @@ export function AlertSuppressions() {
       if (e?.errorFields) return // form 校验失败
       if (e?.isAxiosError) return // 4xx/5xx/网络错误已由响应拦截器提示，不重复弹
       message.error(e?.message ?? '操作失败')
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -97,11 +103,14 @@ export function AlertSuppressions() {
   }
 
   async function onPreview() {
+    setPreviewing(true)
     try {
       const res = await apiSend<SuppressionMatchResult>('POST', '/alert-suppressions/preview', previewHost)
       setPreviewResult(res)
     } catch (e: any) {
       if (!e?.isAxiosError) message.error(e?.message ?? '评估失败')
+    } finally {
+      setPreviewing(false)
     }
   }
 
@@ -164,6 +173,7 @@ export function AlertSuppressions() {
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={onSubmit}
+        confirmLoading={submitting}
         okText="保存"
         cancelText="取消"
       >
@@ -198,6 +208,7 @@ export function AlertSuppressions() {
         open={previewOpen}
         onCancel={() => setPreviewOpen(false)}
         onOk={onPreview}
+        confirmLoading={previewing}
         okText="评估"
         cancelText="关闭"
       >

@@ -4,13 +4,20 @@
 // 「db-* 的告警已经被抑制了」，而实际一条规则都不存在。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
 const h = vi.hoisted(() => ({
   override: {} as Record<string, unknown>,
   refetch: vi.fn(),
+  apiSend: vi.fn(),
+}))
+
+// M4：mock apiSend 以断言提交按钮 loading（防连点）。apiGet 由 useApiQuery mock 短路，不触发。
+vi.mock('../services/api', () => ({
+  apiGet: vi.fn().mockResolvedValue([]),
+  apiSend: (...args: unknown[]) => h.apiSend(...args),
 }))
 
 const RULES = [
@@ -43,6 +50,7 @@ function renderPage() {
 beforeEach(() => {
   h.override = {}
   h.refetch.mockClear()
+  h.apiSend.mockReset()
 })
 
 describe('AlertSuppressions', () => {
@@ -102,5 +110,33 @@ describe('AlertSuppressions', () => {
     expect(screen.getByText('编辑抑制规则')).toBeInTheDocument()
     expect(screen.getByDisplayValue('抑制 db-*')).toBeInTheDocument()
     expect(screen.getByDisplayValue('db-*')).toBeInTheDocument()
+  })
+
+  // M4：提交按钮 loading（范本 AssetFormModal confirmLoading）。此前 onOk={onSubmit} 无 loading，
+  // 接口慢时用户连点「保存」会重复创建同一条规则。
+  it('M4：提交中保存按钮 loading 且防连点（apiSend 只调一次）', async () => {
+    let resolveSend!: (v: unknown) => void
+    h.apiSend.mockImplementationOnce(() => new Promise((resolve) => { resolveSend = resolve }))
+    renderPage()
+
+    // 打开新建弹窗，填必填项（severity_max / time_window_seconds / enabled 有默认值）
+    fireEvent.click(screen.getByText(/新建抑制规则/))
+    fireEvent.change(screen.getByPlaceholderText('如：抑制 db-* 警告'), { target: { value: '抑制 x-*' } })
+    fireEvent.change(screen.getByPlaceholderText('如：db-*、web-*-prod、switch-core-01'), { target: { value: 'x-*' } })
+
+    const saveBtn = screen.getByRole('button', { name: /保\s*存/ })
+    fireEvent.click(saveBtn)
+
+    // 请求 pending → 按钮进入 loading
+    await waitFor(() => {
+      expect(saveBtn).toHaveClass('ant-btn-loading')
+    })
+
+    // loading 期间连点不应触发第二次提交（antd Button loading 时 handleClick 短路）
+    fireEvent.click(saveBtn)
+    fireEvent.click(saveBtn)
+    expect(h.apiSend).toHaveBeenCalledTimes(1)
+
+    resolveSend(undefined)
   })
 })
