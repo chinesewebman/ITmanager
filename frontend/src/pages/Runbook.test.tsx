@@ -1,49 +1,143 @@
 // Runbook.test.tsx — 故障 Runbook 管理页（P2-1）
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+// W1：此前列表 queryFn 内 `.catch(() => ({ items: MOCK_RUNBOOKS..., total: 3 }))`、
+// 推荐面板内 `.catch(() => MOCK_RECOMMEND)`，isError 恒 false —— 接口挂了照常列出
+// 3 篇虚构 SOP，故障现场运维会照着不存在的手册操作。
+import '@testing-library/jest-dom'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
-const { mockRunbooks, mockRecommend } = vi.hoisted(() => ({
-  mockRunbooks: [
-    { id: 'r1', title: 'MySQL 主从延迟告警处理', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
-    { id: 'r2', title: '核心交换机端口 down', asset_type: 'switch', summary: '核心交换机端口 down', severity: 5, enabled: true, tags: 'network' },
-  ],
-  mockRecommend: [
-    { id: 'r1', title: 'MySQL 主从延迟告警处理', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
-  ],
+// vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
+const h = vi.hoisted(() => ({
+  overrides: {} as Record<string, Record<string, unknown>>,
+  refetch: {} as Record<string, ReturnType<typeof vi.fn>>,
 }))
 
+// 标题刻意与已删除的 MOCK_RUNBOOKS 不重名（mock 里是「MySQL 主从延迟告警处理」等），
+// 这样「虚构 SOP 必须消失」的断言才有区分度。
+const RUNBOOKS = [
+  { id: 'r1', title: '主库复制延迟排查', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
+  { id: 'r2', title: '接入交换机端口 down', asset_type: 'switch', summary: '端口 down 紧急处理', severity: 5, enabled: true, tags: 'network' },
+]
+const RECOMMEND = [
+  { id: 'r1', title: '主库复制延迟排查', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
+]
+
+const DATA: Record<string, unknown> = { list: { items: RUNBOOKS, total: 2 }, recommend: RECOMMEND }
+
 vi.mock('../hooks/useApiQuery', () => ({
-  useApiQuery: (_key: any) => {
-    const k = JSON.stringify(_key)
-    if (k.includes('recommend')) {
-      return { data: mockRecommend, isLoading: false, error: null, refetch: vi.fn() }
+  useApiQuery: (key: unknown) => {
+    const kind = JSON.stringify(key).includes('recommend') ? 'recommend' : 'list'
+    if (!h.refetch[kind]) h.refetch[kind] = vi.fn()
+    return {
+      data: DATA[kind],
+      isLoading: false,
+      isError: false,
+      error: undefined,
+      refetch: h.refetch[kind],
+      ...h.overrides[kind],
     }
-    return { data: { items: mockRunbooks, total: 2 }, isLoading: false, error: null, refetch: vi.fn() }
   },
   queryKeys: {},
 }))
 
 import RunbookList, { RunbookRecommend } from './Runbook'
 
+function renderList() {
+  return render(
+    <MemoryRouter>
+      <RunbookList />
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  h.overrides = {}
+  for (const k of ['list', 'recommend']) h.refetch[k]?.mockClear()
+})
+
 describe('Runbook', () => {
-  it('渲染列表 + 标题 + mock 数据', () => {
-    render(<MemoryRouter><RunbookList /></MemoryRouter>)
-    expect(screen.getByText('故障 Runbook')).toBeTruthy()
-    expect(screen.getByText('MySQL 主从延迟告警处理')).toBeTruthy()
-    expect(screen.getByText('核心交换机端口 down')).toBeTruthy()
+  it('渲染列表 + 标题 + 数据', () => {
+    renderList()
+    expect(screen.getByText('故障 Runbook')).toBeInTheDocument()
+    expect(screen.getByText('主库复制延迟排查')).toBeInTheDocument()
+    expect(screen.getByText('接入交换机端口 down')).toBeInTheDocument()
   })
 
   it('显示资产类型 tag + 严重度 tag', () => {
-    render(<MemoryRouter><RunbookList /></MemoryRouter>)
+    renderList()
     expect(screen.getAllByText('server').length).toBeGreaterThan(0)
     // SeverityTag 默认显示 'P4 严重' / 'P5 灾难', 用 regex 匹配
     expect(screen.getAllByText(/P4/).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/P5/).length).toBeGreaterThan(0)
   })
 
-  it('推荐面板显示 mock 推荐项', () => {
-    render(<MemoryRouter><RunbookRecommend assetType="server" severity={4} /></MemoryRouter>)
-    expect(screen.getByText('MySQL 主从延迟告警处理')).toBeTruthy()
+  it('W1：列表失败显示错误态 + 重试，不回落 MOCK_RUNBOOKS', () => {
+    h.overrides.list = { data: undefined, isError: true, error: { response: { status: 500 } } }
+    renderList()
+    expect(screen.getByText('数据加载失败')).toBeInTheDocument()
+    // 虚构 SOP 与真实列表都必须消失
+    expect(screen.queryByText('MySQL 主从延迟告警处理')).toBeNull()
+    expect(screen.queryByText('磁盘空间不足')).toBeNull()
+    expect(screen.queryByText('主库复制延迟排查')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }))
+    expect(h.refetch.list).toHaveBeenCalled()
+  })
+
+  it('W1：列表为空时显示空态', () => {
+    h.overrides.list = { data: { items: [], total: 0 } }
+    renderList()
+    expect(screen.getByText('暂无 Runbook')).toBeInTheDocument()
+    expect(screen.queryByText('主库复制延迟排查')).toBeNull()
+  })
+
+  it('W1：items 形状异常（非数组）按空处理，不崩也不回落', () => {
+    h.overrides.list = { data: { items: 'oops', total: 1 } }
+    expect(() => renderList()).not.toThrow()
+    expect(screen.getByText('暂无 Runbook')).toBeInTheDocument()
+  })
+
+  it('推荐面板正常显示推荐项', () => {
+    render(
+      <MemoryRouter>
+        <RunbookRecommend assetType="server" severity={4} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('主库复制延迟排查')).toBeInTheDocument()
+  })
+
+  it('推荐为空时提示无推荐', () => {
+    h.overrides.recommend = { data: [] }
+    render(
+      <MemoryRouter>
+        <RunbookRecommend assetType="server" severity={4} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('无推荐 Runbook')).toBeInTheDocument()
+  })
+
+  it('W1：推荐接口失败显示错误态 + 重试，不回落 MOCK_RECOMMEND', () => {
+    h.overrides.recommend = { data: undefined, isError: true, error: { response: { status: 500 } } }
+    render(
+      <MemoryRouter>
+        <RunbookRecommend assetType="server" severity={4} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('数据加载失败')).toBeInTheDocument()
+    expect(screen.queryByText('MySQL 主从延迟告警处理')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }))
+    expect(h.refetch.recommend).toHaveBeenCalled()
+  })
+
+  it('W1：推荐接口形状异常（非数组）不崩', () => {
+    h.overrides.recommend = { data: { oops: true } }
+    expect(() =>
+      render(
+        <MemoryRouter>
+          <RunbookRecommend assetType="server" severity={4} />
+        </MemoryRouter>,
+      ),
+    ).not.toThrow()
+    expect(screen.getByText('无推荐 Runbook')).toBeInTheDocument()
   })
 })

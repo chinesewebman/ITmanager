@@ -1,5 +1,10 @@
 // 故障 Runbook 管理页（P2-1）
 // 按 asset_type 分类的标准操作手册（SOP），可关联告警
+//
+// W1：`:52` `.catch(() => ({ items: MOCK_RUNBOOKS..., total: 3 }))` 与
+// `:240` `.catch(() => MOCK_RECOMMEND)` 两处兜底已删除。原写法让 isError 恒 false ——
+// 接口挂了照常列出 3 篇虚构的 SOP（含「MySQL 主从延迟告警处理」），
+// 故障现场运维会照着不存在的手册操作。
 import { useState } from 'react'
 import {
   Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message,
@@ -8,6 +13,7 @@ import { PlusOutlined, BookOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
+import { ErrorState } from '../components/ErrorState'
 import { SeverityTag } from '../components/SeverityTag'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -26,16 +32,6 @@ interface Runbook {
   updated_at?: string
 }
 
-const MOCK_RUNBOOKS: Runbook[] = [
-  { id: 'r1', title: 'MySQL 主从延迟告警处理', asset_type: 'server', summary: '主从延迟 > 30s 时的检查流程', severity: 4, enabled: true, tags: 'db,mysql', content_md: '# 处理步骤\n\n1. 检查主库写入压力\n2. 查看从库 IO/SQL 线程\n3. 必要时切换主从' },
-  { id: 'r2', title: '核心交换机端口 down', asset_type: 'switch', summary: '核心交换机端口 down 的紧急处理', severity: 5, enabled: true, tags: 'network,switch', content_md: '# 处理步骤\n\n1. 确认物理连接\n2. 检查光模块功率\n3. 切换备用链路' },
-  { id: 'r3', title: '磁盘空间不足', asset_type: 'server', summary: '磁盘使用率 > 90% 清理', severity: 3, enabled: true, tags: 'disk', content_md: '# 处理步骤\n\n1. du -sh 找大目录\n2. 清理旧日志\n3. 扩容评估' },
-]
-
-const MOCK_RECOMMEND: Runbook[] = [
-  { id: 'r1', title: 'MySQL 主从延迟告警处理', asset_type: 'server', summary: '主从延迟 > 30s', severity: 4, enabled: true, tags: 'db,mysql' },
-]
-
 function RunbookList() {
   const [filter, setFilter] = useState<{ asset_type?: string; severity?: number }>({})
 
@@ -45,11 +41,13 @@ function RunbookList() {
   const [viewing, setViewing] = useState<Runbook | null>(null)
   const [form] = Form.useForm<Runbook>()
 
-  const { data, isLoading, refetch } = useApiQuery(['runbooks', filter], () =>
-    apiGet<{ items: Runbook[]; total: number }>(`/runbooks?${new URLSearchParams({
-      ...(filter.asset_type ? { asset_type: filter.asset_type } : {}),
-      ...(filter.severity ? { severity: String(filter.severity) } : {}),
-    } as any).toString()}`).catch(() => ({ items: MOCK_RUNBOOKS.filter(r => !filter.asset_type || r.asset_type === filter.asset_type), total: 3 })),
+  const { data, isLoading, isError, error, refetch } = useApiQuery(
+    ['runbooks', filter],
+    () =>
+      apiGet<{ items: Runbook[]; total: number }>(`/runbooks?${new URLSearchParams({
+        ...(filter.asset_type ? { asset_type: filter.asset_type } : {}),
+        ...(filter.severity ? { severity: String(filter.severity) } : {}),
+      } as any).toString()}`),
   )
 
   function openCreate() {
@@ -94,7 +92,8 @@ function RunbookList() {
     }
   }
 
-  const items = data?.items ?? []
+  // 接口形状归一：items 非数组（形状变了 / 后端返回 null）一律当空，不回落 mock
+  const items = Array.isArray(data?.items) ? data.items : []
   const total = data?.total ?? 0
 
   return (
@@ -135,6 +134,9 @@ function RunbookList() {
         </Space>
       </Card>
 
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} compact />
+      ) : (
       <Table
         loading={isLoading}
         rowKey="id"
@@ -172,6 +174,7 @@ function RunbookList() {
           },
         ]}
       />
+      )}
 
       <Modal
         title={editing ? '编辑 Runbook' : '新建 Runbook'}
@@ -235,11 +238,13 @@ function RunbookList() {
 
 // 推荐面板：用于告警详情页侧栏
 function RunbookRecommend({ assetType, severity }: { assetType: string; severity: number }) {
-  const { data } = useApiQuery(['runbooks', 'recommend', assetType, severity], () =>
-    apiGet<Runbook[]>(`/runbooks/recommend?asset_type=${encodeURIComponent(assetType)}&severity=${severity}`)
-      .catch(() => MOCK_RECOMMEND),
+  const { data, isError, error, refetch } = useApiQuery<Runbook[]>(
+    ['runbooks', 'recommend', assetType, severity],
+    () => apiGet<Runbook[]>(`/runbooks/recommend?asset_type=${encodeURIComponent(assetType)}&severity=${severity}`),
   )
-  const items = data ?? []
+  // 接口形状归一：非数组一律当空，不回落 mock
+  const items = Array.isArray(data) ? data : []
+  if (isError) return <ErrorState error={error} onRetry={refetch} compact />
   if (items.length === 0) return <Text type="secondary">无推荐 Runbook</Text>
   return (
     <Space direction="vertical" style={{ width: '100%' }}>

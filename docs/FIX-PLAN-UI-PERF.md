@@ -290,6 +290,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev3 | 2026-09-09 | 并入**前端性能审计**（沙箱实测）：新增 §W5（P1 nginx gzip / P2 echarts-core / P3 命令面板按需为批 1；P4 表格 memo 化**必须与 M3 分页同批**、P5 服务端分页、P6 进度节流、P7 `key={idx}` 为批 2；P8–P12 登记不做）；§0 批次表与 §5 执行顺序同步；§5.1 改为回执状态表 |
 | rev4 | 2026-09-09 | 并入**后端性能审计**（§W6）；§1.3-7② 修正为契约 5 档（含 `pending`）；M16 登记待决策。**补记**：该 rev 此前只改了正文与状态行，变更记录漏登 |
 | rev5 | 2026-09-09 | W2 补第 5 个遗漏站点 `pages/MetricSnapshot.tsx:128`（`new Date(v).toLocaleString()`）——rev2 的「W2 补 3 个遗漏站点」仍漏了它，随该页 W1 同轮收口 |
+| rev6 | 2026-09-10 | 台账 W1 推进 2 页：Topology（W1 第 9 页）、Runbook（W1 第 10 页）。Topology 去 `?? MOCK_GRAPH` + `catch` 双重兜底，新增 `normalizeGraph()`；Runbook 去列表/推荐两处 `.catch(() => MOCK_*)` 兜底，列表/推荐各补区块级 ErrorState + `Array.isArray` 归一。修订：推荐面板形状异常测试先红，暴露 rev 实现初稿漏 `Array.isArray`（写成 `data ?? []`），补守卫后 4 变异全红 |
 
 ---
 
@@ -315,7 +316,8 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W1+W2 `pages/MetricSnapshot.tsx` | ✅ 完成 | 7 用例绿；四条变异（去错误分支 / 去空态 / 时间回退原样渲染 / 空结果回落虚构采样点）均红在断言。`catch { return MOCK_LATEST }` 已删除；W2 补第 5 个遗漏站点（rev5） |
 | W1 `pages/Racks.tsx` | ✅ 完成 | 8 用例绿；五条变异（站点/机柜/设备去错误分支、去机柜空态、空列表回落虚构机柜）均红在断言。三处 `?? MOCK_*`（`MOCK_SITES`/`mockRacks`/`mockDevices`）已删除；新增「请先选择机房」引导空态与机柜/设备空态 |
 | W1 `pages/Topology.tsx` | ✅ 完成 | 10 用例绿；五条变异（去错误分支 / 去空态分支 / 去 undefined 守卫 / 去 nodes 数组归一 / 去 stats 兜底）均红在断言。`?? MOCK_GRAPH` + `catch { return MOCK_GRAPH }` 双重兜底已删除；新增 `normalizeGraph()` 归一 nodes/edges/stats（§1.3-6 的 `Topology.tsx:94` 守卫）；过滤 switch 提到错误态之外，失败时仍可切换重查 |
-| W1 其余 2 页（Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W1 `pages/Runbook.tsx` | ✅ 完成 | 9 用例绿；四条变异（列表去错误分支 / 推荐去错误分支 / 列表去形状归一 / 推荐去形状归一）均红在断言。列表 `.catch(() => MOCK_RUNBOOKS...)` + 推荐 `.catch(() => MOCK_RECOMMEND)` 两处兜底已删除；列表/推荐各补区块级 ErrorState + `Array.isArray` 形状归一（rev6：推荐面板原本漏 `Array.isArray`，形状异常测试先红后补守卫） |
+| W1 其余 1 页（AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
 | W2 其余 2 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122`（`AlertTable`、`TicketTable`、`TicketDetailModal`、`Oncall` 已完成） |
 | W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
