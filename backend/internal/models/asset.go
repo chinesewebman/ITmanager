@@ -51,7 +51,10 @@ type Asset struct {
 	CustomFields string `json:"custom_fields" gorm:"type:jsonb"` // JSON
 
 	// NetBox 关联
-	NetBoxID *int   `json:"netbox_id" gorm:"index"`
+	// NetBoxID 上必须是唯一索引：SyncFromNetBox 的 ON CONFLICT (net_box_id) 需要它做仲裁
+	// （migrations/000015；非唯一索引会让 PG 报 42P10）。PG 唯一索引允许多个 NULL，
+	// 手工录入的资产（net_box_id 为 NULL）不受影响。
+	NetBoxID *int   `json:"netbox_id" gorm:"uniqueIndex"`
 	Source   string `json:"source" gorm:"size:50"` // netbox, zabbix, manual
 
 	CreatedAt time.Time `json:"created_at"`

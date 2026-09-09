@@ -133,6 +133,11 @@ func (s *assetService) Update(ctx context.Context, id string, updates map[string
 		return nil, err
 	}
 	if err := s.db.WithContext(ctx).Model(&asset).Updates(updates).Error; err != nil {
+		// net_box_id 上的唯一索引（migrations/000015）让 PATCH 也能撞 23505：
+		// 与 Create 一致映射成 409，别让客户端看到 500（审计 F-8）。
+		if isUniqueViolation(err) {
+			return nil, ErrAlreadyExists
+		}
 		return nil, err
 	}
 	return &asset, nil

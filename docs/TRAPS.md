@@ -118,6 +118,37 @@
 
 ---
 
+### T-30. `ON CONFLICT` 要三层同时正确(列名 / 真 UNIQUE 仲裁器 / 非空 SET),sqlite 只挡得住一层
+**状态**: FIXED | **类别**: gorm / Postgres / 测试手段 (G-22 轮) | **修复日期**: 2026-09-09
+**现象**: `integration` 的三条同步路径在真 PG 上**全部失败**（NetBox `42703 column "netbox_id" does not exist`、Zabbix `42703 column "Status"`、GLPI `42702 column reference "id" is ambiguous` —— SET 的歧义在**解析期**就报错，早于仲裁索引检查，所以「缺唯一索引」不是 GLPI 当时的报错原因），而 `go test ./...` 全绿 —— 因为没有任何一条用例走到 DB 写入。
+**三层根因**（互相独立，任一处都会让整条语句失败）：
+1. **列名层**：`clause.Assignments`/`clause.Column` **不做 Go 字段名 → DB 列名映射**，调用方传 `"Name"`/`"netbox_id"` 原样进 SQL。用 `clause.AssignmentColumns([]string{"name",…})` 并**把参数语义写成 DB 列名**。
+2. **约束层**：`ON CONFLICT (col)` 要求 `col` 上有 **UNIQUE 约束或唯一索引**（普通索引 → `42P10`）。`HasIndex` 只按**名字**判存在，所以 AutoMigrate 不会把既有的普通索引升级成唯一（`uniqueIndex` 与 `index` 生成的索引名同为 `idx_<表>_<列>`）→ 必须写迁移。PG 唯一索引**允许多个 NULL**，所以整列唯一即可，不需要部分索引。
+3. **SET 层**：空更新列表时 gorm 渲染 `SET "id"="id"` —— 在 `ON CONFLICT DO UPDATE` 里 `id` 同时存在于目标表与 `excluded` → `42702 ambiguous`。空列表必须显式 `DoNothing`。
+**检测方法**（照抄 `internal/integration/upsert_test.go` + `tests/db_smoke_test.go:TestDBSmoke_NetBoxUpsert`）：
+- **DryRun 断言渲染出的 SQL 字符串**（`ON CONFLICT (\`net_box_id\`)`、`\`name\`=\`excluded\`.\`name\``、不含 `` `UpdatedAt` ``）—— 跨方言确定性，是列名层的唯一守卫；
+- **sqlite 功能测试**只能抓「冲突目标不存在」这一层：**sqlite 列名解析大小写不敏感**，`SET "Name"=EXCLUDED.Name` 在 sqlite 上**静默成功**（实测）；
+- **真 PG** 抓剩下的：唯一索引形态（`pg_indexes.indexdef` 含 `CREATE UNIQUE INDEX`）、重复拒绝、多 NULL 共存、真调用点端到端、脏数据挡住迁移的原子失败。
+**其它实测坑**：① `CREATE INDEX CONCURRENTLY` 不能进事务块，而迁移执行器按事务跑整个文件 → 只能用普通建索引，且 `DROP INDEX` 的 **ACCESS EXCLUSIVE 持有到 COMMIT**，`assets` 期间**读写全阻塞**（不是只阻塞写）；② 迁移失败日志里**没有 PG 的 DETAIL（哪个键重复）**：驱动返回的 `*pgconn.PgError.Error()` 只拼 `Severity: Message (SQLSTATE Code)`（pgx v5.5.1 `pgconn/errors.go:51-53`），Detail 字段不在其中，而应用只记录 `err.Error()`（gorm 的 `TranslateError` 本仓库未开启，没有翻译介入）→ 只剩 `could not create unique index … (SQLSTATE 23505)`，定位重复值只能靠升级前自检 SQL。
+**推广**：「SQL 拼对了」不等于「在目标方言上跑得通」，也不等于「语义对」。本轮修复**解锁**的隐藏语义缺陷：更新列里放一个硬编码常量（`status="active"`）会把本地已退役资产静默改回 active（F-7）—— 修好一条语句后，要重新审一遍它**现在真的会写什么**。
+
+---
+
+### T-31. 两类假绿：前置缺失走 `Skip`、测试另抄一份生产清单
+**状态**: FIXED | **类别**: 测试有效性 / 变异反证 (G-22 轮) | **修复日期**: 2026-09-09
+**现象**（G-22 的测试有效性审计实测，两条都发生在「本轮交付物的守门用例」上）：
+1. **前置缺失 → 整批 Skip → 脚本 EXIT=0**：`TestDBSmoke_NetBoxUpsert` / `TestDBSmoke_DownPreservesLegacyColumns` 用 `t.Skipf("库未应用到 000015")` 做前置。把 `000015` 两个迁移文件删掉后，两个用例都 Skip，`scripts/db_smoke.sh` **退出码 0** —— 本轮唯一的真库守门**静默消失**，而 CI 全绿。
+2. **测试另抄一份生产清单**：DryRun 用例自己写死 `cols := []string{"name", …, "updated_at"}` 再断言渲染结果。调用点 `service.go` 的清单被改成别的（比如加回 `tags`）时，测试断言的仍是自己那份 → **照样绿**。
+**根因**：`t.Skip` 的语义是「本用例不适用」，被误用成「前置不满足就算了」；而「断言的字面量」与「生产实际用的值」是两个来源，两者会漂移。
+**检测方法**：
+- 前置**必须**用 `Fatalf` 的场景：本轮的交付物守门（迁移存在、索引唯一、关键列在）；`Skip` 只留给「本库本就不适用」（如非升级路径库）。
+- 加**守恒断言**兜底：`TestDBSmoke_MigrateRunner` 断言 `schema_migrations` 行数 **等于** `embed` 内 `migrations/*.up.sql` 的数量，且本轮关键版本（15）已记录 —— 这样「迁移文件没进 embed / 被删」都会红。
+- 断言**引用生产变量**而不是复制字面量：`require.Equal(t, []string{…}, netboxUpdateCols)`（`netboxUpdateCols` 就是调用点用的那个包级变量）。
+**变异反证的第二个坑**：变异必须**红在断言上，不是红在编译上**。第一次删掉批次内去重时只删了 `if` 块、留下 `seen` 变量 → `declared and not used` 编译失败，也是「红」，但**没有证明断言有效**；把 `seen` 声明一起删掉后才看到真正的断言失败（期望 1 实得 2）。→ 变异后先看红的原因。
+**推广**：绿灯的**原因**要能说清。写完守门用例，做一次「把它要守的东西删掉」的变异 —— 若仍然绿，那这条用例的价值是 0。同类：`go test -run` 白名单里名字打错 → 匹配不到也是 EXIT=0（本轮由守恒断言间接兜住）。
+
+---
+
 ## 二、前端陷阱
 
 ### T-16. Settings.tsx 死表单 (B1-1/B1-2 修复中)
@@ -240,6 +271,8 @@
 | 25 | T-14 | ACTIVE |
 | — (G-20 轮) | T-28 | ACTIVE |
 | — (G-20 轮) | T-29 | FIXED |
+| — (G-22 轮) | T-30 | FIXED |
+| — (G-22 轮) | T-31 | FIXED |
 
 ---
 

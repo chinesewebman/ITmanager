@@ -1,0 +1,48 @@
+-- 000015_asset_netbox_unique: 把 assets(net_box_id) 的普通索引改成唯一索引。
+--
+-- 背景（TODO G-22）：SyncFromNetBox 用 `ON CONFLICT (net_box_id) DO UPDATE` 做批量 upsert，
+-- 但 000013 建的是**普通**索引 `idx_assets_net_box_id` —— PG 的 ON CONFLICT 需要
+-- UNIQUE 约束/唯一索引做仲裁，否则整条语句直接
+-- `42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification`，
+-- 且与是否真的发生冲突无关（NetBox 同步在真库上从来没成功过）。
+--
+-- 为什么用整列唯一索引而不是部分索引：PG 的唯一索引**允许多个 NULL**（实测），
+-- 手工录入的资产 net_box_id 为 NULL，天然不参与冲突；不需要 `WHERE net_box_id IS NOT NULL`
+-- （部分索引会要求 ON CONFLICT 带同样的 TargetWhere，徒增复杂度）。
+--
+-- 索引名必须与 gorm 的 `uniqueIndex` 标签默认名一致（idx_<表>_<列>，实测 gorm v1.30），
+-- 否则 AutoMigrate 会再建一个同名以外的索引，同列出现「唯一 + 非唯一」两个索引。
+--
+-- 升级前自检（**建议在升级窗口前先跑**，有重复值会挡住服务启动）：
+--   SELECT net_box_id, count(*) FROM assets
+--    WHERE net_box_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1;
+-- 命中行时必须先人工确认哪些资产该保留（本迁移**不做自动去重**：静默改数据比失败更危险）。
+-- 失败时的日志是 `apply 15_000015_asset_netbox_unique: … ERROR: could not create unique index
+-- "idx_assets_net_box_id" (SQLSTATE 23505)` —— **PG 的 DETAIL（哪个键重复）不会出现在这里**：
+-- 驱动返回的 *pgconn.PgError.Error() 只拼 Severity/Message/SQLSTATE，Detail 字段不在其中
+-- （实测 pgx v5.5.1；本仓库未开 gorm 的 TranslateError，没有翻译介入）。
+-- 所以定位重复值**必须**靠上面的自检 SQL，别等日志。
+--
+-- 事务性：migrate 执行器把整个文件与版本号写入放在**同一个事务**里
+-- （internal/migrate/migrate.go:298-326），所以失败即整体回滚，不会留下
+-- 「索引建了一半 / 版本已记录」的半应用状态，修好数据后重跑即可。
+--
+-- ⚠️ 锁：**整个事务期间 assets 持 ACCESS EXCLUSIVE**（实测 pg_locks）——
+-- DROP INDEX 取到的 ACCESS EXCLUSIVE 会一直持到 COMMIT，把后面的建索引全程盖住，
+-- 所以**读和写都会被阻塞**，不只是写。migrate.Up 在 database.Init 里、HTTP 服务起之前
+-- 同步执行（internal/database/database.go:72-74），迁移慢就是启动慢（探活失败/滚动升级卡住）。
+-- lock_timeout 只限制「等锁」，限制不了「持锁时长」，故本文件**不设** lock_timeout。
+--
+-- 本产品 assets 量级（自建 ITSM，10³–10⁵ 行）建索引 <1s，可直接升级。
+-- 升级前请自检规模：
+--   SELECT count(*), pg_size_pretty(pg_total_relation_size('assets')) FROM assets;
+-- 若超过 10 万行，请在**维护窗口**执行（无法用 CREATE INDEX CONCURRENTLY：PG 不允许它
+-- 出现在事务块里（实测），而执行器按事务跑整个文件；支持非事务迁移要改 migrate.go，
+-- 本轮明确不做，见 docs/FIX-PLAN-NETBOX-UPSERT.md §5 R-5）。
+--
+-- 幂等：重复执行净效果等价（DROP 后重建一次索引，数据不变）。CREATE 不写 IF NOT EXISTS：
+-- DROP 已在前面，同名索引不可能还在；万一出现「同名索引存在」的坏状态，让它**大声失败**
+-- 而不是被 IF NOT EXISTS 吞掉、留下一个非唯一索引继续 42P10。
+
+DROP INDEX IF EXISTS idx_assets_net_box_id;
+CREATE UNIQUE INDEX idx_assets_net_box_id ON assets(net_box_id);

@@ -353,6 +353,26 @@ func TestAssetService_Update_不存在返回ErrNotFound(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+// PATCH 撞 net_box_id 唯一索引（000015）必须映射成 409 而不是 500（审计 F-8）。
+func TestAssetService_Update_唯一冲突返ErrAlreadyExists(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnError(errors.New(`ERROR: duplicate key value violates unique constraint "idx_assets_net_box_id" (SQLSTATE 23505)`))
+	mock.ExpectRollback()
+
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"net_box_id": 42})
+	assert.Nil(t, asset)
+	assert.ErrorIs(t, err, ErrAlreadyExists, "唯一冲突应映射成 409，不是原样 500")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAssetService_Delete_成功(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	svc := NewAssetService(gormDB)

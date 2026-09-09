@@ -15,6 +15,11 @@
 package tests
 
 import (
+	"context"
+	"encoding/json"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -24,6 +29,9 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	network_monitor_platform "network-monitor-platform"
+	"network-monitor-platform/internal/config"
+	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/migrate"
 	"network-monitor-platform/internal/models"
 
@@ -88,6 +96,25 @@ func TestDBSmoke_MigrateRunner(t *testing.T) {
 		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
 	}
 	t.Logf("✅ 迁移执行器跑通: 已应用 %d 个迁移", applied)
+
+	// 应用数必须等于 embed 里的 *.up.sql 数量 —— 否则「迁移文件被删/没进 embed」
+	// 会让后面所有按 version 判断的用例静默 Skip（审计 F-A：最危险的假绿）。
+	want, err := fs.Glob(network_monitor_platform.MigrationsFS, "migrations/*.up.sql")
+	if err != nil || len(want) == 0 {
+		t.Fatalf("读取 embed 内迁移文件失败(数量=%d):\n%v", len(want), err)
+	}
+	if int64(len(want)) != applied {
+		t.Fatalf("embed 里有 %d 个 *.up.sql，schema_migrations 只记录了 %d 个 —— 迁移未全部应用或版本表被绕过", len(want), applied)
+	}
+	// 000015 是本轮守门的核心：它缺失时后续真库用例必须红，不是 Skip。
+	var has15 bool
+	if err := db.Raw(`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 15)`).
+		Scan(&has15).Error; err != nil {
+		t.Fatalf("探测 schema_migrations.version=15 失败:\n%v", err)
+	}
+	if !has15 {
+		t.Fatalf("schema_migrations 里没有 version=15（000015_asset_netbox_unique）—— 本轮唯一索引迁移没进 embed 或没被应用")
+	}
 
 	// 抽查漂移修复过的关键列(模型要、旧迁移缺)
 	checks := []struct{ table, col string }{
@@ -440,26 +467,235 @@ func TestDBSmoke_MigrationReapply(t *testing.T) {
 	assert.Equal(t, "10.9.9.9", gotNet.IPv4Address, "重放不得把地址变成 10.9.9.9/32")
 }
 
+// assertNetBoxIDIndexUnique 断言 assets.net_box_id 上索引的唯一性形态。
+//
+// 用 pg_indexes.indexdef 而不是 pg_constraint：000015 建的是**唯一索引**，不是 UNIQUE 约束
+// （约束会额外进 pg_constraint，索引不会）。gorm 的 uniqueIndex 标签同样只建索引。
+func assertNetBoxIDIndexUnique(t *testing.T, db *gorm.DB, wantUnique bool) {
+	t.Helper()
+	var def string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_assets_net_box_id'`).
+		Scan(&def).Error)
+	require.NotEmpty(t, def, "idx_assets_net_box_id 不存在 —— 000015 没跑？")
+	if wantUnique {
+		assert.Contains(t, def, "CREATE UNIQUE INDEX",
+			"net_box_id 必须是唯一索引，否则 ON CONFLICT 报 42P10：%s", def)
+		return
+	}
+	assert.NotContains(t, def, "UNIQUE", "此刻应是非唯一索引（模拟 000015 之前的库）：%s", def)
+}
+
+// smokeNetBoxDevice 拼 NetBox /api/dcim/devices 的单台设备（只给 SyncDevices 会读的字段）。
+func smokeNetBoxDevice(id int, name, roleSlug, model, sn, site string) map[string]any {
+	return map[string]any{
+		"id":            id,
+		"name":          name,
+		"device_type":   map[string]any{"id": 1, "slug": "cisco", "model": model},
+		"device_role":   map[string]any{"id": 1, "slug": roleSlug, "name": roleSlug},
+		"site":          map[string]any{"id": 1, "slug": "dc", "name": site},
+		"serial_number": sn,
+	}
+}
+
+// TestDBSmoke_NetBoxUpsert 是 G-22 的真库回归（docs/FIX-PLAN-NETBOX-UPSERT.md §4 V-5）。
+//
+// 为什么必须在真 PG 上测：ON CONFLICT 的仲裁者（唯一索引）是**迁移产物**，sqlite 单测用的是手写
+// DDL，测不到 000015 是否真的跑到了生产库上；而 42P10 只存在于 PG。覆盖五件事：
+// ① 索引形态是 UNIQUE；② 重复 net_box_id 被拒；③ 多个 NULL 共存（手工资产）；④ 真调用点端到端
+// （更新 + 保留 id + 不覆盖本地 status）；⑤ 脏数据挡住迁移时的原子失败 + 清理后重跑成功。
+func TestDBSmoke_NetBoxUpsert(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 前置不满足必须**红**，不是跳过：本用例是本轮唯一索引迁移的唯一真库守门，
+	// 静默 Skip 等于「删掉 000015 也全绿」（审计 F-A）。
+	var applied int64
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+		Scan(&applied).Error; err != nil {
+		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
+	}
+	if applied == 0 {
+		t.Fatalf("库未应用到 000015（assets.net_box_id 唯一索引）—— 本用例的前置不满足")
+	}
+
+	// ① 索引形态
+	assertNetBoxIDIndexUnique(t, db, true)
+
+	// ② 重复 net_box_id 必须被拒 —— 这正是 upsert 走 DO UPDATE 的前提
+	const dupID = 990015
+	require.NoError(t, db.Create(&models.Asset{
+		Name: "smoke-nb-first", AssetType: "server", Source: "netbox", NetBoxID: intPtr(dupID),
+	}).Error)
+	err := db.Create(&models.Asset{
+		Name: "smoke-nb-dup", AssetType: "server", Source: "netbox", NetBoxID: intPtr(dupID),
+	}).Error
+	require.Error(t, err, "重复 net_box_id 必须被唯一索引拒绝")
+	assert.Contains(t, strings.ToLower(err.Error()), "duplicate key", "应是唯一冲突: %v", err)
+
+	// ③ 多个 NULL 共存（手工资产 net_box_id 为 NULL，PG 唯一索引允许多个 NULL）
+	require.NoError(t, db.Create(&models.Asset{Name: "smoke-nb-manual-1", AssetType: "server", Source: "manual"}).Error)
+	require.NoError(t, db.Create(&models.Asset{Name: "smoke-nb-manual-2", AssetType: "server", Source: "manual"}).Error,
+		"多个 NULL net_box_id 必须能共存（唯一索引不该约束 NULL）")
+
+	// ④ 真调用点端到端：httptest 假 NetBox + 真 SyncFromNetBox + 真 PG
+	payload := mustJSON(t, map[string]any{"count": 2, "results": []map[string]any{
+		smokeNetBoxDevice(990101, "smoke-nb-sw01", "switch", "Catalyst 9300", "SN-101", "DC1"),
+		smokeNetBoxDevice(990102, "smoke-nb-srv01", "server", "PowerEdge R750", "SN-102", "DC1"),
+	}})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Netbox: config.NetboxConfig{URL: srv.URL, Token: "t"},
+		},
+	}, nil)
+
+	n, err := svc.SyncFromNetBox(context.Background())
+	require.NoError(t, err, "真 PG 上 SyncFromNetBox 失败 —— 000015 的唯一索引没生效（42P10）？")
+	require.Equal(t, 2, n)
+
+	var created models.Asset
+	require.NoError(t, db.First(&created, "net_box_id = ?", 990101).Error)
+	firstID := created.ID
+	assert.Equal(t, "smoke-nb-sw01", created.Name)
+	assert.Equal(t, "network", created.AssetType, "device_role.slug=switch → asset_type=network")
+
+	// 本地先退役（NetBox 侧不跟踪退役）+ 写人工标签/机柜，再同步 → name 更新，
+	// status/tags/custom_fields/rack_name 都不被覆盖（更新列里刻意不含它们）。
+	// 不预置这几列的话，「误加回更新列」的改动照样绿（审计 F-2）。
+	require.NoError(t, db.Model(&models.Asset{}).Where("net_box_id = ?", 990101).
+		Updates(map[string]any{
+			"status":        "retired",
+			"tags":          `["prod"]`,
+			"custom_fields": `{"owner":"ops"}`,
+			"rack_name":     "R-A1",
+		}).Error)
+	payload = mustJSON(t, map[string]any{"count": 2, "results": []map[string]any{
+		smokeNetBoxDevice(990101, "smoke-nb-sw01-renamed", "switch", "Catalyst 9300", "SN-999", "DC2"),
+		smokeNetBoxDevice(990102, "smoke-nb-srv01", "server", "PowerEdge R750", "SN-102", "DC1"),
+	}})
+	n, err = svc.SyncFromNetBox(context.Background())
+	require.NoError(t, err, "二次同步（冲突更新）失败")
+	require.Equal(t, 2, n)
+
+	var updated models.Asset
+	require.NoError(t, db.First(&updated, "net_box_id = ?", 990101).Error)
+	assert.Equal(t, "smoke-nb-sw01-renamed", updated.Name, "冲突行必须被更新")
+	assert.Equal(t, "SN-999", updated.SN)
+	assert.Equal(t, "DC2", updated.SiteName, "site_name 必须跟着 NetBox 走")
+	assert.Equal(t, firstID, updated.ID, "upsert 不得改写已有行的 id")
+	assert.Equal(t, "retired", updated.Status, "同步不得覆盖本地 status")
+	assert.Equal(t, `["prod"]`, updated.Tags, "同步不得覆盖人工标签 tags")
+	assert.Equal(t, `{"owner": "ops"}`, updated.CustomFields, "同步不得覆盖人工自定义字段")
+	assert.Equal(t, "R-A1", updated.RackName, "同步不得清空 rack_name（ConvertToAsset 不映射机柜）")
+
+	// ⑤ 负循环：重复数据 + 版本记录被抹 → Up 必须整体失败（不留半应用状态）
+	require.NoError(t, db.Exec(`DROP INDEX IF EXISTS idx_assets_net_box_id`).Error)
+	require.NoError(t, db.Exec(`CREATE INDEX idx_assets_net_box_id ON assets(net_box_id)`).Error)
+	require.NoError(t, db.Exec(`DELETE FROM schema_migrations WHERE version = 15`).Error)
+
+	const dirtyID = 990016
+	// 中途失败也要把库恢复成「唯一索引 + version 15」，否则同库后续用例
+	// 会因前置缺失而 Skip（审计 F-7）。用例成功时它是无害的空转。
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM assets WHERE net_box_id = ?`, dirtyID).Error
+		if err := migrate.Up(db); err != nil {
+			t.Logf("恢复库到 000015 失败（同库后续用例可能前置不满足）: %v", err)
+		}
+	})
+
+	require.NoError(t, db.Create(&models.Asset{
+		Name: "smoke-nb-dirty-1", AssetType: "server", NetBoxID: intPtr(dirtyID),
+	}).Error)
+	require.NoError(t, db.Create(&models.Asset{
+		Name: "smoke-nb-dirty-2", AssetType: "server", NetBoxID: intPtr(dirtyID),
+	}).Error, "非唯一索引下重复行必须能插进去（否则本用例的前提不成立）")
+
+	migrate.FS = network_monitor_platform.MigrationsFS
+	err = migrate.Up(db)
+	require.Error(t, err, "存在重复 net_box_id 时 000015 必须失败")
+	// 断言 PG 原文 + SQLSTATE。注意日志里**没有 DETAIL（哪个键重复）**：驱动的 PgError.Error()
+	// 只拼 Severity/Message/SQLSTATE（本仓库未开 gorm TranslateError）→ 定位重复值只能靠
+	// 000015 里给的自检 SQL，不能指望日志。
+	assert.Contains(t, strings.ToLower(err.Error()), "could not create unique index",
+		"应是唯一索引创建失败: %v", err)
+	assert.Contains(t, err.Error(), "23505", "应带 SQLSTATE 23505: %v", err)
+
+	var recorded int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+		Scan(&recorded).Error)
+	assert.Zero(t, recorded, "失败的迁移不得留下版本记录（DDL 与版本号在同一事务）")
+	assertNetBoxIDIndexUnique(t, db, false) // 失败后仍是普通索引，没有半应用状态
+
+	// 清掉重复 → 重跑成功
+	require.NoError(t, db.Exec(`DELETE FROM assets WHERE net_box_id = ?`, dirtyID).Error)
+	require.NoError(t, migrate.Up(db), "清掉重复后 000015 必须成功（可重入）")
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+		Scan(&recorded).Error)
+	assert.Equal(t, int64(1), recorded, "成功后才记录版本")
+	assertNetBoxIDIndexUnique(t, db, true)
+}
+
+// intPtr 取 *int（models.Asset.NetBoxID 是指针，NULL 表示手工资产）。
+func intPtr(v int) *int { return &v }
+
+// mustJSON 把任意结构编码成 JSON 字符串（测试内的假服务响应体）。
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return string(b)
+}
+
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。
 //
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
-//     新增 000014 后必须先回滚 14 再回滚 13，否则本用例会静默变成「回滚 000014」的空转。
+//     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
+//     当前最高版本是 000015，故三次 Down = 15 → 14 → 13。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
+	// 前置 1：必须已应用到 000015（本用例回滚 15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 14`).
-		Scan(&applied).Error; err != nil || applied == 0 {
-		t.Skipf("库未应用到 000014，跳过回滚用例: %v", err)
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+		Scan(&applied).Error; err != nil {
+		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
+	}
+	if applied == 0 {
+		t.Fatalf("库未应用到 000015 —— 本用例要回滚 15→14→13，前置不满足")
+	}
+
+	// 前置 2：必须是**升级路径**库。回滚链里要断言 000014 的回填值仍在（assertJSONB），
+	// fresh 库里那两行不存在 → 断言会因 0 行失败；显式跳过比假红更诚实。
+	var seeded int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM assets WHERE name = ?`, "legacy-null-jsonb").
+		Scan(&seeded).Error)
+	if seeded == 0 {
+		if os.Getenv("SMOKE_EXPECT_UPGRADE") == "1" {
+			t.Fatalf("SMOKE_EXPECT_UPGRADE=1 但库里没有预置的存量资产 —— scripts/db_smoke.sh 的 seed 没生效")
+		}
+		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// 第一次 Down = 回滚 000014：只撤列默认值，数据不动
+	// 第一次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
+	require.NoError(t, migrate.Down(db), "回滚 000015 失败")
+	assertNetBoxIDIndexUnique(t, db, false)
+
+	// 第二次 Down = 回滚 000014：只撤列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
 	var def *string
 	require.NoError(t, db.Raw(
@@ -468,7 +704,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
 	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
 
-	// 第二次 Down = 回滚 000013：本用例真正要守的那个
+	// 第三次 Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool

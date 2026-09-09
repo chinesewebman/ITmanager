@@ -23,7 +23,7 @@
 |---|---|---|
 | `cmd/seed`（演示数据） | 真 PG 上**每一条资产都建不出来**，日志刷 `创建服务器失败/创建交换机失败`，进程仍 `exit 0` | compose 轮 smoke 日志；CI dbsmoke 的 seed 步只敢断言用户路径（`.github/workflows/ci.yml:141-143` 有注释） |
 | `POST /api/assets`（不带 `custom_fields`） | 500（`apierr.Internal`），非 400/409 | `backend/internal/api/handlers/asset_handler.go:86-104` |
-| NetBox 同步 | **不触发本缺陷**——它是唯一显式写 `"{}"` 的路径 | `backend/internal/integration/service.go:127-128`；注：该路径另有既存缺陷（upsert 用 Go 字段名当列名 → `42703`），与本缺陷无关，见 §6 G-22 |
+| NetBox 同步 | **不触发本缺陷**——它是唯一显式写 `"{}"` 的路径 | `backend/internal/integration/service.go:113-114`；注：该路径当时另有既存缺陷（upsert 用 Go 字段名当列名 → `42703`），与本缺陷无关，**已在 G-22 轮修复**（见 `docs/FIX-PLAN-NETBOX-UPSERT.md`） |
 
 Postgres 原始报错：`invalid input syntax for type json (SQLSTATE 22P02)`。
 
@@ -277,7 +277,7 @@ ALTER TABLE assets ALTER COLUMN custom_fields DROP DEFAULT;
 ### 7-D 审查期间新增的登记项
 
 - **G-21** 资产 jsonb 入参规范化（`null`/`""`/JSON 数组 → 400 或归一；`Updates(map)` 语义）。
-- **G-22** NetBox 同步 upsert 用 Go 字段名当列名 → `42703`（首次插入即失败，既存缺陷）。
+- **G-22** NetBox 同步 upsert 用 Go 字段名当列名 → `42703`（真调用路径上预查询先失败，见 F-6）。**已修**：`docs/FIX-PLAN-NETBOX-UPSERT.md`。
 - **G-23** `ticket.Tags` 表示一致性（`default:'[]'` + service 归一的收敛）。
 
 ### 7-E 实施期间由退出码改动**连带暴露**的缺陷（新发现）

@@ -82,6 +82,19 @@ func (s *IntegrationService) ReloadGLPI(cfg *config.GLPIConfig) {
 	s.glpi.Reload(cfg)
 }
 
+// netboxUpdateCols 是 SyncFromNetBox 冲突时更新的列（**DB 列名**，见 buildUpsertClause）。
+//
+// 提成包级变量的唯一理由是**让单测断言的就是调用点真正用的那份清单**：
+// 若测试里另抄一份，调用点被改成 Go 字段名时 DryRun 断言照样绿（审计 F-D）。
+//
+//   - 不含 status：ConvertToAsset 硬编码 Status="active"（netbox.go 不读 NetBox 状态），
+//     写进去是常量、零信息量，却会把本地已退役（status='retired'，retired_at/by/reason
+//     不在更新列里）或维护中的资产静默改回 active，产出「active + 已退役」的矛盾行。
+//     新增行仍带 active（SyncFromNetBox 的结构体字面量）。
+//   - 不含 tags / custom_fields：同步里硬编码 "[]"/"{}"，更新它们会抹掉人工标签。
+//   - 不含 rack_name：ConvertToAsset 从不给它赋值（恒空串），更新等于清空。
+var netboxUpdateCols = []string{"name", "asset_type", "brand", "model", "sn", "site_name", "updated_at"}
+
 // SyncFromNetBox 从 NetBox 同步资产（C-P6：批量 upsert；C-P7：ctx 透传）。
 func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 	devices, err := s.netbox.SyncDevices(ctx)
@@ -92,28 +105,22 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	// 1. 一次 select 查所有已存在 netbox_id
-	netboxIDs := make([]int, 0, len(devices))
-	for _, d := range devices {
-		netboxIDs = append(netboxIDs, d.ID)
-	}
-	var existing []models.Asset
-	if err := database.DB.WithContext(ctx).
-		Where("netbox_id IN ?", netboxIDs).
-		Find(&existing).Error; err != nil {
-		return 0, fmt.Errorf("NetBox 已存在查询失败: %w", err)
-	}
-	existingByNB := make(map[int]*models.Asset, len(existing))
-	for i := range existing {
-		existingByNB[*existing[i].NetBoxID] = &existing[i]
-	}
-
-	// 2. 构造 upsert 列表
-	now := time.Now()
+	// 1. 构造 upsert 列表
+	//    不需要预查询「已存在」：ON CONFLICT (net_box_id) 由唯一索引仲裁（migrations/000015），
+	//    冲突即 DO UPDATE（实测：混合批次下行数、字段、id 都正确）。
+	now := time.Now().UTC() // 与 gorm 的 NowFunc（database.go 的 time.Now().UTC()）对齐，否则同行的 created_at/updated_at 差一个时区偏移
 	toUpsert := make([]models.Asset, 0, len(devices))
+	seen := make(map[int]struct{}, len(devices))
 	for _, d := range devices {
 		asset := d.ConvertToAsset()
-		base := models.Asset{
+		// 同一批次内重复的 net_box_id 会让 ON CONFLICT DO UPDATE 二次命中同一行，
+		// PG 报 21000（command cannot affect row a second time）→ 整批回滚、同步失败。
+		// NetBox 单页 id 唯一时不会发生，但挡掉只要几行（审计 F-5）。
+		if _, dup := seen[d.ID]; dup {
+			continue
+		}
+		seen[d.ID] = struct{}{}
+		toUpsert = append(toUpsert, models.Asset{
 			Source:       "netbox",
 			NetBoxID:     asset.NetboxID,
 			Name:         asset.Name,
@@ -127,17 +134,13 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 			Tags:         "[]",
 			CustomFields: "{}",
 			UpdatedAt:    now,
-		}
-		if _, ok := existingByNB[d.ID]; ok {
-			base.ID = existingByNB[d.ID].ID // 更新而非插入
-		}
-		toUpsert = append(toUpsert, base)
+		})
 	}
 
-	// 3. 批量 upsert（C-P6：用 ON CONFLICT 走 netbox_id 唯一键）
+	// 2. 批量 upsert（C-P6：ON CONFLICT 走 net_box_id 唯一索引）
+	//    更新列清单见 netboxUpdateCols（**DB 列名**，不是 Go 字段名）。
 	if err := database.DB.WithContext(ctx).
-		Clauses(buildUpsertClause("netbox_id",
-			"Name", "AssetType", "Status", "Brand", "Model", "SN", "UpdatedAt")).
+		Clauses(buildUpsertClause("net_box_id", netboxUpdateCols...)).
 		CreateInBatches(toUpsert, 100).Error; err != nil {
 		return 0, fmt.Errorf("NetBox 批量 upsert 失败: %w", err)
 	}
@@ -198,10 +201,12 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 	if len(toInsert) == 0 {
 		return 0, nil
 	}
+	// 不加 ON CONFLICT：同一 trigger 会「触发 → 恢复 → 再触发」，多行历史是预期语义
+	// （上面的预过滤只跳过「当前未恢复」的），且 alerts.trigger_id 上没有唯一索引 ——
+	// 加了只会让整条语句在真 PG 上 42P10 失败（见 docs/FIX-PLAN-NETBOX-UPSERT.md §1.2-3）。
 	if err := database.DB.WithContext(ctx).
-		Clauses(buildUpsertClause("trigger_id", "Status")).
 		CreateInBatches(toInsert, 100).Error; err != nil {
-		return 0, fmt.Errorf("Zabbix 批量 upsert 失败: %w", err)
+		return 0, fmt.Errorf("Zabbix 批量插入失败: %w", err)
 	}
 	log.Printf("从 Zabbix 同步了 %d 个告警", len(toInsert))
 	return len(toInsert), nil
@@ -255,10 +260,11 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 	if len(toUpsert) == 0 {
 		return 0, nil
 	}
+	// 不加 ON CONFLICT：工单已存在时上面已跳过（状态更新走 PATCH），且 tickets.external_id
+	// 上没有唯一索引 —— 加了只会在真 PG 上 42P10 失败（见 docs/FIX-PLAN-NETBOX-UPSERT.md §1.2）。
 	if err := database.DB.WithContext(ctx).
-		Clauses(buildUpsertClause("external_id")).
 		CreateInBatches(toUpsert, 100).Error; err != nil {
-		return 0, fmt.Errorf("GLPI 批量 upsert 失败: %w", err)
+		return 0, fmt.Errorf("GLPI 批量插入失败: %w", err)
 	}
 	log.Printf("从 GLPI 同步了 %d 个工单", len(toUpsert))
 	return len(toUpsert), nil
