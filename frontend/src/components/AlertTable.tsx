@@ -43,13 +43,16 @@ export function AlertTable({
   onSelectionChange,
 }: AlertTableProps) {
   const columns: ColumnsType<Alert> = [
-    { title: "主机", dataIndex: "host", key: "host", width: 150 },
+    // M2：加前端本地排序。主机/状态按字符串，级别按 severity 数值，时间按 Date 解析
+    // （RFC3339 字符串字典序会因时区偏移不同而错序，故不用 localeCompare）。
+    { title: "主机", dataIndex: "host", key: "host", width: 150, sorter: (a, b) => a.host.localeCompare(b.host) },
     { title: "告警信息", dataIndex: "message", key: "message" },
     {
       title: "级别",
       dataIndex: "severity_name",
       key: "severity_name",
       width: 80,
+      sorter: (a, b) => a.severity - b.severity,
       render: (name: string, record: Alert) => (
         <SeverityTag severity={record.severity} label={name} />
       ),
@@ -59,6 +62,7 @@ export function AlertTable({
       dataIndex: "status",
       key: "status",
       width: 80,
+      sorter: (a, b) => a.status.localeCompare(b.status),
       render: (s: string) => <StatusTag value={s} />,
     },
     {
@@ -66,6 +70,7 @@ export function AlertTable({
       dataIndex: "created_at",
       key: "created_at",
       width: 180,
+      sorter: (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
       // W2：原样渲染 RFC3339（如 2026-09-09T02:09:00+08:00）既占宽又难读
       render: (iso: string) => formatDateTime(iso),
     },

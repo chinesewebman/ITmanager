@@ -72,6 +72,27 @@ describe("Alerts page", () => {
     expect(screen.getByText("2026-02-14 09:30:00")).toBeInTheDocument();
   });
 
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // AlertTable 给主机/级别/状态/触发时间加前端本地排序；这里验证最核心的时间排序行为。
+  it("M2：触发时间列可排序（点击表头后按时间升序重排）", async () => {
+    const { container } = render(<Alerts />);
+    // 每行取整行 textContent（第一列是 rowSelection 选择框，不能取 td[0]）
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll("tbody tr[data-row-key]")).map(
+        (r) => r.textContent ?? "",
+      );
+
+    // 初始顺序 = dataSource 顺序：web-server-01（10:00）在前
+    expect(rowTexts()[0]).toContain("web-server-01");
+
+    // 点击「触发时间」表头，antd 默认第一次点击为升序 → 09:30 的 db-server-02 排前
+    // （scroll+fixed 列导致 header 渲染两份 title span，取第一个）
+    fireEvent.click(screen.getAllByText("触发时间")[0]);
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain("db-server-02");
+    });
+  });
+
   it("不 crash 渲染", () => {
     expect(() => render(<Alerts />)).not.toThrow();
   });
