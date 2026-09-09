@@ -72,6 +72,12 @@ describe('Runbook', () => {
     expect(screen.getByText('接入交换机端口 down')).toBeInTheDocument()
   })
 
+  // M1：标题体系统一——原手写 Space 标题（Text strong，非 heading），改为 PageHeader h4。
+  it('M1：页面标题统一到 PageHeader（h4「故障 Runbook」）', () => {
+    renderList()
+    expect(screen.getByRole('heading', { level: 4, name: '故障 Runbook' })).toBeInTheDocument()
+  })
+
   it('显示资产类型 tag + 严重度 tag', () => {
     renderList()
     expect(screen.getAllByText('server').length).toBeGreaterThan(0)

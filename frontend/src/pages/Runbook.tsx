@@ -9,12 +9,13 @@ import { useState } from 'react'
 import {
   Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message,
 } from 'antd'
-import { PlusOutlined, BookOutlined } from '@ant-design/icons'
+import { PlusOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
 import { SeverityTag } from '../components/SeverityTag'
+import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text, Paragraph } = Typography
@@ -103,12 +104,17 @@ function RunbookList() {
 
   return (
     <div style={{ padding: 24 }}>
-      <Space style={{ marginBottom: 16 }}>
-        <BookOutlined style={{ fontSize: 20 }} />
-        <Text strong style={{ fontSize: 18 }}>故障 Runbook</Text>
-        <Tag>{total} 条</Tag>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建</Button>
-      </Space>
+      {/* M1：标题体系统一——原手写 Space 标题（Text strong），改为 PageHeader h4；
+          丢弃装饰性 BookOutlined 图标，计数 Tag 与新建按钮移入 extra */}
+      <PageHeader
+        title="故障 Runbook"
+        extra={
+          <Space>
+            <Tag>{total} 条</Tag>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建</Button>
+          </Space>
+        }
+      />
 
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space>

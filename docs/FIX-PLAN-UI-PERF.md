@@ -323,6 +323,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev36 | 2026-09-10 | **批 2 第 7 步 M1（标题体系）第 2 处 AlertSuppressions 完成**：原无页面标题（仅 `useDocumentTitle` 改浏览器标题），「新建抑制规则」「模拟评估」两按钮悬空在页面顶部 → 补 `<PageHeader title="告警抑制" extra={按钮组} />`（h4，按钮从 `<Space>` 移入 extra，范本 Assets 页）。1 用例绿（`findByRole('heading', {level:4, name:'告警抑制'})`），变异（title 改占位符）红在「找不到 heading」断言。**剩 Topology/Runbook/Settings（AssetTimeline 子页 + MetricSnapshot 带 Tag 待定）** |
 | rev37 | 2026-09-10 | **批 2 第 8 步 M1（标题体系）第 3 处 Topology 完成**：原无可见标题（仅 `useDocumentTitle` 改浏览器标题），「仅显示告警节点」筛选开关悬空在页面顶部 → 补 `<PageHeader title="网络拓扑" />`（h4，开关保留原位作筛选行）。1 用例绿（`getByRole('heading', {level:4, name:'网络拓扑'})`），变异（去 PageHeader）红在「找不到 heading」断言。**剩 Runbook/Settings（AssetTimeline 子页 + MetricSnapshot 带 Tag 待定）** |
 | rev38 | 2026-09-10 | **批 2 第 9 步 M1（标题体系）第 4 处 Settings 完成**：原用原生 `<h2>系统设置</h2>`，与其它页 PageHeader h4 标题不一致 → 改 `<PageHeader title="系统设置" />`（h4）。1 用例绿（`findByRole('heading', {level:4, name:'系统设置'})`），变异（改回 h2）红在「找不到 level4 heading」断言。**剩 Runbook（AssetTimeline 子页 + MetricSnapshot 带 Tag 待定）** |
+| rev39 | 2026-09-10 | **批 2 第 10 步 M1（标题体系）第 5 处 Runbook 完成（M1 全部收口）**：原手写 `<Space>` 标题（`Text strong`，非 heading，带 BookOutlined 图标 + 「N 条」计数 Tag + 新建按钮）→ 改 `<PageHeader title="故障 Runbook" extra={计数 Tag + 新建按钮} />`（h4，丢弃装饰性 BookOutlined 图标）。1 用例绿（`getByRole('heading', {level:4, name:'故障 Runbook'})`），变异（改回 Space）红在「找不到 heading」断言。**M1 五页全收口（Oncall/AlertSuppressions/Topology/Settings/Runbook）；AssetTimeline 子页 + MetricSnapshot 带 Tag 无对应 slot，登记待定** |
 
 ---
 
@@ -373,18 +374,18 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P17 assets name 索引（迁移 000020） | ✅ 完成 | `idx_assets_name (name)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 20→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P18 audit_logs path 索引（迁移 000021） | ✅ 完成 | `idx_audit_logs_path (path text_pattern_ops)`；dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链 21→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P19 ticket_service cursor Count（3 行，无迁移） | ✅ 完成 | 把无条件 `COUNT(*)` 挪到 cursor 分支之后；cursor 模式不再跑 Count；单测 + 变异（挪回）红在 `SELECT count(*)` 未匹配 |
-| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(Oncall+AlertSuppressions+Topology+Settings) 已完成（rev30–38）；剩 M1(其他页)/M2/M3+P4/P5/P6/P7/M13/M15 |
+| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(五页全收口) 已完成（rev30–39）；剩 M2/M3+P4/P5/P6/P7/M13/M15 |
 | 批 2 · M14 批量操作确认 | ✅ 完成 | Alerts「批量确认/解决」套 Popconfirm 二次确认（title 带已选数量）；1 用例绿；变异（去 Popconfirm）红在确认框缺失 |
 | 批 2 · M7 升级策略 JSON 异常文案 | ✅ 完成 | Oncall 升级策略 Levels 非法 JSON 给友好中文（结构化编辑器登记不做）；1 用例绿；变异（去 SyntaxError 判断）红在 toHaveBeenCalledWith |
 | 批 2 · M11 严重度配色统一（AssetTimeline + Runbook + AlertSuppressions） | ✅ 完成 | 三处自造配色（AssetTimeline 6 档错位 / Runbook 2 档 / AlertSuppressions 3 档）统一到 SEVERITY_META 权威 6 档；3 处各 1 用例绿 + 变异红 |
-| 批 2 · M1 标题体系统一（Oncall + AlertSuppressions + Topology + Settings） | 🔄 进行中 | Oncall Tabs 页补 PageHeader「值班管理」、AlertSuppressions 补 PageHeader「告警抑制」+ 按钮入 extra、Topology 补 PageHeader「网络拓扑」、Settings h2 改 PageHeader「系统设置」（h4）；各 1 用例绿；变异均红在 heading 断言。**剩 Runbook（AssetTimeline 子页 + MetricSnapshot 带 Tag 待定）** |
+| 批 2 · M1 标题体系统一（五页全收口） | ✅ 完成 | Oncall「值班管理」、AlertSuppressions「告警抑制」+ 按钮入 extra、Topology「网络拓扑」、Settings h2 改「系统设置」、Runbook 手写 Space 改「故障 Runbook」+ 计数 Tag/按钮入 extra（h4）；各 1 用例绿；变异均红在 heading 断言。AssetTimeline 子页（带返回链接）+ MetricSnapshot（标题带 Tag）无对应 slot，登记待定 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
-5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 Oncall（rev35）+ M1 AlertSuppressions（rev36）+ M1 Topology（rev37）+ M1 Settings（rev38）已完成**；剩 M1 标题（Runbook）、M2 排序、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M13 移动端、M15 空态/加载态。
+5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）已完成**；剩 M2 排序、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M13 移动端、M15 空态/加载态。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 
