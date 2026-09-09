@@ -175,4 +175,10 @@ describe('AlertSuppressions', () => {
     expect(tag).toHaveClass('ant-tag-gold')
     expect(tag).not.toHaveClass('ant-tag-blue')
   })
+
+  // M1：标题体系统一——原无页面标题（仅 useDocumentTitle），按钮悬空。补 PageHeader h4。
+  it('M1：页面标题统一到 PageHeader（h4「告警抑制」）', async () => {
+    renderPage()
+    expect(await screen.findByRole('heading', { level: 4, name: '告警抑制' })).toBeInTheDocument()
+  })
 })

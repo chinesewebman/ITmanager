@@ -10,6 +10,7 @@ import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
 import { SEVERITY_META } from '../components/SeverityTag'
+import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -117,14 +118,20 @@ export function AlertSuppressions() {
 
   return (
     <div>
-      <Space style={{ marginBottom: 16 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-          新建抑制规则
-        </Button>
-        <Button icon={<ThunderboltOutlined />} onClick={() => setPreviewOpen(true)}>
-          模拟评估
-        </Button>
-      </Space>
+      {/* M1：标题体系统一——原无页面标题（仅 useDocumentTitle），按钮悬空 */}
+      <PageHeader
+        title="告警抑制"
+        extra={
+          <Space>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新建抑制规则
+            </Button>
+            <Button icon={<ThunderboltOutlined />} onClick={() => setPreviewOpen(true)}>
+              模拟评估
+            </Button>
+          </Space>
+        }
+      />
 
       <Card title="告警抑制规则" size="small">
         {isError ? (
