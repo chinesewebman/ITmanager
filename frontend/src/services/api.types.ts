@@ -191,7 +191,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/alerts/{id}/acknowledge": {
+    "/alerts/{id}/ack": {
         parameters: {
             query?: never;
             header?: never;
@@ -467,7 +467,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/notification/channels": {
+    "/notification-channels": {
         parameters: {
             query?: never;
             header?: never;
@@ -485,7 +485,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/notification/channels/{id}": {
+    "/notification-channels/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -503,7 +503,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/notification/channels/{id}/test": {
+    "/notification-channels/{id}/test": {
         parameters: {
             query?: never;
             header?: never;
@@ -511,9 +511,9 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
         /** 测试通知渠道 */
-        post: operations["testChannel"];
+        put: operations["testChannel"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;

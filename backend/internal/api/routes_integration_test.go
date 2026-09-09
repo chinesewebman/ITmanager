@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -388,6 +390,66 @@ func TestRoutes_OpenAPISpec_可达且合法YAML(t *testing.T) {
 	assert.Contains(t, body, "openapi: 3.0")
 	assert.Contains(t, body, "paths:")
 	assert.Contains(t, body, "components:")
+}
+
+// colonParamRe 把 gin 的 :id / :shift_id 归一成 OpenAPI 的 {id} / {shift_id}。
+var colonParamRe = regexp.MustCompile(`:([A-Za-z_][A-Za-z0-9_]*)`)
+
+// TestRoutes_OpenAPI无幻影路径 钉住「OpenAPI 声明的 (method, path) 必须真实注册」。
+//
+// G-37：spec 曾把通知渠道写成 /notification/channels（真实是 /notification-channels）、
+// 告警确认写成 /alerts/{id}/acknowledge（真实是 /alerts/{id}/ack）、渠道测试写成 post（真实是 put）
+// ——按 spec 生成的客户端一律 404，而既有 OpenAPI 测试只做字符串包含（`paths:` 存在即绿）。
+//
+// 断言方向是 **spec ⊆ 路由**：只挡幻影端点，不要求每条路由都已文档化
+// （未文档化清单见 TODO G-37 残余，那属「文档完整度」而非「契约正确性」）。
+func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
+	r := setupTestRouter(t)
+
+	real := map[string]bool{}
+	for _, rt := range r.Routes() {
+		if !strings.HasPrefix(rt.Path, "/api/") {
+			continue // /healthz、/metrics、/swagger/*any、/openapi.yaml 不在 spec 的 server 前缀内
+		}
+		real[rt.Method+" "+colonParamRe.ReplaceAllString(strings.TrimPrefix(rt.Path, "/api"), "{$1}")] = true
+	}
+	require.NotEmpty(t, real, "路由集合为空，比对会空转")
+
+	// spec 走 HTTP 端点取：与 /swagger 消费的是同一份 embed 产物（不是磁盘上的另一个副本）
+	req := httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var spec struct {
+		Servers []struct {
+			URL string `yaml:"url"`
+		} `yaml:"servers"`
+		Paths map[string]map[string]any `yaml:"paths"`
+	}
+	require.NoError(t, yaml.Unmarshal(w.Body.Bytes(), &spec))
+
+	// spec 的 path 是相对 server url 的，而上面剥的是 /api 前缀——两者必须一致，
+	// 否则本用例会静默变成「永远不匹配」。先钉住前提，再比对。
+	require.NotEmpty(t, spec.Servers, "spec 必须声明 servers")
+	require.True(t, strings.HasSuffix(spec.Servers[0].URL, "/api"),
+		"server url 必须以 /api 结尾（当前 %q），否则与剥前缀的比对口径不符", spec.Servers[0].URL)
+	require.NotEmpty(t, spec.Paths, "spec 没有 paths")
+
+	httpMethods := map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true}
+	checked := 0
+	for path, ops := range spec.Paths {
+		for method := range ops {
+			if !httpMethods[method] {
+				continue // parameters / summary / servers 等非方法键
+			}
+			checked++
+			assert.True(t, real[strings.ToUpper(method)+" "+path],
+				"OpenAPI 声明了 %s %s，但 SetupRouter 未注册该路由（幻影端点）", strings.ToUpper(method), path)
+		}
+	}
+	// 哨兵：只防「spec 被整体清空 → subset 断言空转」，不覆盖单条 path 被删（那属 G-37 残余）
+	assert.GreaterOrEqual(t, checked, 60, "spec 覆盖端点数骤降，subset 断言可能已空转")
 }
 
 // ==================== 资产诊断端点 (P0-1) ====================
