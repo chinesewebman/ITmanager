@@ -1263,6 +1263,8 @@ export interface components {
                     acknowledged?: number;
                     resolved?: number;
                 };
+                /** @description 还有下一页时返回（items 长度等于 limit 时） */
+                next_cursor?: string;
             };
         };
         AlertStats: {
@@ -1734,6 +1736,10 @@ export interface operations {
                 status?: "problem" | "acknowledged" | "resolved";
                 severity?: number;
                 host_id?: string;
+                /** @description 返回条数上限，默认 100，上限 1000 */
+                limit?: number;
+                /** @description v2.0 游标分页，取上一页响应的 next_cursor；解码失败时降级为忽略 */
+                cursor?: string;
             };
             header?: never;
             path?: never;

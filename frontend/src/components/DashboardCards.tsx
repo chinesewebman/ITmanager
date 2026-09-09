@@ -1,7 +1,8 @@
-import { Card, Col, Row, Statistic } from 'antd'
+import { Card, Col, Row, Statistic, theme } from 'antd'
 import {
   AlertOutlined,
   ArrowDownOutlined,
+  ArrowUpOutlined,
   BuildOutlined,
   DesktopOutlined,
   HomeOutlined,
@@ -38,6 +39,10 @@ const CARDS: CardSpec[] = [
 ]
 
 export function DashboardCards({ stats, loading, alertTrendDelta }: DashboardCardsProps) {
+  const { token } = theme.useToken()
+  // 告警增加 = 变差 → 红色向上；减少 = 变好 → 绿色向下。
+  // 修前写死 ArrowDownOutlined + 绿色 + Math.abs()，涨了也显示「绿色 ↓ 5」（语义相反）。
+  const rising = (alertTrendDelta ?? 0) > 0
   return (
     <Row gutter={16}>
       {CARDS.map((c) => (
@@ -49,9 +54,16 @@ export function DashboardCards({ stats, loading, alertTrendDelta }: DashboardCar
               prefix={c.icon}
               valueStyle={{ color: c.color }}
               suffix={
-                c.showDelta && alertTrendDelta !== undefined ? (
-                  <span style={{ fontSize: 14, color: '#52c41a', marginLeft: 8 }}>
-                    <ArrowDownOutlined /> {Math.abs(alertTrendDelta)}
+                c.showDelta && alertTrendDelta !== undefined && alertTrendDelta !== 0 ? (
+                  <span
+                    style={{
+                      fontSize: 14,
+                      marginLeft: 8,
+                      color: rising ? token.colorError : token.colorSuccess,
+                    }}
+                  >
+                    {rising ? <ArrowUpOutlined /> : <ArrowDownOutlined />}{' '}
+                    {Math.abs(alertTrendDelta)}
                   </span>
                 ) : null
               }

@@ -153,6 +153,9 @@ export function CommandPalette() {
   // 小改进 #3 review 修复：改用 React Query 复用 cache
   // 替代原本"打开时 fetch 3 API"，避免每次 Cmd+K 重复请求
   // staleTime 30s → 30s 内不重 fetch，跨 Cmd+K 多次打开复用
+  // P3（性能审计）：必须带 enabled: open —— 本组件在 App.tsx 全局挂载，不带 enabled
+  // 时**面板没打开也会发 3 个列表请求**（实测挂载即 GET /assets /alerts /tickets），
+  // 且 queryKey 与各页面不同，React Query 无法去重。
   // 注：axios 响应是 r.data = {code, data: {items, stats}}，fetcher 取最里层 items
   const assetsQuery = useApiQuery<AssetItem[]>(
     queryKeys.assets.list({ page: 1, page_size: 50 }),
@@ -160,17 +163,17 @@ export function CommandPalette() {
       assetApi
         .list({ page: 1, page_size: 50 })
         .then((r) => (r.data as any)?.data?.items ?? []),
-    { staleTime: 30_000 },
+    { staleTime: 30_000, enabled: open },
   );
   const alertsQuery = useApiQuery<AlertItem[]>(
     queryKeys.alerts.list({}),
     () => alertApi.list({}).then((r) => (r.data as any)?.data?.items ?? []),
-    { staleTime: 30_000 },
+    { staleTime: 30_000, enabled: open },
   );
   const ticketsQuery = useApiQuery<TicketItem[]>(
     queryKeys.tickets.list({}),
     () => ticketApi.list({}).then((r) => (r.data as any)?.data?.items ?? []),
-    { staleTime: 30_000 },
+    { staleTime: 30_000, enabled: open },
   );
 
   const loading =
@@ -184,7 +187,9 @@ export function CommandPalette() {
         type: "asset" as const,
         title: x.name || x.hostname || x.host || x.id,
         subtitle: x.asset_type,
-        to: `/assets/${x.id}`,
+        // H1：路由表里没有 /assets/:id（只有 /assets 与 /assets/:id/diagnostics），
+        // 原写法跳到 404。
+        to: `/assets/${x.id}/diagnostics`,
         tagColor: "blue",
       })),
       ...(alertsQuery.data ?? []).map((x) => ({

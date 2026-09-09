@@ -44,6 +44,14 @@ server {
     ssl_session_timeout 1d;
     ssl_session_tickets off;
 
+    # 压缩（P1）：与 frontend/nginx.conf 一致。默认 gzip_types 不含 js/css，
+    # 不写这一行等于没开压缩。
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
     # HSTS 一年（含子域）。确认全站 HTTPS 稳定后再考虑 preload。
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options "SAMEORIGIN" always;

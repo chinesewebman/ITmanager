@@ -334,6 +334,20 @@ paths:
           in: query
           schema:
             type: string
+        # limit/cursor 是 handler 一直支持但 spec 漏记的参数（G-37 同类）。
+        # 前端仪表盘「最近告警」用 limit=5 取最新几条，类型需与实现对齐。
+        - name: limit
+          in: query
+          description: 返回条数上限，默认 100，上限 1000
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+        - name: cursor
+          in: query
+          description: v2.0 游标分页，取上一页响应的 next_cursor；解码失败时降级为忽略
+          schema:
+            type: string
       responses:
         '200':
           description: 成功
@@ -2169,6 +2183,9 @@ components:
                   type: integer
                 resolved:
                   type: integer
+            next_cursor:
+              type: string
+              description: 还有下一页时返回（items 长度等于 limit 时）
 
     AlertStats:
       type: object

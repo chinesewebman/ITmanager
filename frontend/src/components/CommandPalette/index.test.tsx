@@ -4,6 +4,7 @@ import { ConfigProvider } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CommandPalette, useCommandPaletteStore } from "./index";
+import { assetApi, alertApi, ticketApi } from "../../services/api";
 
 // 共享 QueryClient 实例（避免每个 test 重建）
 const testQueryClient = new QueryClient({
@@ -73,6 +74,41 @@ describe("CommandPalette", () => {
     vi.clearAllMocks();
     // 重置 zustand store (v1.3: open 移到 store, 避免 test 残留)
     useCommandPaletteStore.setState({ open: false });
+    // P3：共享 QueryClient 的缓存会跨用例残留（staleTime 30s 内不重取），
+    // 导致「打开后请求次数」类断言不可靠 —— 每个用例从干净缓存开始。
+    testQueryClient.clear();
+  });
+
+  // P3（性能审计）：组件在 App.tsx 全局挂载，未打开时不得发请求。
+  it("面板未打开时不发任何列表请求", () => {
+    renderPalette();
+    expect(assetApi.list).not.toHaveBeenCalled();
+    expect(alertApi.list).not.toHaveBeenCalled();
+    expect(ticketApi.list).not.toHaveBeenCalled();
+  });
+
+  it("打开后按需请求，关闭再打开命中缓存不重复请求", async () => {
+    renderPalette();
+    Object.defineProperty(navigator, "platform", {
+      value: "MacIntel",
+      configurable: true,
+    });
+
+    fireEvent.keyDown(document, { key: "k", metaKey: true });
+    await waitFor(() => screen.getByText("web-server-01"));
+    expect(assetApi.list).toHaveBeenCalledTimes(1);
+
+    // 关闭 → 再打开：staleTime 30s 内应命中缓存
+    fireEvent.keyDown(document, { key: "k", metaKey: true });
+    await waitFor(
+      () => {
+        expect(screen.queryByPlaceholderText(/搜索/)).toBeNull();
+      },
+      { timeout: 3000 },
+    );
+    fireEvent.keyDown(document, { key: "k", metaKey: true });
+    await waitFor(() => screen.getByText("web-server-01"));
+    expect(assetApi.list).toHaveBeenCalledTimes(1);
   });
 
   it("初始不渲染 modal（Cmd+K 才开）", () => {
@@ -218,7 +254,9 @@ describe("CommandPalette", () => {
   });
 
   // 小改进 #3 review 修复 #4：navigate 跳转断言
-  it("点击资产项触发 navigate(/assets/a1)", async () => {
+  // H1：路由表只有 /assets 与 /assets/:id/diagnostics，没有 /assets/:id ——
+  // 原来跳 /assets/a1 是 404。
+  it("点击资产项触发 navigate(/assets/a1/diagnostics)", async () => {
     renderPalette();
     Object.defineProperty(navigator, "platform", {
       value: "MacIntel",
@@ -228,12 +266,12 @@ describe("CommandPalette", () => {
     fireEvent.keyDown(document, { key: "k", metaKey: true });
     await waitFor(() => screen.getByText("web-server-01"));
 
-    // 点击资产项（应 navigate to /assets/a1）
+    // 点击资产项（应 navigate to /assets/a1/diagnostics）
     fireEvent.click(screen.getByText("web-server-01"));
 
     // modal 关闭 + navigate 调用
     await waitFor(() => {
-      expect(navigateMock).toHaveBeenCalledWith("/assets/a1");
+      expect(navigateMock).toHaveBeenCalledWith("/assets/a1/diagnostics");
     });
   });
 });

@@ -1,68 +1,51 @@
-import { Card, Col, List, Row, Tag } from 'antd'
-import { dashboardApi } from '../services/api'
+import { Card, Col, List, Row, Typography } from 'antd'
+import { dashboardApi, alertApi } from '../services/api'
 import { PageHeader } from '../components/PageHeader'
 import { DashboardCards, type DashboardCardsStats } from '../components/DashboardCards'
 import { AlertTrendChart, type AlertTrend } from '../components/AlertTrendChart'
 import { KpiCards, type KPI } from '../components/KpiCards'
+import { ErrorState } from '../components/ErrorState'
+import { EmptyState } from '../components/EmptyState'
+import { LoadingSkeleton } from '../components/LoadingSkeleton'
+import { SeverityTag } from '../components/SeverityTag'
+import type { Alert } from '../components/AlertTable'
 import { useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { formatRelativeTime } from '../utils/time'
 
-const MOCK_STATS: DashboardCardsStats = {
-  assets: 156,
-  alerts: 8,
-  tickets: 23,
-  sites: 3,
-  machines: 45,
-  networks: 12,
+const RECENT_ALERT_LIMIT = 5
+const EMPTY_STATS: DashboardCardsStats = {
+  assets: 0,
+  alerts: 0,
+  tickets: 0,
+  sites: 0,
+  machines: 0,
+  networks: 0,
 }
-
-const MOCK_TRENDS: AlertTrend[] = [
-  { date: '2026-02-08', count: 10 },
-  { date: '2026-02-09', count: 15 },
-  { date: '2026-02-10', count: 8 },
-  { date: '2026-02-11', count: 12 },
-  { date: '2026-02-12', count: 5 },
-  { date: '2026-02-13', count: 7 },
-  { date: '2026-02-14', count: 3 },
-]
-
-interface RecentAlert {
-  id: number
-  host: string
-  message: string
-  severity: 'critical' | 'warning' | 'error' | string
-  time: string
-}
-
-const MOCK_RECENT: RecentAlert[] = [
-  { id: 1, host: 'web-server-01', message: 'CPU使用率超过90%', severity: 'critical', time: '10分钟前' },
-  { id: 2, host: 'db-server-02', message: '磁盘空间不足', severity: 'warning', time: '30分钟前' },
-  { id: 3, host: 'switch-core-01', message: '端口状态异常', severity: 'error', time: '1小时前' },
-  { id: 4, host: 'firewall-main', message: '连接数超阈值', severity: 'warning', time: '2小时前' },
-]
 
 function Dashboard() {
   useDocumentTitle('仪表盘')
-  // C-P9: stats + trends 走 React Query（1min 缓存）
-  const { data: stats } = useApiQuery<DashboardCardsStats>(
+
+  // FIX-PLAN-UI-PERF §W1：四个区块各自暴露 isLoading / isError。
+  // 修前 stats/trends 空值回落 MOCK_STATS / MOCK_TRENDS，失败被伪装成成功。
+  const statsQ = useApiQuery<DashboardCardsStats | null>(
     queryKeys.dashboard.stats(),
     async () => {
       const res: any = await dashboardApi.getStats()
-      return res?.data?.data ?? MOCK_STATS
+      return res?.data?.data ?? null
     },
     { staleTime: 60_000 },
   )
-  const { data: trends } = useApiQuery<AlertTrend[]>(
+  const trendsQ = useApiQuery<AlertTrend[]>(
     queryKeys.dashboard.trends(),
     async () => {
       const res: any = await dashboardApi.getTrends()
-      return res?.data?.data?.alert_trends ?? MOCK_TRENDS
+      const list = res?.data?.data?.alert_trends
+      return Array.isArray(list) ? list : []
     },
     { staleTime: 60_000 },
   )
-
-  // A-3: KPI 指标（1min 缓存）
-  const { data: kpi, isLoading: kpiLoading } = useApiQuery<KPI | null>(
+  const kpiQ = useApiQuery<KPI | null>(
     ['dashboard', 'kpis'],
     async () => {
       const res: any = await dashboardApi.getKPIs()
@@ -70,53 +53,112 @@ function Dashboard() {
     },
     { staleTime: 60_000 },
   )
+  // 后端 /dashboard/* 只有 stats/trends/kpis（routes.go:351-355），没有「最近告警」接口，
+  // 复用 GET /alerts：服务端已按 created_at DESC, id DESC 排序（alert_service.go:134）。
+  // 修前这里是无条件渲染的 4 条 MOCK_RECENT 假告警（Dashboard.tsx:100）。
+  const recentQ = useApiQuery<Alert[]>(
+    ['dashboard', 'recent-alerts'],
+    async () => {
+      const res: any = await alertApi.list({ limit: RECENT_ALERT_LIMIT })
+      const items = res?.data?.data?.items
+      return Array.isArray(items) ? items : []
+    },
+    { staleTime: 60_000 },
+  )
 
-  const safeStats = stats ?? MOCK_STATS
-  const safeTrends = trends ?? MOCK_TRENDS
-
-  // 简化的 delta 计算：对比前 3 天 vs 后 3 天的均值
+  const trends = trendsQ.data ?? []
+  // 趋势点不足 6 个时不做「后 3 天 vs 前 3 天」对比：传 undefined 让角标不渲染，
+  // 而不是造一个 5（修前 `: 5` 是虚构趋势）。
   const delta =
-    safeTrends.length >= 6
-      ? safeTrends.slice(-3).reduce((s, p) => s + p.count, 0) -
-        safeTrends.slice(-6, -3).reduce((s, p) => s + p.count, 0)
-      : 5
+    trends.length >= 6
+      ? trends.slice(-3).reduce((s, p) => s + p.count, 0) -
+        trends.slice(-6, -3).reduce((s, p) => s + p.count, 0)
+      : undefined
+  const recent = recentQ.data ?? []
 
   return (
     <div>
       <PageHeader title="仪表盘" subtitle="网络运维平台核心指标速览" />
 
-      {/* A-3: KPI 指标区（4 大关键指标） */}
-      <KpiCards kpi={kpi ?? null} loading={kpiLoading} />
+      {kpiQ.isError ? (
+        <ErrorState error={kpiQ.error} onRetry={kpiQ.refetch} compact />
+      ) : (
+        <KpiCards kpi={kpiQ.data ?? null} loading={kpiQ.isLoading} />
+      )}
 
-      <DashboardCards stats={safeStats} alertTrendDelta={delta} />
+      {statsQ.isError ? (
+        <ErrorState error={statsQ.error} onRetry={statsQ.refetch} />
+      ) : statsQ.data ? (
+        <DashboardCards
+          stats={statsQ.data}
+          loading={statsQ.isLoading}
+          alertTrendDelta={delta}
+        />
+      ) : statsQ.isLoading ? (
+        <DashboardCards stats={EMPTY_STATS} loading />
+      ) : (
+        <EmptyState
+          title="暂无统计数据"
+          description="后端尚未返回资产与告警汇总"
+          compact
+        />
+      )}
 
       <Row gutter={16} style={{ marginTop: 16 }}>
         <Col span={16}>
-          <AlertTrendChart data={safeTrends} />
+          {trendsQ.isError ? (
+            <Card title="告警趋势">
+              <ErrorState
+                error={trendsQ.error}
+                onRetry={trendsQ.refetch}
+                compact
+              />
+            </Card>
+          ) : (
+            <AlertTrendChart data={trends} />
+          )}
         </Col>
         <Col span={8}>
           <Card title="最近告警" style={{ height: 380 }}>
-            <List
-              dataSource={MOCK_RECENT}
-              renderItem={(item) => (
-                <List.Item>
-                  <List.Item.Meta
-                    title={item.host}
-                    description={
-                      <div>
-                        <span>{item.message}</span>
+            {recentQ.isError ? (
+              <ErrorState
+                error={recentQ.error}
+                onRetry={recentQ.refetch}
+                compact
+              />
+            ) : recentQ.isLoading ? (
+              <LoadingSkeleton variant="list" rows={4} />
+            ) : recent.length === 0 ? (
+              <EmptyState preset="no-alerts" compact />
+            ) : (
+              <List
+                dataSource={recent}
+                renderItem={(a) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      title={a.host}
+                      description={
                         <div>
-                          <Tag color={item.severity === 'critical' ? 'red' : 'orange'} style={{ marginTop: 4 }}>
-                            {item.severity}
-                          </Tag>
-                          <span style={{ color: '#999', fontSize: 12, marginLeft: 8 }}>{item.time}</span>
+                          <span>{a.message}</span>
+                          <div>
+                            <SeverityTag
+                              severity={a.severity}
+                              label={a.severity_name}
+                            />
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontSize: 12, marginLeft: 8 }}
+                            >
+                              {formatRelativeTime(a.created_at)}
+                            </Typography.Text>
+                          </div>
                         </div>
-                      </div>
-                    }
-                  />
-                </List.Item>
-              )}
-            />
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
           </Card>
         </Col>
       </Row>
