@@ -4,7 +4,7 @@
 // 「db-* 的告警已经被抑制了」，而实际一条规则都不存在。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
@@ -138,5 +138,30 @@ describe('AlertSuppressions', () => {
     expect(h.apiSend).toHaveBeenCalledTimes(1)
 
     resolveSend(undefined)
+  })
+
+  // M5：危险操作确认统一——title 带对象名 + okText="删除" + okButtonProps danger
+  // （范本 AssetTable Popconfirm 四件套）。此前 title 只有「确定删除？」不带对象名，无 danger。
+  it('M5：删除确认框带对象名 + danger 确认按钮', async () => {
+    h.apiSend.mockResolvedValue(undefined)
+    renderPage()
+
+    // 第一行（抑制 db-*）的删除按钮
+    fireEvent.click(screen.getAllByRole('button', { name: /删\s*除/ })[0])
+
+    // 确认框 title 带对象名
+    const title = await screen.findByText(/确认删除规则「抑制 db-\*」/)
+    expect(title).toBeInTheDocument()
+
+    // 确认按钮 danger 类型（antd v5 用 ant-btn-dangerous class）
+    const popover = title.closest('.ant-popover') as HTMLElement
+    const okBtn = within(popover).getByRole('button', { name: /删\s*除/ })
+    expect(okBtn).toHaveClass('ant-btn-dangerous')
+
+    // 确认后调用 DELETE
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/alert-suppressions/r1')
+    })
   })
 })

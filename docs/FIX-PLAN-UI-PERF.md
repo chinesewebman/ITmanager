@@ -301,6 +301,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev14 | 2026-09-10 | **W4-M4（第 2 步 Oncall）完成**：`Oncall.tsx` 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个 Modal `onOk={onSubmit}` 加 `submitting` state + `confirmLoading`，`finally` 复位。2 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去两处 `confirmLoading`）两用例均红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩 Runbook/Settings 待续 |
 | rev15 | 2026-09-10 | **W4-M4（第 3 步 Runbook）完成**：`Runbook.tsx` 新建/编辑 Modal `onOk={onSubmit}`（无 okText，默认 OK）加 `submitting` state + `confirmLoading`，`finally` 复位。1 用例绿（apiSend pending 时 OK 按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩 Settings 1 处待续 |
 | rev16 | 2026-09-10 | **W4-M4（第 4 步 Settings）完成，M4 全部 4 文件收口**：`Settings.tsx` 渠道 Modal `onOk={handleSaveChannel}` 加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 全部完成（AlertSuppressions/Oncall/Runbook/Settings 共 4 文件 6 提交点） |
+| rev17 | 2026-09-10 | **W4-M5（第 1 步 AlertSuppressions）完成**：删除规则 Popconfirm `title="确定删除？"`（无对象名、无 danger）→ 四件套（范本 `AssetTable:163-168`）`title={`确认删除规则「${record.name}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。1 用例绿（确认框 title 带对象名 + 确认按钮 `ant-btn-dangerous` + 确认后 DELETE `/alert-suppressions/r1`），变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言。M5 剩 Runbook 1 处 + Oncall 2 处待续 |
 
 ---
 
@@ -338,7 +339,9 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M4 提交按钮 loading · Oncall.tsx | ✅ 完成 | 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个 Modal 加 `submitting` state + `confirmLoading`，`finally` 复位。2 用例绿（pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去两处 `confirmLoading`）两用例均红在断言 |
 | W4-M4 提交按钮 loading · Runbook.tsx | ✅ 完成 | 新建/编辑 Modal（无 okText，默认 OK）加 `submitting` state + `confirmLoading`，`finally` 复位。1 用例绿（pending 时 OK 按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading`）红在断言 |
 | W4-M4 提交按钮 loading · Settings.tsx | ✅ 完成 | 渠道 Modal（`onOk={handleSaveChannel}`）加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在断言。**M4 全部 4 文件收口** |
-| W4-M5/M6 | ⬜ 未开始 | M5 危险操作确认（AlertSuppressions/Runbook/Oncall 各 1 处 Popconfirm 统一 title + okButtonProps danger）；M6 14 处 required 无 message 统一「请输入/请选择 XXX」 |
+| W4-M5 危险操作确认 · AlertSuppressions.tsx | ✅ 完成 | 删除规则 Popconfirm 四件套（title 带对象名 + `okButtonProps danger`）；1 用例绿，变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言 |
+| W4-M5 危险操作确认 · Runbook.tsx + Oncall.tsx（2 处） | ⬜ 未开始 | Runbook.tsx:174（对象 `rb.title`，title="确定删除?"）、Oncall.tsx:114 值班组（`r.name`）、Oncall.tsx:181 升级策略（`r.name`）统一四件套 |
+| W4-M6 14 处 required 无 message | ⬜ 未开始 | Settings.tsx:772…、Oncall.tsx:105,158、TicketFormModal.tsx:56、AssetFormModal.tsx:100 统一「请输入/请选择 XXX」 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 

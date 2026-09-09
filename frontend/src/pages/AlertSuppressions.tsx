@@ -156,7 +156,13 @@ export function AlertSuppressions() {
                 render: (_: any, record: AlertSuppression) => (
                   <Space>
                     <Button size="small" onClick={() => openEdit(record)}>编辑</Button>
-                    <Popconfirm title="确定删除？" onConfirm={() => record.id && onDelete(record.id)}>
+                    <Popconfirm
+                      title={`确认删除规则「${record.name}」？`}
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => record.id && onDelete(record.id)}
+                    >
                       <Button size="small" danger>删除</Button>
                     </Popconfirm>
                   </Space>
