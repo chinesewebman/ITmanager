@@ -1,3 +1,4 @@
+import { useMemo, memo } from "react";
 import { Button, Space, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { StatusTag } from "./StatusTag";
@@ -33,7 +34,7 @@ export interface AlertTableProps {
   onSelectionChange?: (ids: string[]) => void;
 }
 
-export function AlertTable({
+export const AlertTable = memo(function AlertTable({
   data,
   loading,
   onAck,
@@ -42,7 +43,8 @@ export function AlertTable({
   selectedIds,
   onSelectionChange,
 }: AlertTableProps) {
-  const columns: ColumnsType<Alert> = [
+  // P4：columns useMemo 缓存，render 闭包引用的 onAck/onResolve/onMarkFP 引用稳定则 columns 不重建
+  const columns = useMemo<ColumnsType<Alert>>(() => [
     // M2：加前端本地排序。主机/状态按字符串，级别按 severity 数值，时间按 Date 解析
     // （RFC3339 字符串字典序会因时区偏移不同而错序，故不用 localeCompare）。
     { title: "主机", dataIndex: "host", key: "host", width: 150, sorter: (a, b) => a.host.localeCompare(b.host) },
@@ -127,7 +129,7 @@ export function AlertTable({
         </Space>
       ),
     },
-  ];
+  ], [onAck, onResolve, onMarkFP]);
 
   return (
     <Table<Alert>
@@ -156,6 +158,6 @@ export function AlertTable({
       }
     />
   );
-}
+});
 
 export default AlertTable;

@@ -15,7 +15,7 @@ import {
   type AlertStats,
 } from "../components/AlertStatsCards";
 import { useApiMutation, useApiQuery, queryKeys } from "../hooks/useApiQuery";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // W1：假数据兜底已删除。统计卡的 0 值只是「无数据时占位」，不是虚构数字。
@@ -166,6 +166,19 @@ function Alerts() {
     }
   };
 
+  // P4：稳定回调引用，使 AlertTable 的 React.memo 生效（否则每渲染新建箭头函数，memo 白搭）
+  // 解构出 mutate 再依赖：ackMut 对象每渲染新建，但 React Query 的 .mutate 引用稳定；
+  // 直接依赖 ackMut.mutate 会被 exhaustive-deps 误判为缺 ackMut。
+  const { mutate: ackMutate } = ackMut;
+  const { mutate: resolveMutate } = resolveMut;
+  const { mutate: markFPMutate } = markFPMut;
+  const handleAck = useCallback((id: string) => ackMutate(id), [ackMutate]);
+  const handleResolve = useCallback((id: string) => resolveMutate(id), [resolveMutate]);
+  const handleMarkFP = useCallback(
+    (id: string, isFP: boolean) => markFPMutate({ id, isFP }),
+    [markFPMutate],
+  );
+
   const list = data?.items ?? [];
   // 200 + 空 data 时 stats 为 null，直接读 stats.problem 会 TypeError 白屏
   const stats = data?.stats ?? EMPTY_STATS;
@@ -263,9 +276,9 @@ function Alerts() {
           <AlertTable
             data={list}
             loading={isLoading}
-            onAck={(id) => ackMut.mutate(id)}
-            onResolve={(id) => resolveMut.mutate(id)}
-            onMarkFP={(id, isFP) => markFPMut.mutate({ id, isFP })}
+            onAck={handleAck}
+            onResolve={handleResolve}
+            onMarkFP={handleMarkFP}
             selectedIds={selectedIds}
             onSelectionChange={setSelectedIds}
           />
