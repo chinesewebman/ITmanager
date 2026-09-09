@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin, Alert } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
 import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
+import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface NotificationChannel {
@@ -920,7 +921,9 @@ function Settings() {
                 title: '最后使用',
                 dataIndex: 'last_used_at',
                 key: 'last_used_at',
-                render: (t?: string | null) => (t ? new Date(t).toLocaleString() : '—'),
+                // W2：原 `t ? new Date(t).toLocaleString() : '—'`，无 locale + 非法时间
+                // 会显示 "Invalid Date"；改统一出口 formatDateTime（空/非法 → '—'）
+                render: (t?: string | null) => formatDateTime(t),
               },
               {
                 title: '操作',

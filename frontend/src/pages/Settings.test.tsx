@@ -186,6 +186,34 @@ describe("Settings 密钥管理区块 (D-B)", () => {
       screen.queryByText("当前账号无密钥管理权限"),
     ).not.toBeInTheDocument();
   });
+
+  // W2：最后使用列原 `t ? new Date(t).toLocaleString() : '—'`，口径与其它页不一致
+  // 且非法时间会显示 "Invalid Date"；改 formatDateTime 统一 'YYYY-MM-DD HH:mm:ss'。
+  // 时间串不带偏移 → dayjs 按本地解析，断言与 CI 时区无关。
+  it("W2：最后使用列走 formatDateTime 统一格式", async () => {
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: {
+        code: 0,
+        data: [
+          {
+            id: "k1",
+            name: "ci",
+            prefix: "sk_live",
+            permissions: ["read"],
+            ip_whitelist: [],
+            rate_limit: 100,
+            status: "active",
+            last_used_at: "2026-02-14T10:00:00",
+            created_at: "2026-02-14T00:00:00",
+          },
+        ],
+      },
+    } as any);
+
+    await renderApiKeyTab();
+
+    expect(await screen.findByText("2026-02-14 10:00:00")).toBeInTheDocument();
+  });
 });
 
 // ==================== G-33 M1：通知渠道配置契约 ====================
