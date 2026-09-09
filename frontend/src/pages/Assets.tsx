@@ -9,7 +9,7 @@ import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // 资产类型筛选项
@@ -90,7 +90,7 @@ function Assets() {
   const submitting = createMut.isPending || updateMut.isPending
 
   // 触发诊断（ping 或 traceroute）
-  const handleDiagnose = async (asset: Asset, kind: 'ping' | 'traceroute') => {
+  const handleDiagnose = useCallback(async (asset: Asset, kind: 'ping' | 'traceroute') => {
     if (!asset.ip_address) {
       message.warning('该资产无 IP 地址')
       return
@@ -116,10 +116,10 @@ function Assets() {
     } finally {
       setDiagLoading(false)
     }
-  }
+  }, [])
 
   // A-2: 下载复盘 PDF
-  const handlePostmortem = async (asset: Asset) => {
+  const handlePostmortem = useCallback(async (asset: Asset) => {
     try {
       const blob = await postmortemApi.downloadReport(asset.id, 30)
       // 从 Content-Disposition 取文件名（如果有）；fallback 用 asset.name
@@ -138,7 +138,7 @@ function Assets() {
     } catch (e) {
       message.error('下载失败')
     }
-  }
+  }, [])
 
   // traceroute 表格列
   const traceColumns = [
@@ -170,10 +170,10 @@ function Assets() {
   const items = data?.items ?? []
   const total = data?.total ?? 0
 
-  const handleEdit = (asset: Asset) => {
+  const handleEdit = useCallback((asset: Asset) => {
     setEditing(asset)
     setModalOpen(true)
-  }
+  }, [])
   const handleCreate = () => {
     setEditing(null)
     setModalOpen(true)
@@ -187,10 +187,10 @@ function Assets() {
   }
 
   // B4: 退役 / 恢复 handler
-  const handleRetire = (asset: Asset) => {
+  const handleRetire = useCallback((asset: Asset) => {
     setRetireModal({ open: true, asset })
     retireForm.resetFields()
-  }
+  }, [retireForm])
   const handleRetireSubmit = async (values: { reason: string }) => {
     if (!retireModal.asset) return
     setRetireSubmitting(true)
@@ -211,7 +211,7 @@ function Assets() {
       setRetireSubmitting(false)
     }
   }
-  const handleRestore = async (asset: Asset) => {
+  const handleRestore = useCallback(async (asset: Asset) => {
     Modal.confirm({
       title: '恢复退役',
       content: `确认恢复「${asset.name}」？IP 将写回网卡。`,
@@ -231,10 +231,14 @@ function Assets() {
         }
       },
     })
-  }
+  }, [refetch])
 
   // M10：副标题原本用未过滤总数，与表格行数不符
   const hasFilter = Boolean(filter.keyword || filter.assetType)
+
+  // P4：稳定回调引用，使 AssetTable 的 React.memo 生效（否则每渲染新建箭头函数，memo 白搭）
+  const handlePageChange = useCallback((p: number, ps: number) => { setPage(p); setPageSize(ps) }, [])
+  const handleChanged = useCallback(() => { refetch() }, [refetch])
 
   return (
     <div>
@@ -287,9 +291,9 @@ function Assets() {
               total={total}
               page={page}
               pageSize={pageSize}
-              onPageChange={(p, ps) => { setPage(p); setPageSize(ps) }}
+              onPageChange={handlePageChange}
               onEdit={handleEdit}
-              onChanged={() => refetch()}
+              onChanged={handleChanged}
               onDiagnose={handleDiagnose}
               onPostmortem={handlePostmortem}
               onRetire={handleRetire}

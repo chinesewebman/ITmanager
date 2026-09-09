@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { Table, Button, Space, Popconfirm, message } from 'antd'
 import { EditOutlined, DeleteOutlined, ApiOutlined, AimOutlined, FilePdfOutlined, StopOutlined, RollbackOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
@@ -68,10 +68,11 @@ export interface AssetTableProps {
  * AssetTable - 资产列表展示 + 行内编辑/删除/退役。
  * 父组件持有数据状态和表单弹窗状态。
  */
-export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, onRetire, onRestore, rowSelection, total, page, pageSize, onPageChange }: AssetTableProps) {
+export const AssetTable = memo(function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, onRetire, onRestore, rowSelection, total, page, pageSize, onPageChange }: AssetTableProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  const handleDelete = async (id: string) => {
+  // P4：handleDelete 用 useCallback 稳定引用（依赖 onChanged），使 columns 的 useMemo 与 memo 生效。
+  const handleDelete = useCallback(async (id: string) => {
     setDeletingId(id)
     try {
       await assetApi.delete(id)
@@ -82,9 +83,11 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
     } finally {
       setDeletingId(null)
     }
-  }
+  }, [onChanged])
 
-  const columns: ColumnsType<Asset> = [
+  // P4：columns 用 useMemo 缓存，避免每次渲染重建（render 闭包引用 onEdit/onDiagnose 等回调，
+  // 只要回调引用稳定——父组件 useCallback 化——columns 就不重建）。
+  const columns = useMemo<ColumnsType<Asset>>(() => [
     // M2：加前端本地排序。名称/类型/机房/机柜/状态字符串 localeCompare；IP 走 ipCompare
     // 八位组数值序（字典序会错序）；机房/机柜可能为空，空值 ?? ''。
     { title: '资产名称', dataIndex: 'name', key: 'name', width: 180, sorter: (a, b) => a.name.localeCompare(b.name) },
@@ -211,7 +214,7 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
         </Space>
       ),
     },
-  ]
+  ], [onEdit, onDiagnose, onPostmortem, onRetire, onRestore, handleDelete, deletingId])
 
   return (
     <Table<Asset>
@@ -249,6 +252,6 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
       }}
     />
   )
-}
+})
 
 export default AssetTable
