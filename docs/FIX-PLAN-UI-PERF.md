@@ -300,6 +300,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev13 | 2026-09-10 | **W4-M4（第 1 步 AlertSuppressions）完成**：提交按钮无 loading → 连点重复创建。`AlertSuppressions.tsx` 两个 Modal（新建/编辑 `onOk={onSubmit}`、模拟评估 `onOk={onPreview}`）加 `submitting`/`previewing` state + `confirmLoading`，`finally` 复位。1 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + loading 期间连点只调一次 apiSend），变异（去 `confirmLoading={submitting}`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩余 Oncall/Runbook/Settings 待续 |
 | rev14 | 2026-09-10 | **W4-M4（第 2 步 Oncall）完成**：`Oncall.tsx` 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个 Modal `onOk={onSubmit}` 加 `submitting` state + `confirmLoading`，`finally` 复位。2 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去两处 `confirmLoading`）两用例均红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩 Runbook/Settings 待续 |
 | rev15 | 2026-09-10 | **W4-M4（第 3 步 Runbook）完成**：`Runbook.tsx` 新建/编辑 Modal `onOk={onSubmit}`（无 okText，默认 OK）加 `submitting` state + `confirmLoading`，`finally` 复位。1 用例绿（apiSend pending 时 OK 按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 剩 Settings 1 处待续 |
+| rev16 | 2026-09-10 | **W4-M4（第 4 步 Settings）完成，M4 全部 4 文件收口**：`Settings.tsx` 渠道 Modal `onOk={handleSaveChannel}` 加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在 `toHaveClass('ant-btn-loading')` 断言。M4 全部完成（AlertSuppressions/Oncall/Runbook/Settings 共 4 文件 6 提交点） |
 
 ---
 
@@ -336,14 +337,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M4 提交按钮 loading · AlertSuppressions.tsx | ✅ 完成 | 两个 Modal（规则 `onOk={onSubmit}` + 预览 `onOk={onPreview}`）加 `submitting`/`previewing` state + `confirmLoading`，`finally` 复位（范本 `AssetFormModal`）。1 用例绿（apiSend pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading={submitting}`）红在 `toHaveClass('ant-btn-loading')` 断言 |
 | W4-M4 提交按钮 loading · Oncall.tsx | ✅ 完成 | 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个 Modal 加 `submitting` state + `confirmLoading`，`finally` 复位。2 用例绿（pending 时保存按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去两处 `confirmLoading`）两用例均红在断言 |
 | W4-M4 提交按钮 loading · Runbook.tsx | ✅ 完成 | 新建/编辑 Modal（无 okText，默认 OK）加 `submitting` state + `confirmLoading`，`finally` 复位。1 用例绿（pending 时 OK 按钮 `ant-btn-loading` + 连点只调一次 apiSend），变异（去 `confirmLoading`）红在断言 |
-| W4-M4 剩余（Settings）+ M5/M6 | ⬜ 未开始 | M4 剩 Settings 1 处；M5 危险操作确认；M6 required message 统一 |
+| W4-M4 提交按钮 loading · Settings.tsx | ✅ 完成 | 渠道 Modal（`onOk={handleSaveChannel}`）加 `channelSaving` state + `confirmLoading`，`finally` 复位。1 用例绿（createChannel pending 时保存按钮 `ant-btn-loading` + 连点只调一次），变异（去 `confirmLoading`）红在断言。**M4 全部 4 文件收口** |
+| W4-M5/M6 | ⬜ 未开始 | M5 危险操作确认（AlertSuppressions/Runbook/Oncall 各 1 处 Popconfirm 统一 title + okButtonProps danger）；M6 14 处 required 无 message 统一「请输入/请选择 XXX」 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
-3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。**W4 批 1 剩余：M4 最后 1 文件（Settings）+ M5/M6**。
+3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。**W4 批 1 剩余：M5/M6**。
 4. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。

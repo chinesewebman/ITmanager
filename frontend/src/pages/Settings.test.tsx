@@ -541,3 +541,53 @@ describe("H8 删除渠道二次确认", () => {
     });
   });
 });
+
+// ==================== W4-M4：渠道保存按钮 loading 防连点 ====================
+describe("W4-M4 渠道保存按钮 loading 防连点", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  it("提交中保存按钮 loading 且防连点（createChannel 只调一次）", async () => {
+    let resolveSend!: (v: unknown) => void;
+    vi.mocked(notificationApi.createChannel).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveSend = resolve; }) as any,
+    );
+
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    fireEvent.change(await screen.findByLabelText("渠道名称"), { target: { value: "测试渠道" } });
+    fireEvent.mouseDown(screen.getByLabelText("渠道类型"));
+    fireEvent.click(await screen.findByTitle("钉钉"));
+
+    const modal = within(
+      (await screen.findByLabelText("Webhook URL")).closest(".ant-modal") as HTMLElement,
+    );
+    fireEvent.change(modal.getByLabelText("Webhook URL"), { target: { value: "https://example.com/hook" } });
+
+    const saveBtn = modal.getByRole("button", { name: /保\s*存/ });
+    fireEvent.click(saveBtn);
+
+    // 请求 pending → 按钮进入 loading
+    await waitFor(() => {
+      expect(saveBtn).toHaveClass("ant-btn-loading");
+    });
+
+    // loading 期间连点不应触发第二次提交
+    fireEvent.click(saveBtn);
+    expect(notificationApi.createChannel).toHaveBeenCalledTimes(1);
+
+    resolveSend({ data: { code: 0, data: {} } });
+  });
+});

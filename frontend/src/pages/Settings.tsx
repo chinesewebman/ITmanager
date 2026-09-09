@@ -17,6 +17,8 @@ function Settings() {
   const [channels, setChannels] = useState<NotificationChannel[]>([])
   const [loading, setLoading] = useState(false)
   const [channelModal, setChannelModal] = useState<{ open: boolean; data?: NotificationChannel }>({ open: false })
+  // M4：渠道保存按钮 loading，防连点重复创建（范本 AssetFormModal confirmLoading）
+  const [channelSaving, setChannelSaving] = useState(false)
   // v2.2: 集成页接 API（不再是死表单）
   const [integrationStatus, setIntegrationStatus] = useState<any>(null)
   const [statusLoading, setStatusLoading] = useState(false)
@@ -386,6 +388,7 @@ function Settings() {
 
   // B1-2: 接 createChannel / updateChannel（之前只 message.success 不调 API）
   const handleSaveChannel = async () => {
+    setChannelSaving(true)
     try {
       const values = await form.validateFields()
       const configObj = values.config || {}
@@ -420,6 +423,8 @@ function Settings() {
         error?.response?.data?.message || error?.message
       )
       message.error(error?.response?.data?.message || '保存失败')
+    } finally {
+      setChannelSaving(false)
     }
   }
 
@@ -749,6 +754,7 @@ function Settings() {
             title={channelModal.data ? '编辑渠道' : '添加渠道'}
             open={channelModal.open}
             onOk={handleSaveChannel}
+            confirmLoading={channelSaving}
             onCancel={() => {
               setChannelModal({ open: false })
               form.resetFields()
