@@ -3,6 +3,7 @@ import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Ta
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
 import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
 import { formatDateTime } from '../utils/time'
+import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 interface NotificationChannel {
@@ -1049,7 +1050,8 @@ function Settings() {
 
   return (
     <div>
-      <h2 style={{ marginBottom: 16 }}>系统设置</h2>
+      {/* M1：标题体系统一——原用原生 h2，与其它页 PageHeader h4 不一致 */}
+      <PageHeader title="系统设置" />
       <Tabs items={tabItems} />
     </div>
   )

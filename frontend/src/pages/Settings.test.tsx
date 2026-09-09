@@ -57,6 +57,29 @@ async function renderApiKeyTab() {
   fireEvent.click(await screen.findByRole("tab", { name: /API 密钥/ }));
 }
 
+// M1：标题体系统一——Settings 原用原生 h2「系统设置」，与其它页 PageHeader h4 不一致。
+describe("Settings M1 标题体系", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  it("M1：页面标题统一到 PageHeader（h4「系统设置」）", async () => {
+    render(<Settings />);
+    expect(
+      await screen.findByRole("heading", { level: 4, name: "系统设置" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("Settings 密钥管理区块 (D-B)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
