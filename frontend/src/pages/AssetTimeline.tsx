@@ -8,7 +8,12 @@
 //  - severity 0-5 映射到 color（5=红, 4=橙, 3=黄, 2=蓝, 1=绿, 0=灰）
 //  - 事件点击跳详情（alert → 告警详情，ticket → 工单详情）
 //  - MTTR 缺省值用 "—" 不显示 N/A
-//  - mock 优先（data: any 解构，跟其他页一致）
+//
+// W1：`:153` `?? MOCK_TIMELINE` + `:155` `catch { return MOCK_TIMELINE }` 与渲染层
+// `:165/:166` `data ?? MOCK_TIMELINE` / `tl.summary ?? MOCK_SUMMARY` 三重兜底已删除。
+// 原写法 isError 恒 false —— 接口挂了照常画出 4 条虚构事件（含「CPU 使用率超阈值」），
+// 运维会当真实故障历史排查；新增 normalizeTimeline() 兜「200 + 形状异常」。
+// W2：`:122` formatTime 用 toLocaleString('zh-CN')，口径与其它页不一致，改 formatDateTime。
 
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
@@ -16,6 +21,9 @@ import { Card, Col, Descriptions, Row, Skeleton, Space, Statistic, Tag, Timeline
 import { ClockCircleOutlined } from '@ant-design/icons'
 import api from '../services/api'
 import { useApiQuery } from '../hooks/useApiQuery'
+import { EmptyState } from '../components/EmptyState'
+import { ErrorState } from '../components/ErrorState'
+import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -51,62 +59,15 @@ const SUB_KIND_LABEL: Record<string, string> = {
   down: '端口 DOWN',
 }
 
-// Mock 数据：开发环境网络断时也能渲染
-const MOCK_SUMMARY = {
-  alert_count: 8,
-  ticket_count: 2,
-  open_alerts: 1,
+// 无数据兜底用全 0 结构（非假数据）：只出现在「200 + shape 异常」，正常后端总带全字段
+const EMPTY_SUMMARY: TimelineSummary = {
+  alert_count: 0,
+  ticket_count: 0,
+  open_alerts: 0,
   open_tickets: 0,
-  mttr_seconds: 1800,
+  mttr_seconds: null,
   link_down_count: 0,
-  window_days: 30,
-}
-
-const MOCK_EVENTS: TimelineEvent[] = [
-  {
-    ts: new Date(Date.now() - 30 * 60_000).toISOString(),
-    kind: 'alert',
-    sub_kind: 'triggered',
-    severity: 4,
-    title: 'CPU 使用率超阈值',
-    description: 'Warning · CPU 持续 5 分钟 > 90%',
-    ref_id: '00000000-0000-0000-0000-000000000001',
-    ref_table: 'alerts',
-  },
-  {
-    ts: new Date(Date.now() - 25 * 60_000).toISOString(),
-    kind: 'alert',
-    sub_kind: 'acknowledged',
-    severity: 0,
-    title: '已确认告警',
-    description: '操作人: ops',
-    ref_id: '00000000-0000-0000-0000-000000000001',
-    ref_table: 'alerts',
-  },
-  {
-    ts: new Date(Date.now() - 2 * 3600_000).toISOString(),
-    kind: 'ticket',
-    sub_kind: 'created',
-    severity: 0,
-    title: '服务响应慢',
-    description: '工单创建',
-    ref_id: '00000000-0000-0000-0000-000000000002',
-    ref_table: 'tickets',
-  },
-  {
-    ts: new Date(Date.now() - 24 * 3600_000).toISOString(),
-    kind: 'status_change',
-    sub_kind: 'online',
-    severity: 0,
-    title: '资产上线',
-    description: 'OnlineTime 变更',
-  },
-]
-
-const MOCK_TIMELINE = {
-  asset: { id: 'mock', name: 'mock-asset', asset_type: 'server', status: 'active' },
-  events: MOCK_EVENTS,
-  summary: MOCK_SUMMARY,
+  window_days: 0,
 }
 
 function formatDuration(seconds: number | undefined | null): string {
@@ -115,11 +76,6 @@ function formatDuration(seconds: number | undefined | null): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`
   if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} 小时`
   return `${(seconds / 86400).toFixed(1)} 天`
-}
-
-function formatTime(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 interface TimelineEvent {
@@ -133,10 +89,44 @@ interface TimelineEvent {
   ref_table?: string
 }
 
+interface TimelineSummary {
+  alert_count: number
+  ticket_count: number
+  open_alerts: number
+  open_tickets: number
+  mttr_seconds?: number | null
+  link_down_count: number
+  window_days: number
+}
+
+interface TimelineAsset {
+  id: string
+  name: string
+  asset_type: string
+  status: string
+}
+
 interface TimelineResponse {
-  asset: { id: string; name: string; asset_type: string; status: string }
+  asset: TimelineAsset | null
   events: TimelineEvent[]
-  summary: typeof MOCK_SUMMARY
+  summary: TimelineSummary
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+/**
+ * 接口形状归一：asset/summary 非对象、events 非数组一律降级不崩。
+ * asset 缺失返回 null（走「资产不存在」空态）；summary 缺字段回落全 0（mttr → '—'）。
+ */
+function normalizeTimeline(v: unknown): TimelineResponse {
+  const t = (v ?? {}) as Partial<TimelineResponse>
+  return {
+    asset: isRecord(t.asset) ? (t.asset as unknown as TimelineAsset) : null,
+    events: Array.isArray(t.events) ? t.events : [],
+    summary: { ...EMPTY_SUMMARY, ...(isRecord(t.summary) ? t.summary : {}) } as TimelineSummary,
+  }
 }
 
 export function AssetTimeline() {
@@ -145,15 +135,11 @@ export function AssetTimeline() {
   useDocumentTitle('资产诊断')
   const [days] = useState(30)
 
-  const { data, isLoading } = useApiQuery<TimelineResponse>(
+  const { data, isLoading, isError, error, refetch } = useApiQuery<TimelineResponse>(
     ['diagnostics', 'timeline', id ?? '', days] as const,
     async () => {
-      try {
-        const res = await api.get(`/diagnostics/assets/${id}/timeline`, { params: { days } })
-        return (res.data?.data as TimelineResponse) ?? MOCK_TIMELINE
-      } catch {
-        return MOCK_TIMELINE
-      }
+      const res = await api.get(`/diagnostics/assets/${id}/timeline`, { params: { days } })
+      return normalizeTimeline(res.data?.data)
     },
     { enabled: !!id },
   )
@@ -162,10 +148,7 @@ export function AssetTimeline() {
     return <Skeleton active paragraph={{ rows: 6 }} />
   }
 
-  const tl = data ?? MOCK_TIMELINE
-  const summary = tl.summary ?? MOCK_SUMMARY
-  const events = tl.events ?? []
-  const asset = tl.asset
+  const { asset, summary, events } = normalizeTimeline(data)
 
   return (
     <div>
@@ -173,87 +156,97 @@ export function AssetTimeline() {
         <Link to="/assets">← 返回资产列表</Link>
       </Space>
 
-      <Card title={`资产诊断：${asset.name}`} size="small" style={{ marginBottom: 16 }}>
-        <Descriptions size="small" column={4}>
-          <Descriptions.Item label="类型">
-            <Tag color="blue">{asset.asset_type}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="状态">
-            <Tag color={asset.status === 'active' ? 'green' : 'default'}>{asset.status}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="查询窗口">{summary.window_days} 天</Descriptions.Item>
-          <Descriptions.Item label="事件总数">{events.length}</Descriptions.Item>
-        </Descriptions>
-      </Card>
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} />
+      ) : !asset ? (
+        <Card title="资产诊断" size="small">
+          <EmptyState title="资产不存在" description="该资产不存在或已被删除" />
+        </Card>
+      ) : (
+        <>
+          <Card title={`资产诊断：${asset.name}`} size="small" style={{ marginBottom: 16 }}>
+            <Descriptions size="small" column={4}>
+              <Descriptions.Item label="类型">
+                <Tag color="blue">{asset.asset_type}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={asset.status === 'active' ? 'green' : 'default'}>{asset.status}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="查询窗口">{summary.window_days} 天</Descriptions.Item>
+              <Descriptions.Item label="事件总数">{events.length}</Descriptions.Item>
+            </Descriptions>
+          </Card>
 
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}>
-          <Card>
-            <Statistic title="告警总数" value={summary.alert_count} valueStyle={{ color: '#cf1322' }} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic title="未处理告警" value={summary.open_alerts} valueStyle={{ color: '#fa8c16' }} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic title="工单总数" value={summary.ticket_count} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="MTTR (平均恢复)"
-              value={formatDuration(summary.mttr_seconds)}
-            />
-          </Card>
-        </Col>
-      </Row>
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col span={6}>
+              <Card>
+                <Statistic title="告警总数" value={summary.alert_count} valueStyle={{ color: '#cf1322' }} />
+              </Card>
+            </Col>
+            <Col span={6}>
+              <Card>
+                <Statistic title="未处理告警" value={summary.open_alerts} valueStyle={{ color: '#fa8c16' }} />
+              </Card>
+            </Col>
+            <Col span={6}>
+              <Card>
+                <Statistic title="工单总数" value={summary.ticket_count} />
+              </Card>
+            </Col>
+            <Col span={6}>
+              <Card>
+                <Statistic
+                  title="MTTR (平均恢复)"
+                  value={formatDuration(summary.mttr_seconds)}
+                />
+              </Card>
+            </Col>
+          </Row>
 
-      <Card title="事件时间线" size="small">
-        {events.length === 0 ? (
-          <Text type="secondary">该资产在 {summary.window_days} 天窗口内无事件</Text>
-        ) : (
-          <Timeline
-            mode="left"
-            items={events.map((e) => {
-              const color = e.kind === 'alert' ? severityColor(e.severity) : (KIND_COLOR[e.kind] ?? 'gray')
-              const subLabel = SUB_KIND_LABEL[e.sub_kind] ?? e.sub_kind
-              const detailLink =
-                e.ref_table === 'alerts' && e.ref_id
-                  ? `/alerts`
-                  : e.ref_table === 'tickets' && e.ref_id
-                    ? `/tickets`
-                    : null
-              return {
-                color,
-                dot: <ClockCircleOutlined style={{ fontSize: 16 }} />,
-                label: formatTime(e.ts),
-                children: (
-                  <div>
-                    <Space>
-                      <Tag color={color}>{subLabel}</Tag>
-                      <Text strong>{e.title}</Text>
-                    </Space>
-                    {e.description && (
+          <Card title="事件时间线" size="small">
+            {events.length === 0 ? (
+              <Text type="secondary">该资产在 {summary.window_days} 天窗口内无事件</Text>
+            ) : (
+              <Timeline
+                mode="left"
+                items={events.map((e) => {
+                  const color = e.kind === 'alert' ? severityColor(e.severity) : (KIND_COLOR[e.kind] ?? 'gray')
+                  const subLabel = SUB_KIND_LABEL[e.sub_kind] ?? e.sub_kind
+                  const detailLink =
+                    e.ref_table === 'alerts' && e.ref_id
+                      ? `/alerts`
+                      : e.ref_table === 'tickets' && e.ref_id
+                        ? `/tickets`
+                        : null
+                  return {
+                    color,
+                    dot: <ClockCircleOutlined style={{ fontSize: 16 }} />,
+                    label: formatDateTime(e.ts),
+                    children: (
                       <div>
-                        <Text type="secondary">{e.description}</Text>
+                        <Space>
+                          <Tag color={color}>{subLabel}</Tag>
+                          <Text strong>{e.title}</Text>
+                        </Space>
+                        {e.description && (
+                          <div>
+                            <Text type="secondary">{e.description}</Text>
+                          </div>
+                        )}
+                        {detailLink && (
+                          <div>
+                            <Link to={detailLink}>查看详情 →</Link>
+                          </div>
+                        )}
                       </div>
-                    )}
-                    {detailLink && (
-                      <div>
-                        <Link to={detailLink}>查看详情 →</Link>
-                      </div>
-                    )}
-                  </div>
-                ),
-              }
-            })}
-          />
-        )}
-      </Card>
+                    ),
+                  }
+                })}
+              />
+            )}
+          </Card>
+        </>
+      )}
     </div>
   )
 }
