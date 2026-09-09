@@ -189,6 +189,37 @@ describe('Oncall', () => {
     expect(screen.getByText('L1 user/alice 5m email')).toBeInTheDocument()
   })
 
+  // M2：表格排序——升级策略表给名称/层级数/启用加前端本地排序；这里验证核心的层级数数值排序。
+  it('M2：升级策略「层级数」列可排序（点击表头后按层级数升序重排）', async () => {
+    h.overrides.policies = {
+      data: [
+        { id: 'p1', name: 'critical', enabled: true, levels: [
+          { level: 1, target_type: 'user', target_id: 'alice', wait_minutes: 5, notify_methods: 'email' },
+          { level: 2, target_type: 'user', target_id: 'bob', wait_minutes: 10, notify_methods: 'email' },
+        ] },
+        { id: 'p2', name: 'info', enabled: true, levels: [
+          { level: 1, target_type: 'user', target_id: 'carol', wait_minutes: 5, notify_methods: 'email' },
+        ] },
+      ],
+    }
+    const { container } = renderOncall()
+    openTab('升级策略')
+    await screen.findByText('critical')
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：critical（2 级）在前
+    expect(rowTexts()[0]).toContain('critical')
+
+    // 点「层级数」表头升序 → 1 级 < 2 级，info 排前
+    fireEvent.click(screen.getAllByText('层级数')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('info')
+    })
+  })
+
   // M4：提交按钮 loading（范本 AssetFormModal confirmLoading）。此前两个 tab 的 onOk={onSubmit}
   // 均无 loading，接口慢时连点「保存」会重复创建值班组/升级策略。
   it('M4：值班组提交中保存按钮 loading 且防连点（apiSend 只调一次）', async () => {

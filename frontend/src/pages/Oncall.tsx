@@ -189,9 +189,11 @@ function PoliciesTab() {
         <Table dataSource={list} rowKey={(r) => r.id ?? r.name} pagination={false} loading={isLoading}
           locale={{ emptyText: <EmptyState title="暂无升级策略" description="点击「新建」创建第一条升级策略" compact /> }}
           columns={[
-            { title: '名称', dataIndex: 'name' },
-            { title: '层级数', key: 'levels', render: (_, r) => <Tag>{r.levels?.length ?? 0} 级</Tag> },
-            { title: '启用', dataIndex: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
+            // M2：加前端本地排序。名称字符串 localeCompare；层级数按 levels 长度数值；启用按布尔权重；
+            // 层级详情是多值 Tag 列表、排序无意义不加（同 AlertTable message）。
+            { title: '名称', dataIndex: 'name', sorter: (a: EscalationPolicy, b: EscalationPolicy) => a.name.localeCompare(b.name) },
+            { title: '层级数', key: 'levels', sorter: (a: EscalationPolicy, b: EscalationPolicy) => (a.levels?.length ?? 0) - (b.levels?.length ?? 0), render: (_, r) => <Tag>{r.levels?.length ?? 0} 级</Tag> },
+            { title: '启用', dataIndex: 'enabled', sorter: (a: EscalationPolicy, b: EscalationPolicy) => Number(a.enabled) - Number(b.enabled), render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
             { title: '层级详情', key: 'detail', render: (_, r) => (
               <Space size="small" wrap>
                 {(r.levels ?? []).map((lv) => (

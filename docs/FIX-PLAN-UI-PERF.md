@@ -329,6 +329,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev42 | 2026-09-10 | **批 2 第 13 步 M2（表格排序）第 3 处 AssetTable 完成**：`AssetTable` 给名称/类型/机房/机柜/状态（`localeCompare`，机房机柜空值 `?? ''`）加前端本地排序；IP 地址走 `ipCompare` 八位组数值序（字典序会把 `192.168.1.10` 排在 `192.168.1.2` 前），空值排最后、非 IPv4 回落 `localeCompare`。1 用例绿（点「IP 地址」表头后第一行由 `192.168.1.10` 的 web-server-01 变 `192.168.1.2` 的 db-server-01 数值升序），变异（IP sorter 改字典序）红在 `toContain('db-server-01')` 断言。**剩 Runbook/Oncall/MetricSnapshot 等表格** |
 | rev43 | 2026-09-10 | **批 2 第 14 步 M2（表格排序）第 4 处 Runbook 完成**：`Runbook` 给标题/类型（`localeCompare`）/严重度（`severity` 数值）/启用（`Number(enabled)` 布尔权重）加前端本地排序；标签是多值逗号串、排序无意义不加（同 AlertTable message）。1 用例绿（点「严重度」表头后第一行由 severity 5 的「接入交换机端口 down」变 severity 4 的「主库复制延迟排查」数值升序），变异（去 severity sorter）红在 `toContain('主库复制延迟排查')` 断言。**剩 Oncall/MetricSnapshot 两表** |
 | rev44 | 2026-09-10 | **批 2 第 15 步 M2（表格排序）第 5 处 Oncall 值班组表完成**：值班组表给名称/时区/启用/说明加前端本地排序（名称/说明 `localeCompare`，时区空值默认 `Asia/Shanghai`，启用布尔权重）。**副产物**：sorter 让表头 `<th>` 带 `aria-label=title`，与既有 M4 测试 `getByLabelText('名称')`（定位表单输入）冲突 → 改 `getByRole('textbox', { name: '名称' })` 精确定位。1 用例绿（点「名称」表头后 ops-team 变 dev-team 字母升序），变异（去 name sorter）红在 `toContain('dev-team')` 断言。**剩 Oncall 升级策略表/MetricSnapshot** |
+| rev45 | 2026-09-10 | **批 2 第 16 步 M2（表格排序）第 6 处 Oncall 升级策略表完成（Oncall 全收口）**：升级策略表给名称（`localeCompare`）/层级数（`levels?.length` 数值）/启用（布尔权重）加前端本地排序；层级详情是多值 Tag 列表不加。1 用例绿（点「层级数」表头后 2 级的 critical 变 1 级的 info 数值升序），变异（去 levels sorter）红在 `toContain('info')` 断言。**剩 MetricSnapshot 一表** |
 
 ---
 
@@ -379,19 +380,19 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P17 assets name 索引（迁移 000020） | ✅ 完成 | `idx_assets_name (name)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 20→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P18 audit_logs path 索引（迁移 000021） | ✅ 完成 | `idx_audit_logs_path (path text_pattern_ops)`；dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链 21→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P19 ticket_service cursor Count（3 行，无迁移） | ✅ 完成 | 把无条件 `COUNT(*)` 挪到 cursor 分支之后；cursor 模式不再跑 Count；单测 + 变异（挪回）红在 `SELECT count(*)` 未匹配 |
-| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(五页全收口)、M2(AlertTable+TicketTable+AssetTable+Runbook+Oncall值班组) 已完成（rev30–44）；剩 M2(Oncall升级策略/MetricSnapshot)/M3+P4/P5/P6/P7/M13/M15 |
+| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(五页全收口)、M2(AlertTable+TicketTable+AssetTable+Runbook+Oncall两表) 已完成（rev30–45）；剩 M2(MetricSnapshot)/M3+P4/P5/P6/P7/M13/M15 |
 | 批 2 · M14 批量操作确认 | ✅ 完成 | Alerts「批量确认/解决」套 Popconfirm 二次确认（title 带已选数量）；1 用例绿；变异（去 Popconfirm）红在确认框缺失 |
 | 批 2 · M7 升级策略 JSON 异常文案 | ✅ 完成 | Oncall 升级策略 Levels 非法 JSON 给友好中文（结构化编辑器登记不做）；1 用例绿；变异（去 SyntaxError 判断）红在 toHaveBeenCalledWith |
 | 批 2 · M11 严重度配色统一（AssetTimeline + Runbook + AlertSuppressions） | ✅ 完成 | 三处自造配色（AssetTimeline 6 档错位 / Runbook 2 档 / AlertSuppressions 3 档）统一到 SEVERITY_META 权威 6 档；3 处各 1 用例绿 + 变异红 |
 | 批 2 · M1 标题体系统一（五页全收口） | ✅ 完成 | Oncall「值班管理」、AlertSuppressions「告警抑制」+ 按钮入 extra、Topology「网络拓扑」、Settings h2 改「系统设置」、Runbook 手写 Space 改「故障 Runbook」+ 计数 Tag/按钮入 extra（h4）；各 1 用例绿；变异均红在 heading 断言。AssetTimeline 子页（带返回链接）+ MetricSnapshot（标题带 Tag）无对应 slot，登记待定 |
-| 批 2 · M2 表格排序（全站零 sorter） | 🔄 进行中 | AlertTable 四列（rev40）+ TicketTable 六列（rev41，优先级按 PRIORITY_WEIGHT 权重）+ AssetTable 六列（rev42，IP 走 ipCompare 八位组数值序）+ Runbook 四列（rev43）+ Oncall 值班组表四列（rev44）已加前端本地排序；各 1 用例绿；变异（去/改 sorter）红在行顺序断言。**剩 Oncall 升级策略表/MetricSnapshot** |
+| 批 2 · M2 表格排序（全站零 sorter） | 🔄 进行中 | AlertTable 四列（rev40）+ TicketTable 六列（rev41，优先级按 PRIORITY_WEIGHT 权重）+ AssetTable 六列（rev42，IP 走 ipCompare 八位组数值序）+ Runbook 四列（rev43）+ Oncall 值班组四列（rev44）+ Oncall 升级策略三列（rev45）已加前端本地排序；各 1 用例绿；变异（去/改 sorter）红在行顺序断言。**剩 MetricSnapshot 一表** |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
-5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）+ M2 AlertTable（rev40）+ M2 TicketTable（rev41）+ M2 AssetTable（rev42）+ M2 Runbook（rev43）+ M2 Oncall 值班组表（rev44）已完成**；剩 M2 排序（Oncall 升级策略表/MetricSnapshot）、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M13 移动端、M15 空态/加载态。
+5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）+ M2 AlertTable（rev40）+ M2 TicketTable（rev41）+ M2 AssetTable（rev42）+ M2 Runbook（rev43）+ M2 Oncall 两表（rev44/45）已完成**；剩 M2 排序（MetricSnapshot）、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M13 移动端、M15 空态/加载态。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 
