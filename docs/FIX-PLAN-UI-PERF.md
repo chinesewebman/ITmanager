@@ -1,6 +1,6 @@
 # 前端易用性 / 性能 修复需求文档（FIX-PLAN-UI-PERF）
 
-- 状态：**rev4**（并入 UI/UX 审美审计 + 文档事实审查 + 前端性能审计 + **后端性能审计**）
+- 状态：**rev5**（并入 UI/UX 审美审计 + 文档事实审查 + 前端性能审计 + 后端性能审计；rev5 补 W2 遗漏站点）
 - 触发：主人 2026-09-09 指令「记得运用codegraph啊，继续修复问题，改善表现、提高ui审美和易用性」
 - 关联：`TODO.md`、`docs/TRAPS.md`、`docs/FIX-PLAN-FRONTEND-TOKEN.md`
 - 索引工具：`codegraph_explore`（projectPath `/root/work/itmanager`）
@@ -102,6 +102,7 @@ UI 审计（H2）建议保留兜底、加 `<DemoDataBanner />` 提示。**不采
 | `pages/Settings.tsx:923` | `new Date(t).toLocaleString()`（无 locale） |
 | `pages/AssetTimeline.tsx:122` | `toLocaleString('zh-CN', { hour12: false })` |
 | `pages/Oncall.tsx:62` | `toLocaleString('zh-CN')`（默认 hour12） |
+| `pages/MetricSnapshot.tsx:128` | `new Date(v).toLocaleString()`（无 locale）——**rev5 补登**，rev1/rev2 两轮盘点均遗漏 |
 | `pages/Dashboard.tsx:37-42` | 虚构的「10分钟前」字符串（W1 一并改） |
 
 `dayjs` 已在 `package.json:25`，全仓零使用。
@@ -116,7 +117,7 @@ formatRelativeTime(iso?: string | null): string   // '3 分钟前'，空/非法 
 ```
 
 - 依赖 dayjs（已在依赖内，不新增包）；`dayjs.locale('zh-cn')` 在模块内设置一次。
-- 应用点：`AlertTable` / `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62` / Dashboard 最近告警。
+- 应用点：`AlertTable` / `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62` / `MetricSnapshot:128`（rev5 补）/ Dashboard 最近告警。
 
 ### 2.3 时区确认（审查要求先确认）
 
@@ -287,6 +288,8 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev1 | 2026-09-09 | 自研发现 W1/W2/W3；「antd locale 缺失」经实测证伪（`App.tsx:349` 已挂 `zhCN`）已删 |
 | rev2 | 2026-09-09 | 并入 UI 审美审计（H1–H10 / M1–M15 / L1–L7）与文档事实审查：修正 `AssetTimeline`/`DashboardCards` 行号、补 `Racks` 小写 mock 两处与 `AssetTimeline` 渲染层两处、兜底计数 12→~34、补两个缺数据源的方案（Dashboard 最近告警复用 `GET /alerts?limit=5`；Tickets 统计卡按真实四档推导）、补 undefined 守卫与「区块级错误态」、补 4 处缺空态、`cssVar` 实测结论、W2 补 3 个遗漏站点并撤掉「截断」误述、测试基数 14→11；新增 §1.4 决策记录（不采纳演示横幅）与批次划分 |
 | rev3 | 2026-09-09 | 并入**前端性能审计**（沙箱实测）：新增 §W5（P1 nginx gzip / P2 echarts-core / P3 命令面板按需为批 1；P4 表格 memo 化**必须与 M3 分页同批**、P5 服务端分页、P6 进度节流、P7 `key={idx}` 为批 2；P8–P12 登记不做）；§0 批次表与 §5 执行顺序同步；§5.1 改为回执状态表 |
+| rev4 | 2026-09-09 | 并入**后端性能审计**（§W6）；§1.3-7② 修正为契约 5 档（含 `pending`）；M16 登记待决策。**补记**：该 rev 此前只改了正文与状态行，变更记录漏登 |
+| rev5 | 2026-09-09 | W2 补第 5 个遗漏站点 `pages/MetricSnapshot.tsx:128`（`new Date(v).toLocaleString()`）——rev2 的「W2 补 3 个遗漏站点」仍漏了它，随该页 W1 同轮收口 |
 
 ---
 
@@ -309,7 +312,8 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W1+M10+W2 `pages/Tickets.tsx` + `TicketTable`/`TicketDetailModal`/`TicketStatsCards` | ✅ 完成 | 8 用例绿；四条变异（去列表错误分支 / 统计写死 / 去统计错误分支 / 列表时间原样）均红在断言。统计卡改 5 档真实推导（含 `pending`，见 §1.3-7② rev4 修正） |
 | W1+W2 `pages/Oncall.tsx` | ✅ 完成 | 10 用例绿；四条变异（值班组去错误分支 / 去空态 / 当前值班时间回退原样渲染 / 升级策略去错误分支）均红在断言。三个 tab 的 `catch { return MOCK_* }` + `data ?? MOCK_*` 双重兜底已删除 |
 | W1 `pages/AlertSuppressions.tsx` | ✅ 完成 | 6 用例绿；三条变异（去错误分支 / 去空态 / 空列表回落虚构规则）均红在断言。`catch { return MOCK_RULES }` + `data: rules = MOCK_RULES` 双重兜底已删除 |
-| W1 其余 5 页（MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W1+W2 `pages/MetricSnapshot.tsx` | ✅ 完成 | 7 用例绿；四条变异（去错误分支 / 去空态 / 时间回退原样渲染 / 空结果回落虚构采样点）均红在断言。`catch { return MOCK_LATEST }` 已删除；W2 补第 5 个遗漏站点（rev5） |
+| W1 其余 4 页（Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
 | W2 其余 2 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122`（`AlertTable`、`TicketTable`、`TicketDetailModal`、`Oncall` 已完成） |
 | W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
@@ -317,7 +321,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 
 **下一步（按顺序）**：
 1. ~~提交推送当前已完成项~~ → 已完成（`9ae6607`、`0868117`、`f836f94` 已推 main）。
-2. W1 逐页推进，下一页 `pages/MetricSnapshot.tsx`。
+2. W1 逐页推进，下一页 `pages/Racks.tsx`。
 3. W2 剩余 2 个调用点（可并入各页 W1 的同一小步）。
 4. W4 批 1 剩余 7 项（H6 需先做 `cssVar` 实测）。
 5. W6 批 1 迁移 000016。

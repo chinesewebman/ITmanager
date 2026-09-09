@@ -5,6 +5,9 @@ import { Button, Card, Form, Input, InputNumber, Space, Table, Tag, Typography, 
 import { LineChartOutlined } from '@ant-design/icons'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet } from '../services/api'
+import { EmptyState } from '../components/EmptyState'
+import { ErrorState } from '../components/ErrorState'
+import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text, Paragraph } = Typography
@@ -17,13 +20,8 @@ interface MetricSnapshot {
   ts: string
 }
 
-const MOCK_LATEST: MetricSnapshot[] = [
-  { id: '1', asset_id: 'asset-1', key: 'cpu.user', value: 45.2, ts: new Date(Date.now() - 5*60_000).toISOString() },
-  { id: '2', asset_id: 'asset-1', key: 'cpu.user', value: 48.1, ts: new Date(Date.now() - 4*60_000).toISOString() },
-  { id: '3', asset_id: 'asset-1', key: 'cpu.user', value: 52.7, ts: new Date(Date.now() - 3*60_000).toISOString() },
-  { id: '4', asset_id: 'asset-1', key: 'cpu.user', value: 55.0, ts: new Date(Date.now() - 2*60_000).toISOString() },
-  { id: '5', asset_id: 'asset-1', key: 'cpu.user', value: 60.3, ts: new Date(Date.now() - 1*60_000).toISOString() },
-]
+// W1：`catch { return MOCK_LATEST }` 已删除。原写法让 isError 恒 false ——
+// 接口挂了页面照常画出 5 个虚构的 cpu.user 采样点，运维会据此判断「CPU 正常」。
 
 export function MetricSnapshotList() {
   const [assetId, setAssetId] = useState('')
@@ -32,12 +30,12 @@ export function MetricSnapshotList() {
   const [searchParams, setSearchParams] = useState<{ assetId: string; key: string; n: number } | null>(null)
 
   useDocumentTitle('指标快照')
-  const { data, isLoading, refetch } = useApiQuery(
+  const { data, isLoading, isError, error, refetch } = useApiQuery(
     ['metric-snapshots', 'latest', searchParams],
-    () => {
-      if (!searchParams) return Promise.resolve([])
-      return apiGet<MetricSnapshot[]>(`/metric-snapshots/latest?asset_id=${searchParams.assetId}&key=${encodeURIComponent(searchParams.key)}&n=${searchParams.n}`)
-        .catch(() => MOCK_LATEST)
+    async () => {
+      if (!searchParams) return []
+      const items = await apiGet<MetricSnapshot[]>(`/metric-snapshots/latest?asset_id=${searchParams.assetId}&key=${encodeURIComponent(searchParams.key)}&n=${searchParams.n}`)
+      return Array.isArray(items) ? items : []
     },
     { enabled: !!searchParams },
   )
@@ -97,6 +95,8 @@ export function MetricSnapshotList() {
 
       {!searchParams ? (
         <Paragraph type="secondary">输入 asset_id + key 后点击查询</Paragraph>
+      ) : isError ? (
+        <ErrorState error={error} onRetry={refetch} compact />
       ) : (
         <>
           <Space style={{ marginBottom: 16 }}>
@@ -123,9 +123,19 @@ export function MetricSnapshotList() {
             rowKey="id"
             dataSource={items}
             pagination={{ pageSize: 20 }}
+            locale={{
+              emptyText: (
+                <EmptyState
+                  title="暂无指标数据"
+                  description="该 asset_id + key 在指定窗口内没有采集点"
+                  compact
+                />
+              ),
+            }}
             columns={[
               { title: '时间', dataIndex: 'ts', key: 'ts',
-                render: v => new Date(v).toLocaleString() },
+                // W2：原先用无 locale 的 new Date(v).toLocaleString()，与其它页口径不一致
+                render: (v: string) => formatDateTime(v) },
               { title: 'Asset ID', dataIndex: 'asset_id', key: 'asset_id', width: 280 },
               { title: 'Key', dataIndex: 'key', key: 'key', width: 140 },
               { title: 'Value', dataIndex: 'value', key: 'value', width: 120,
