@@ -274,7 +274,7 @@ func TestChannelConfig_跨语言样本全部可构造(t *testing.T) {
 
 	var samples map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(raw, &samples))
-	require.Len(t, samples, 3, "样本应覆盖 email/dingtalk/webhook 三类型")
+	require.Len(t, samples, 4, "样本应覆盖 email/dingtalk/wechat/webhook 四类型")
 
 	for typ, cfg := range samples {
 		_, err := notification.NewSender(&models.NotificationChannel{Type: typ, Config: string(cfg)}) //nolint:exhaustruct
@@ -289,7 +289,7 @@ func TestChannelService_Create_坏配置不落库(t *testing.T) {
 	}{
 		{"email缺to", "email", `{"smtp_host":"h","smtp_port":587,"smtp_user":"u","from":"f@x.com"}`},
 		{"webhook缺url", "webhook", `{}`},
-		{"未知类型wechat", "wechat", `{"url":"https://example.com/hook"}`},
+		{"未知类型feishu", "feishu", `{"url":"https://example.com/hook"}`},
 		{"端口是字符串", "email", `{"smtp_host":"h","smtp_port":"587","smtp_user":"u","from":"f@x.com","to":["t@x.com"]}`},
 		{"config不是JSON", "webhook", `not-json`},
 	}

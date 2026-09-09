@@ -1,8 +1,25 @@
 # 测试现状报告
 
-**最后更新**: 2026-09-09（本次只增量更新本节与下方「通知渠道配置契约轮」的 rev6 数字；其余章节仍是 2026-06-16 快照）
+**最后更新**: 2026-09-09（本次只增量更新本节与下方「通知渠道配置契约轮」的 rev7 数字；其余章节仍是 2026-06-16 快照）
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
-**状态**: ✅ 986 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 174 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
+**状态**: ✅ 998 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 176 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
+
+### 续：M3 企微 `wechat` sender 端到端（rev7.1，TODO G-36 关闭）
+
+| 维度 | 数值 / 说明 |
+|---|---|
+| Backend 测试函数 | **998**（+12，新增 `internal/notification/sender_wechat_test.go`：body **结构断言**、`errcode != 0` 判失败、缺 `errcode` fail-closed 5 例、回执非 JSON、构造校验、非 2xx、连接失败不泄漏 key、非法 URL 不泄漏原串、工厂分派，+ 安全审计 M-1/L-3 的 `回执回显key被抹掉`/`CredentialValues_编码形态与键名过滤`/`ScrubSecrets_无凭据时原样返回`） |
+| 复用面 | `dingRespErr` → `errcodeRespErr(raw, label)`（钉钉/企微同口径）；钉钉既有 5 组文案断言**逐字未改**，证明重构零行为变化 |
+| 前端 | Settings 14 条用例全绿（替换 2 条 + 新增「不填 URL 不可保存」「保存失败只记状态码与已脱敏文案」2 条）：wechat 表单产出与样本一致 + **保存前**断言无 secret 输入框；存量 `webhook_url` 行 URL 留空待补填。`tsc`/`lint` 干净 |
+| 覆盖 | `WeChatSender`（构造/`Type`/`Send`）与 `errcodeRespErr` **100%**；`notification` 包语句覆盖 79.4% |
+| 变异反证 | **M8-1..M8-15 十五条全红在断言上**：body 退回 `{"content":…}`、`msgtype` 改 markdown、不校验回执、缺 `errcode` 判成功、工厂去 `wechat`、seed 改回 `webhook`、回显完整 URL、前端删 wechat 分支、前端下拉去选项、前端删 required 规则、样本键名漂移、回执不做值级脱敏、`credentialValues` 不跳空值、前端 `console.error` 记整个 error 对象、`credentialValues` 退回 `u.Query()` 漏 `%20` 形态 |
+| 测试设计 trap | 前端「无 secret 输入框」断言必须放**保存前**：保存触发 `resetFields()` → 表单回到「类型未选中」的兜底分支（那里有 secret）→ 保存后断言恒假红。实测踩过一次 |
+| 两路只读审计 | 正确性：无 HIGH/MEDIUM，6 条 LOW 全处置 + 观察项 → G-39；安全：无 HIGH，**M-1（企微 key 经 `errmsg` 泄漏）已修**（值级抹除）、L-3（前端 `console.error` 带请求体明文）已修、L-2 并入 G-31、INFO-4/5 登记。详见 `docs/FIX-PLAN-NOTIFY-CHANNEL.md` §7.7 |
+| 残余 | 存量 `type=webhook` 企微行（M1 期 seed 产物）需用户改选类型重存；不加启发式迁移（误改第三方 webhook 的风险高于收益）。值级抹除只覆盖**本渠道 URL query 里**的凭据值（变换后回显如 base64 不命中） |
+
+> 验证口径：`go test ./... -count=1` 27 包全绿、`gofmt -l` 干净；frontend `tsc --noEmit` + `eslint --max-warnings 0` 干净。
+
+---
 
 ---
 

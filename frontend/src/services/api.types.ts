@@ -1386,7 +1386,7 @@ export interface components {
             id?: string;
             name?: string;
             /**
-             * @description 响应模型。wechat 仅存在于存量数据（sender 未实现，G-36），输入侧不再接受
+             * @description 响应模型
              * @enum {string}
              */
             type?: "email" | "dingtalk" | "wechat" | "webhook";
@@ -1397,10 +1397,10 @@ export interface components {
         ChannelInput: {
             name: string;
             /**
-             * @description 输入侧不接受 wechat（sender 未实现，G-36）
+             * @description wechat = 企业微信群机器人（config 只需 url，回执 errcode 判失败）
              * @enum {string}
              */
-            type: "email" | "dingtalk" | "webhook";
+            type: "email" | "dingtalk" | "wechat" | "webhook";
             /** @description JSON 字符串，键名见 internal/notification/channelConfig 的 json tag */
             config?: string;
             /** @description 省略时后端按 true 处理（新建） */

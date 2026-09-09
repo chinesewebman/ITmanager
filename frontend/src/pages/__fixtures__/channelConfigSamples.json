@@ -11,6 +11,9 @@
     "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx",
     "sign_secret": "SECdingtalk"
   },
+  "wechat": {
+    "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+  },
   "webhook": {
     "url": "https://example.com/hook",
     "secret": "SECwebhook"

@@ -110,8 +110,8 @@ export interface Ticket {
 }
 
 // 通知渠道相关类型
-// config 是后端落库的 JSON **字符串**（表单里才 parse 成对象）；wechat 仅为存量数据，
-// 输入侧已不接受（G-36）。与 openapi.yaml 的 NotificationChannel 保持一致。
+// config 是后端落库的 JSON **字符串**（表单里才 parse 成对象）。
+// 与 openapi.yaml 的 NotificationChannel 保持一致。
 export interface NotificationChannel {
   id: string
   name: string

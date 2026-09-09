@@ -103,7 +103,7 @@ func (r *AlertRule) TableName() string {
 type NotificationChannel struct {
 	ID   uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
 	Name string    `json:"name" gorm:"size:100;not null"`
-	Type string    `json:"type" gorm:"size:20;not null"` // dingtalk, email, webhook
+	Type string    `json:"type" gorm:"size:20;not null"` // dingtalk, email, wechat, webhook
 
 	// 配置
 	Config    string `json:"config" gorm:"type:text"` // JSON 配置

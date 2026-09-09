@@ -1,10 +1,11 @@
 # FIX-PLAN-NOTIFY-CHANNEL：通知渠道「配置契约」错位 + 钉钉加签缺失 + 业务失败被当成功（TODO G-33）
 
-- **状态**：rev6 — M1 已实现并过三路审计收口（§7.2/§7.3）；**M2（钉钉加签 + 回执校验）已实现并过两路审计收口**，见 §7.4（交付）与 §7.5（审计处置）。当前 **986 backend 测试函数 / 174 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a/V-18..V-22 + M2-1..M2-8 + M7-1..M7-9 共二十八条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4
+- **状态**：rev7.1 — M1 已实现并过三路审计收口（§7.2/§7.3）；M2（钉钉加签 + 回执校验）已实现并过两路审计收口（§7.4/§7.5）；**M3（企微 `wechat` sender 端到端）已实现并过两路只读审计收口**，见 §7.6（交付）/§7.7（审计处置）。当前 **998 backend 测试函数 / 176 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a/V-18..V-22 + M2-1..M2-8 + M7-1..M7-9 + M8-1..M8-15 共四十三条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4
 - **关联**：G-33（seed 企微键名 / 钉钉 `SignSecret` 未生效）、G-28（错误文本脱敏）、G-31（回显点残余）、G-36（企微 sender）、G-37（OpenAPI 渠道路径漂移）
 - **发现路径**：G-28 第三轮审计后盘点「配置 → Sender」链路时发现
 - **rev2 变更**：见 §7 处置表。阻塞项 2 个（B-1 表单端口类型、B-2 变异设计错误）、HIGH 5 个（H-1 脱敏点、H-2 `Update` fail-open、H-3 既有测试、H-4 seed 邮件行、H-5 400 文案）全部落入 §2/§3/§4。
 - **rev3 变更**：实现后三路只读审计（安全 / 正确性 / 测试有效性）回执，处置见 §7.2。两个审计独立命中同一个 HIGH（`Update` 键名绕过，真 PG 实测 HTTP 200 落库），另有前端 Modal 串记录（H-2）、契约只钉必填键（M-2）、400 body 回显 Type 的非 URL 形态（安全 M-1）等；本 rev 的代码/测试改动即 §7.2 的处置结果。
+- **rev7 变更**：M3 交付（§7.6）。新增 `WeChatSender`（body `{"msgtype":"text","text":{"content":…}}`，回执复用抽出的 `errcodeRespErr(raw, label)`——钉钉/企微同口径，`dingRespErr` 逐字保留原语义）；`NewSender` 注册 `wechat`；seed 企微行 `type` 由 `webhook` 改回 `wechat`；前端下拉恢复可选、表单只渲染 `url`（**不给 secret 输入框**：企微群机器人无需签名头，给了就是死键）；跨语言样本补 `wechat` 腿，四条腿（样本键集合 / `channelConfig` tag / 前端表单产出 / OpenAPI enum）同步。
 - **rev6 变更**：M2 交付后的**两路只读审计**（安全 / 正确性，各自独立设计变异）回执处置见 §7.5。两路**独立命中同一个 MEDIUM**——`dingRespErr` 对「合法 JSON 但无 `errcode`」（`{}`/`null`/`{"errmsg":"ok"}`）判成功，与「无法确认送达即失败」自相矛盾；另修 `sanitizeSnippet`/`markFailed` 的控制字符（NUL 让 PG 22021 拒收 → 行永远 pending 无限重发）、webhook 回执「先命中就 return」、回执限读 4KiB 截断合法 JSON、`errcode` 类型错报成「不是合法 JSON」、`u.Query()` 静默丢畸形 query 参数，并把 `InDelta` 从 60s 收窄到 10s。新增残余 R-14/R-15。
 - **rev5 变更**：M2 交付（§7.4）。钉钉加签按消歧义公式实现并用**独立实现算得的签名向量**钉住（key/msg 写反 → 恒定 310000 的失败形态被 M2-1 变异覆盖）；钉钉回执 `errcode != 0` 与「回执非 JSON」都算失败（fail-closed）；通用 webhook 做 best-effort `errcode`/`code` 校验（不认识形状时维持只看 HTTP 状态）；回执文本限读 4KiB + 脱敏 + 按 rune 截到 200。新增残余 R-12/R-13。
 - **rev4 变更**：第三路（测试有效性）审计回执的处置见 §7.3。核心结论：**代码无新缺陷，缺的是测试承重力**——seed 钉钉行 `sign_secret` 改名无测试钉住（H-1）、前端 `is_enabled` 保留逻辑与 wechat 禁用项、兜底样本键名、`touched` 跳过语义均存在「变异存活」；本轮逐条补断言并重跑变异（V-18..V-22）。M-2/M-3 两条存活判为结构性、明确接受（见 §7.3）。
@@ -147,7 +148,7 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 
 **7. 契约样本单一来源（跨语言）**
 
-新增 `frontend/src/pages/__fixtures__/channelConfigSamples.json`，三类型各一份「表单真产出」的 config 对象（`smtp_port` 是**数字**）：
+新增 `frontend/src/pages/__fixtures__/channelConfigSamples.json`，各类型一份「表单真产出」的 config 对象（`smtp_port` 是**数字**）。M1 落地时是三类型，M3 增 `wechat`（见 §7.6）：
 
 ```json
 {
@@ -171,7 +172,7 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 
 **9. 构造器错误不回显调用方字符串（`notification/sender.go`）**
 
-`NewSender` 的 default 分支原为 `fmt.Errorf("unsupported channel type: %s", ch.Type)`，该文本经 service → handler 原样进 400 body。`redact.Text` 只挡 URL / 键值形态，裸 token、JWT、percent 编码、无 scheme URL、多行文本都能穿过（安全审计 M-1）。改为静态文案 `unsupported channel type (支持: email/dingtalk/webhook)`——诊断信息（支持哪几种）不损失，调用方字符串一律不回显。**代价**：拼错的类型名不再出现在错误里（前端下拉本来就限制了取值），登记 R-9。
+`NewSender` 的 default 分支原为 `fmt.Errorf("unsupported channel type: %s", ch.Type)`，该文本经 service → handler 原样进 400 body。`redact.Text` 只挡 URL / 键值形态，裸 token、JWT、percent 编码、无 scheme URL、多行文本都能穿过（安全审计 M-1）。改为静态文案 `unsupported channel type (支持: email/dingtalk/wechat/webhook)`（M3 加 wechat）——诊断信息（支持哪几种）不损失，调用方字符串一律不回显。**代价**：拼错的类型名不再出现在错误里（前端下拉本来就限制了取值），登记 R-9。
 
 由此 400 出口**不再有任何调用方可控内容**（`parseConfig` 的 JSON 错误只含 offset/字段名；三个构造器只做存在性检查，URL 解析发生在 `Send` 且那里已用 `redact.URL`/`urlErrCause`）。`redact.Text` 保留为纵深防御，其变异因此不再能红（见 V-11 的说明）。
 
@@ -185,16 +186,16 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 - 通用 webhook：**best-effort** —— 响应体是合法 JSON 且含数值型 `errcode`/`code` 且非 0 时视为失败；否则维持「只看 HTTP 状态」（不假定第三方形状）。
 - 读体 `io.LimitReader(resp.Body, 4<<10)`（限**读取量**）；进错误文本前再 `redact.Text` + 截到固定 rune 上界（建议 200）——`LimitReader` 不限制嵌入文本长度。上游响应体一律视为不可信（G-31 残余）。
 
-#### M3（再下一轮）企微渠道端到端
+#### M3（已实现，见 §7.6）企微渠道端到端
 
-新增 `wechat` sender（body `{"msgtype":"text","text":{"content":…}}`，校验 `errcode`）；`NewSender` 注册；seed 企微行改 `type: "wechat"`；前端下拉加回 `wechat`（登记 G-36）。
+新增 `wechat` sender（body `{"msgtype":"text","text":{"content":…}}`，校验 `errcode`）；`NewSender` 注册；seed 企微行改 `type: "wechat"`；前端下拉恢复可选、表单只渲染 `url`（不给 secret 死键）。G-36 关闭。
 
 ### 2.3 不做的事（登记）
 
 - **不做别名兼容**（候选 B）：见 R-2。
 - **不做存量坏行的数据迁移**：配置是管理员可编辑的，重新保存一次即可（§4.1 给逐行步骤）。
 - **不做 URL 语法/scheme 校验**：M1 只校验必填存在性（§2.2 第 1 条）。若后续要收紧，登记为独立条目。
-- **不实现企微 sender**：M3。
+- ~~**不实现企微 sender**：M3。~~ **M3 已交付**（§7.6），此条作废。
 
 ## 3. Where（变更清单）
 
@@ -227,11 +228,11 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 
 | # | 验证点 | 方式 |
 |---|---|---|
-| V-1 | **跨语言契约**：`__fixtures__/channelConfigSamples.json` 三类型逐条喂 `notification.NewSender` 必须成功 | 后端单测 |
-| V-2 | 坏配置**不落库**：email 缺 `to` / webhook 缺 `url` / 未知类型 `wechat` → `ErrInvalidInput`，且 DB **无新增行** | 单测（**真 sqlite**，见下） |
+| V-1 | **跨语言契约**：`__fixtures__/channelConfigSamples.json` 四类型逐条喂 `notification.NewSender` 必须成功 | 后端单测 |
+| V-2 | 坏配置**不落库**：email 缺 `to` / webhook 缺 `url` / 未知类型 `feishu` → `ErrInvalidInput`，且 DB **无新增行** | 单测（**真 sqlite**，见下） |
 | V-3 | 合法配置落库；`Update` 只改 `is_enabled`（不含 `config`/`type`）不触发校验；只改 `type` 时用「新 type + 已存 config」校验并拒绝 | 单测 |
 | V-4 | `Update` 的 `config` 为对象/数组/数字/布尔/null → `ErrInvalidInput`（fail-closed），DB 值不变 | 单测 |
-| V-5 | 前端单测：三类型 payload 的 `config` 与样本 **deep-equal**（含 `smtp_port` 为数字） | `npx vitest run src/pages/Settings.test.tsx` |
+| V-5 | 前端单测：各类型 payload 的 `config` 与样本 **deep-equal**（含 `smtp_port` 为数字） | `npx vitest run src/pages/Settings.test.tsx` |
 | V-6 | seed 每行 config 都能构造 Sender（含企微行键名 `url`） | `cmd/seed` 单测 |
 | V-7 | **HTTP 400 body 不含调用方可控字符串**：`Create` 六形态（URL / 裸 token / JWT / percent 编码 / 无 scheme / 多行）逐条 + `Update` 一条，断言 body 含 `unsupported channel type`、不含各自片段 | handler 单测 |
 | V-8 | 合法/非法两方向的 400 文案断言：`Create` 空名称 → body 含 `渠道名称不能为空`；`Update` 坏 config → body 含构造器原因 | handler 单测 |
@@ -264,8 +265,8 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 |---|---|---|
 | 邮件（`type=email`） | 补齐 `to`（至少一个收件人）；确认 `smtp_port` 是**数字**、`from` 非空 | 点该行「测试」，成功即通 |
 | 钉钉（`type=dingtalk`） | `secret` → `sign_secret`；`webhook_url` 保持 | 同上（加签尚未实现，M2 前留空即可） |
-| 存量 `type=wechat` / `type=webhook` 但配置是企微形状 | 改选「Webhook」并填 `url`；或先删行（企微渠道要等 M3） | 保存被 400 挡住时看提示文案（已带原因） |
-| 其它 `type` 不在 `[email,dingtalk,webhook]` 的行 | 改选受支持类型并重填配置 | 同上 |
+| 存量 `type=webhook` 但配置是企微形状（M1 期 seed 产物） | 改选「企业微信」后保存（键名已是 `url`，M3 起可直接发）；旧键名 `webhook_url` 的行需重填 URL | 前端编辑时 URL 留空待补填，不再静默回填旧键 |
+| 其它 `type` 不在 `[email,dingtalk,wechat,webhook]` 的行 | 改选受支持类型并重填配置 | 同上 |
 
 无法逐行操作时（如批量环境）可对照同一张表直接改 DB，但改完必须点一次「测试」——**构造成功不等于能发出去**（R-4）。
 
@@ -287,12 +288,13 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 - **R-6（400 文案回显内部原因）**：渠道路由整组 `canManage` + `RejectAPIKeyAuth`（`routes.go:362-365`），400 body 只对能读到 config 明文的管理员可见；且原因在 service 侧已 `redact.Text`。缓解：V-7 断言钉住脱敏；若日后放开路由权限，需重审。
 - **R-7（seed 直写 DB 绕过校验）**：M1 的写入端防线覆盖不到 seed。缓解：V-6 在 seed 侧独立断言每行可构造；seed 未来若改用 service，此断言可退化为冗余。
 - **R-8（`Create/Update` 引入 `notification` 依赖）**：`channel_service.go` 已 import `notification`（`Test` 用 `Resolver`），无新依赖、无 import 环；校验固定用 `NewSender`（不走 mock 注册表）。
-- **R-9（未知类型的诊断信息变少）**：不回显 `ch.Type` 后，拼错的类型名不再出现在 400 文案里（只剩「支持: email/dingtalk/webhook」）。缓解：前端下拉限制了取值；`Test` 链路的失败仍带类型上下文（那条路径不经 400 body）。若日后确需回显，必须走「白名单字符 + 固定长度」而不是原样拼接。
+- **R-9（未知类型的诊断信息变少）**：不回显 `ch.Type` 后，拼错的类型名不再出现在 400 文案里（只剩「支持: email/dingtalk/wechat/webhook」）。缓解：前端下拉限制了取值；`Test` 链路的失败仍带类型上下文（那条路径不经 400 body）。若日后确需回显，必须走「白名单字符 + 固定长度」而不是原样拼接。
 - **R-10（键白名单的兼容性）**：`Update` 现在对白名单外的键返 400（此前是静默更新或 500）。已知调用方（前端 `Settings.tsx`、`handleToggleChannel`）只发 `name/type/config/is_enabled`；若第三方依赖改 `id`/`created_at`，那本来就该拦（会造出悬空外键，本仓库无外键约束）。无证据表明存在此类调用方。
 - **R-11（`Update` 仍是读-校验-写）**：rev3 让「写入值 == 校验值」，但两个并发请求仍可能互相覆盖（last-writer-wins）。彻底消除需要事务 + 行锁（`clause.Locking{Strength:"UPDATE"}`，PG 限定）。当前渠道更新是低频管理操作，接受该窗口；若将来渠道配置改由自动化高频写入，再上事务。
 - **R-12（best-effort 回执校验可能误判既有 webhook）**：通用 webhook 现在把 `{"code":200}` / `{"errcode":200}` 这类「非 0 但其实是成功」的形状判为失败——那是第三方协议里真实存在的写法。失败模式：某条今天能用的 webhook 在 M2 上线后开始被记成 `failed`（并触发重发）。缓解：① 只对**合法 JSON 且含数值型 `errcode`/`code`** 判定，纯文本（Slack 的 `ok`）、`{"success":true}`、字符串型 code 一律放行；② 失败文案带原始回执片段，`notification_logs.error_msg` 里一眼能看出是误判；③ 钉钉走严格路径（钉钉协议固定 `errcode`），不受此风险影响。若线上出现误判，处置是「该渠道改用钉钉/邮件」或后续给 webhook 加开关（不在本轮）。
 - **R-13（钉钉回执不可用的 fail-closed 边界）**：钉钉链路把「2xx 但回执**不是合法 JSON**、或**缺 `errcode`**（`{}`/`null`/`{"errmsg":"ok"}`）」一律判为失败（rev6 收紧，原先只挡「非 JSON」，见 §7.5 MED-1）。失败模式：运维在钉钉机器人前挂了一层网关，网关对成功请求返回 200 + 空体/HTML（如 204 改写）→ 消息其实到了群里，但被记成 `failed` 并重发（重复告警）。缓解：钉钉官方 webhook 恒返 `{"errcode":N,…}`；若确有此形态，属网关改造问题，应让网关透传上游回执。文档在此显式登记，不做「空体也算成功」的妥协——那会把真正丢消息的情况也吞掉。
 - **R-14（>64KiB 回执仍被截断）**：`respBody` 的读取上界 rev6 由 4KiB 提到 64KiB（修「截断合法 JSON → 真送达判失败」），但上界仍然存在。失败模式：回执超过 64KiB（网关包装了整个请求上下文）时截断 → 钉钉侧「合法回执」变「不是合法 JSON」判 failed 并重发，webhook 侧反之吞掉一个本该报的错。缓解：钉钉/企微回执都是几百字节量级；截断阈值有注释说明职责（只挡无限流）。若真遇到，处置是让网关透传而非再抬上界。
+- **R-16（企微协议限制无防护：正文 2048 字节 / 每机器人 20 条每分钟）**：M3 的 `WeChatSender.Send` 不做长度或频率控制，超限时企微回 `errcode 45002`（正文过长）/ `45009`（频率超限）→ 按 fail-closed 记 `failed`，而 **worker 对 failed 不重试** → 告警静默丢失（行在 `notification_logs` 里可查）。可达性：当前正文由 `alert_service.go`（`Alert <uuid> → status by user <id>`，约 70 字节）与 `worker.handleAlertEvent`（短）生成，**尚不可达**；但钉钉 markdown 上限 20KB、企微 2048 **字节**（一个汉字 3 字节），两类渠道阈值差 10 倍，一旦接长模板就会踩。缓解：无（登记）；修法是 `Send` 内按字节截到 2048 且切在 rune 边界，或对 45009 做退避重试——需先定「截断 vs 分片」语义，不在 M3 轮动。
 - **R-15（`Send` 现在要等响应体读完）**：M2 之前 2xx 后立即返回；现在要读到 64KiB 或 EOF 才能校验回执。失败模式：对端发完 200 头后挂住不写 body → `Send` 阻塞到 `http.Client.Timeout`（10s），worker 侧 30s ctx 先到则由 ctx 兜底。缓解：有界、且 worker 是串行批处理 + 每渠道独立 ctx；已实测（正确性审计 LOW-5）400ms ctx 下按 ctx 返回。
 
 ## 6. 分期与状态
@@ -301,7 +303,7 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 |---|---|---|
 | M1 | 配置契约对齐（后端写入校验 + 前端表单 + seed + OpenAPI + 跨语言样本） | 已实现 + 三路审计收口（rev4），待推送验证 CI |
 | M2 | 钉钉加签 + 响应回执校验 | **已实现**（§7.4），待推送验证 CI |
-| M3 | 企微渠道（`wechat` sender + seed + 前端） | 登记 G-36 |
+| M3 | 企微渠道（`wechat` sender + seed + 前端） | **已交付**（§7.6），G-36 关闭 |
 
 ## 7. 审查记录与处置（rev1 → rev2 → rev3）
 
@@ -453,3 +455,73 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 | M7-9 | 加签分支错误文本不剥 `url.Error` | `加签时URL非法不泄漏原串`（原文含 `SECRETPATH`） |
 
 全量：backend **27 包全绿 / 986 测试函数**（+5）/ `-race` 绿 / `gofmt`+`go vet` 干净；`stripControlChars`/`sanitizeSnippet`/`respBody`/`dingTalkSignedURL`/`dingRespErr`/`webhookRespErr`/`markFailed`/`DingTalkSender.Send` 覆盖 **100%**；frontend 未改（27 文件 174 测试）。
+
+### 7.6 M3 交付：企微 `wechat` sender 端到端（rev6 → rev7）
+
+**实现**（`backend/internal/notification/sender.go`、`cmd/seed/main.go`、`frontend/src/pages/Settings.tsx`、`openapi.yaml`、跨语言样本）
+
+| 面 | 改动 |
+|---|---|
+| sender | 新增 `WeChatSender`（`Type()=="wechat"`，`NewWeChatSender` 要求 `url` 非空）；body `{"msgtype":"text","text":{"content":…}}`；2xx 后 `errcodeRespErr(raw, "wechat")`；错误出口与钉钉同口径（`redact.URL` + `urlErrCause`） |
+| 复用 | `dingRespErr` → `errcodeRespErr(raw, label)`（`label` 只用于文案前缀，调用点均传字面量）；钉钉语义/文案逐字不变（既有 5 组断言原样通过） |
+| 工厂 | `NewSender` 增 `case "wechat"`；支持类型文案加 `wechat` |
+| seed | 企微行 `Type: "webhook"` → `"wechat"`（键名 M1 已对齐为 `url`） |
+| 前端 | 下拉「企业微信」去掉 `disabled`；表单 wechat 分支**只渲染 `url`**（不给 secret 输入框——`WeChatSender` 忽略 secret，给了就是「配了不生效」的死键）；存量行不再渲染下线提示 |
+| 契约 | 样本补 `"wechat": {"url": …}`；`sender_contract_test.go` 的 `allowedConfigKeys` 与类型集合断言同步；`cmd/seed` 的 `requiredKeys` 加 `wechat` 并断言 seed 不再有 `type=webhook` 的企微行；OpenAPI 输入/响应 enum 加回 `wechat` + `npm run gen:api` |
+
+**测试**：新增 `sender_wechat_test.go` 12 个测试函数——body 形状（**结构断言**，非「发了就行」）、`errcode != 0` 判失败、缺 `errcode` fail-closed（5 例子用例）、回执非 JSON、构造校验、非 2xx、连接失败不泄漏 key（G-28）、**非法 URL 不泄漏原串**、工厂分派。前端两条用例替换：wechat 表单产出与样本一致（**保存前**断言无 secret 输入框——保存会 `resetFields()` 回到未选类型的兜底分支，那里有 secret，保存后断言恒假红，实测踩过）、存量 `webhook_url` 行 URL 留空待补填。
+
+**变异反证 15/15 红在断言上**（`/tmp/mutate8.py`，逐条确认非编译失败）：
+
+| # | 变异 | 红在哪 |
+|---|---|---|
+| M8-1 | body 退回 `{"content":…}`（G-36 原始缺陷） | `body形状与回执校验`（`Not equal`） |
+| M8-2 | `msgtype` 改 `markdown` | 同上 |
+| M8-3 | 2xx 后不校验回执 | `回执errcode非0判失败`（`An error is expected but got nil`） |
+| M8-4 | 缺 `errcode` 判成功（fail-open） | `回执缺errcode_fail_closed`（同钉钉用例） |
+| M8-5 | `NewSender` 去掉 `case "wechat"` | `NewSender_wechat分派` |
+| M8-6 | seed 企微行改回 `webhook` | `TestSeed_空DB_创建通知渠道`（`types["wechat"]`） |
+| M8-7 | 错误文本回显完整 URL | `发送失败不泄漏URL凭据`（原文含 `SUPERSECRETKEY`） |
+| M8-8 | 前端删 wechat 分支（回落兜底 → 多出 secret） | 前端 `wechat 表单产出…` 的 secret 断言 |
+| M8-9 | 前端下拉去掉「企业微信」 | 前端 `Unable to find an element with the title: 企业微信` |
+| M8-10 | 样本 wechat 键名 `url` → `webhook_url` | `样本键集合与结构体tag一致` |
+| M8-11 | 前端删掉 wechat 的 `required` 规则 | 前端 `wechat 不填 URL 不可保存`（`toHaveClass`） |
+| M8-12 | 回执不做值级脱敏（§7.7 安全 M-1） | `回执回显key被抹掉`（错误文本原文含 `SUPERSECRETKEYVALUE`） |
+| M8-13 | `credentialValues` 不跳过空值（`ReplaceAll` 空串插满文本） | `CredentialValues_编码形态与键名过滤`（`Should be empty`） |
+| M8-14 | 前端 `console.error` 记整个 error 对象（§7.7 安全 L-3） | 前端 `保存失败只记状态码与已脱敏文案`（`Not equal`） |
+| M8-15 | `credentialValues` 退回 `u.Query()` + 再编码（漏掉上游原样回显的 `%20` 形态） | `CredentialValues_编码形态与键名过滤`（`does not contain "a%20b"`） |
+
+全量：backend **27 包全绿 / 998 测试函数**（+12）/ `gofmt`+`go vet` 干净；`WeChatSender`（构造/`Type`/`Send`）与 `errcodeRespErr` 覆盖 **100%**；frontend `tsc`+`lint` 干净、Settings 14 条用例全绿。两路审计处置见 §7.7。
+
+**残余（本轮登记，未修）**：存量 `type=webhook` 且配置指向 `qyapi.weixin.qq.com` 的行（M1 期 seed 产物）仍会按通用 webhook 发 `{"content":…}` → 企微回 `errcode != 0` 判失败（**不静默**，行进 failed 可查）；修法是用户在前端把类型改选「企业微信」重存，或加一条数据迁移（未做：无生产数据、且迁移需要能识别 URL 形状的启发式，误改第三方 webhook 的风险高于收益）。
+
+### 7.7 M3 两路只读审计处置（rev7 → rev7.1）
+
+两路审计（正确性 / 安全）均为只读：未改仓库文件，验证副本在 `/tmp`。
+
+**正确性审计：无 HIGH/MEDIUM，6 条 LOW 全部处置**
+
+| # | 发现 | 处置 |
+|---|---|---|
+| LOW-1 | 前端 wechat 的 `rules={[{ required: true }]}` 无测试钉住（删掉全部用例仍绿，用户可从 UI 提交空 URL） | 补 `wechat 不填 URL 不可保存`（断言 `ant-input-status-error` + `createChannel` 未被调用）；变异 M8-11 |
+| LOW-2 | `errcodeRespErr(raw, label)` 抽出后钉钉侧 label 写错无人发现（原断言只查 `errcode=` 与 `errmsg`） | `TestDingTalkSender_回执errcode非0返错` 加 `dingtalk errcode=` 前缀断言 |
+| LOW-3 | seed 测试用 `assert.False(types["webhook"])` 表达「企微行不许是 webhook」——将来加一条合法通用 webhook 行会误红，维护者多半直接删断言、连带丢掉 G-36 的钉子 | 改为按**渠道名**断言类型（`byName["企业微信通知"].Type == "wechat"`） |
+| LOW-4 | 企微协议限制（正文 2048 字节 / 20 条每分钟）无防护，超限记 `failed` 且 worker 不重试 → 告警静默丢失 | 登记 **R-16**（当前正文约 70 字节，尚不可达；修法需先定「截断 vs 分片」语义） |
+| LOW-5 | `api.types.ts` 是 `openapi.yaml` 的生成物，但渠道调用点全走 `any` → 改了 spec 忘记 `npm run gen:api` 无任何测试变红 | `ci.yml` frontend job 新增「OpenAPI 生成物漂移检查」：`npm run gen:api` + `git diff --exit-code -- src/services/api.types.ts` |
+| LOW-6 | 文档漂移（§4 验证清单仍写「三类型」「未知类型 `wechat`」、支持类型文案漏 `wechat`） | 本节 + §4 表格同步 |
+| 观察项 | `AlertRule.NotifyChannels` 只写不读 → 规则级渠道选择不生效；`config.DingtalkConfig` 无人使用 | 登记 **G-39** |
+
+**安全审计：无 HIGH，1 条 MEDIUM 已修，2 条 LOW + 3 条 INFO**
+
+| # | 级别 | 发现 | 处置 |
+|---|---|---|---|
+| M-1 | MEDIUM | 企微凭据参数名是**裸 `key`**，`redact.Text` 规则 3 刻意不收它（收了会误伤 `primary key=`）、规则 1 只认 URL 形状 → 网关/WAF/反代只回显 path+query（`/cgi-bin/webhook/send?key=…`，无 scheme://host）或 `invalid key=…` 时，key 经 `errmsg` 进 `notification_logs.error_msg` 与应用日志（企微 key 可向运维群发任意消息，定级同 G-28 对钉钉 token） | **本轮修**：新增 `credentialValues(cfg.URL)`（**直接切 `RawQuery`**，同时收「原始形态」与「解码形态」——`u.Query()` 只给解码后的值，`key=a%20b` 的原始回显会漏；空值跳过）+ `scrubSecrets(text, secrets)`，在 `WeChatSender.Send` 把回执交给 `errcodeRespErr` **之前**做值级抹除。选值级替换而非放宽全局规则 3：只动本渠道自己 URL 里的凭据值，零回归（钉钉侧不受影响）。补 `回执回显key被抹掉` / `CredentialValues_编码形态与键名过滤` / `ScrubSecrets_无凭据时原样返回`；变异 M8-12/M8-13 |
+| L-2 | LOW | 日志出口缺控制字符净化：`worker.go:157` 只过 `redact.Text`，`stripControlChars` 只在入库链上 → 异常 SMTP/代理响应带 CR/LF 可伪造行式日志（DB 侧已被挡住，无 22021 风险） | 并入 **G-31**（日志卫生统一出口） |
+| L-3 | LOW | 前端把 axios error 整体丢进 `console.error`，其中 `error.config.data` 是请求体明文（`smtp_password` / `sign_secret` / 企微 URL 里的 key） | **本轮修**：改为只记 `status` + 后端已脱敏的 `message`；补用例 `保存失败只记状态码与已脱敏文案，不记 error 对象`（jsdom 自身也会往 `console.error` 写噪声，按首参过滤）；变异 M8-14。其余 8 处 `console.error` 属既有写法 → **G-31** |
+| INFO-4 | — | 凭据静态明文落库 + 不校验 scheme（允许 `http://`）；与钉钉/webhook 同形，非本轮引入 | 登记（既有设计） |
+| INFO-5 | — | 存量 `type=webhook` 指向 `qyapi` 的行不会自愈（失败不静默，进 failed） | 已在 §7.6 残余登记 |
+| INFO-6 | — | 文档漂移：§4 仍写「三类型」/「未知类型 `wechat`」、R-9 支持类型文案漏 `wechat` | 本节 + §4 同步 |
+
+**逐项通过（审计实证）**：① 五个错误出口（构造失败 / `NewRequestWithContext` / `client.Do` / 非 2xx / 回执解析）无一携带完整 URL 或 key，无绕过 `redact.URL`/`urlErrCause` 的新路径；非 2xx 分支**不读也不回显响应体**。② `sanitizeSnippet` 顺序正确（控制字符 → 脱敏 → `ToValidUTF8` → 200 rune），`maxRespBytes` 64KiB 是解压后上界（transport 自动 gzip 也被 `LimitReader` 挡住）→ 无内存/压缩炸弹；深嵌套 JSON 有 Go 1.25 的 10000 层上限兜底（fail-closed）。③ `go.mod` 未动、`&http.Client{Timeout: 10s}` 与 `WebhookSender` 逐字一致、TLS 默认校验开启；SSRF 面仍限于 `canManage` 配置的 URL。④ 前端用**真组件在 `/tmp` 副本实测**（含存量行编辑、类型来回切换）：提交的 `config` 只含当前类型已挂载字段（`validateFields` 只收已注册字段），残留键不进 payload；无 storage 写入；列表不渲染 config。⑤ `errcodeRespErr` 两个调用点均传字面量，钉钉文案与语义逐字不变（既有 5 组断言原样通过）。
+
+**残余（本轮登记，未修）**：`credentialValues` 只覆盖**本渠道 URL query 里**的凭据值——若上游把 key 做变换后回显（如 base64、或拆成多段），值级替换不命中；这类形态已由 `sanitizeSnippet` 的 200 rune 截断与 `redact.Text` 的 URL 规则部分覆盖，登记为已知边界。

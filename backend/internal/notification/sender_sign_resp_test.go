@@ -143,6 +143,10 @@ func TestDingTalkSender_回执errcode非0返错(t *testing.T) {
 	require.Error(t, err, "HTTP 200 + errcode!=0 必须算失败（G-33 原始问题：被记成 success）")
 	assert.Contains(t, err.Error(), "errcode=310000")
 	assert.Contains(t, err.Error(), "sign not match")
+	// label 前缀也要钉住（M3 正确性审计 LOW-2）：抽成 errcodeRespErr(raw, label) 后，
+	// 把钉钉侧 label 写成 "wechat" 时上面两条 Contains 照过 → error_msg 里的排障文案
+	// 变成 wechat 前缀而无人发现。
+	assert.Contains(t, err.Error(), "dingtalk errcode=")
 }
 
 // 安全审计 MEDIUM-1 / 正确性审计 MEDIUM-1：合法 JSON 但拿不到 errcode 时必须 fail-closed。
@@ -326,5 +330,5 @@ func TestRespBody_限读64KiB(t *testing.T) {
 	// 正确性审计 LOW-2：4KiB 会切断 JSON → 真送达被判「不是合法 JSON」。
 	// 用一条 >4KiB 的合法成功回执钉住（旧上界下这条必然红）。
 	big := `{"errcode":0,"errmsg":"` + strings.Repeat("x", 5<<10) + `"}`
-	assert.NoError(t, dingRespErr(respBody(strings.NewReader(big))), ">4KiB 的合法回执不得被截断成非法 JSON")
+	assert.NoError(t, errcodeRespErr(respBody(strings.NewReader(big)), "dingtalk"), ">4KiB 的合法回执不得被截断成非法 JSON")
 }

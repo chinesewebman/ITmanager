@@ -28,6 +28,7 @@ const samplesPath = "../../../frontend/src/pages/__fixtures__/channelConfigSampl
 var allowedConfigKeys = map[string][]string{
 	"email":    {"smtp_host", "smtp_port", "smtp_user", "smtp_password", "from", "to"},
 	"dingtalk": {"webhook_url", "sign_secret"},
+	"wechat":   {"url"},
 	"webhook":  {"url", "secret"},
 }
 
@@ -62,7 +63,7 @@ func TestChannelConfig_样本键集合与结构体tag一致(t *testing.T) {
 		types = append(types, k)
 	}
 	sort.Strings(types)
-	assert.Equal(t, []string{"dingtalk", "email", "webhook"}, types, "样本类型集合变了（前端下拉/后端工厂要同步）")
+	assert.Equal(t, []string{"dingtalk", "email", "webhook", "wechat"}, types, "样本类型集合变了（前端下拉/后端工厂要同步）")
 }
 
 // jsonTagsOfChannelConfig 返回 channelConfig 全部 json tag（去掉 omitempty）。

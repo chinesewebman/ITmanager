@@ -175,6 +175,17 @@ jobs:
         working-directory: frontend
         run: npx tsc --noEmit
 
+      # M3 审计 LOW-5：api.types.ts 是 openapi.yaml 的**生成物**，但渠道调用点全走
+      # `any`（api.ts 的 createChannel(data: any)），改了 spec 忘记 `npm run gen:api`
+      # 不会有任何测试变红。这里重生成并断言工作区无差异（openapi-typescript 版本在
+      # package-lock.json 里钉死，输出确定性）。
+      - name: OpenAPI 生成物漂移检查
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          npm run gen:api
+          git diff --exit-code -- src/services/api.types.ts
+
       - name: Unit tests
         working-directory: frontend
         run: npx vitest run

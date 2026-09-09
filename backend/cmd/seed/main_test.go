@@ -388,7 +388,7 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 
 	var channels []models.NotificationChannel
 	require.NoError(t, db.Find(&channels).Error)
-	assert.Equal(t, 3, len(channels), "应有 3 个通知渠道 (email/dingtalk/webhook)")
+	assert.Equal(t, 3, len(channels), "应有 3 个通知渠道 (email/dingtalk/wechat)")
 
 	// H-1（测试有效性审计）：只断言 NewSender 成功钉不住可选键 —— NewDingTalkSender
 	// 只要求 webhook_url 非空，把 sign_secret 改成 secret 照样构造成功、全绿（变异 S17）。
@@ -396,12 +396,12 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 	requiredKeys := map[string][]string{
 		"email":    {"smtp_host", "smtp_port", "smtp_user", "from", "to"},
 		"dingtalk": {"webhook_url", "sign_secret"},
-		"webhook":  {"url"},
+		"wechat":   {"url"},
 	}
 
-	types := map[string]bool{}
+	byName := map[string]models.NotificationChannel{}
 	for _, c := range channels {
-		types[c.Type] = true
+		byName[c.Name] = c
 		// G-33 M1：seed 用 db.Create 直写，绕过 ChannelService 的配置校验 →
 		// 这里独立断言每行都能构造出 Sender（键名/必填项与 channelConfig 对齐）。
 		_, err := notification.NewSender(&c)
@@ -413,9 +413,13 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 			assert.Contains(t, cfg, k, "seed %q 缺少键 %q（键名须与 channelConfig tag 一致）", c.Name, k)
 		}
 	}
-	assert.True(t, types["email"])
-	assert.True(t, types["dingtalk"])
-	assert.True(t, types["webhook"])
+	// 按**渠道名**断言类型（M3 正确性审计 LOW-3）：早先写的是 `assert.False(types["webhook"])`，
+	// 那是拿「seed 里不许有 webhook 类型」来表达「企微行不许是 webhook」——将来 seed 加一条
+	// 合法的通用 webhook 行会误红，维护者多半直接删断言、连带丢掉 G-36 的钉子。
+	assert.Equal(t, "email", byName["邮件通知"].Type)
+	assert.Equal(t, "dingtalk", byName["钉钉群通知"].Type)
+	assert.Equal(t, "wechat", byName["企业微信通知"].Type,
+		"企微行 type 必须是 wechat（WebhookSender 发 {\"content\":…}，企微一律拒收，G-36）")
 }
 
 func TestSeed_空DB_创建工单(t *testing.T) {

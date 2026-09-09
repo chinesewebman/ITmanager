@@ -411,7 +411,13 @@ function Settings() {
       }
     } catch (error: any) {
       if (error?.errorFields) return // Antd 表单校验失败
-      console.error('保存通知渠道失败:', error)
+      // 不记整个 error：axios 的 error.config.data 带请求体明文（smtp_password /
+      // sign_secret / 企微 URL 里的 key），控制台与前端错误采集插件都读得到（安全审计 L-3）。
+      console.error(
+        '保存通知渠道失败:',
+        error?.response?.status,
+        error?.response?.data?.message || error?.message
+      )
       message.error(error?.response?.data?.message || '保存失败')
     }
   }
@@ -771,9 +777,7 @@ function Settings() {
                   options={[
                     { label: '邮件', value: 'email' },
                     { label: '钉钉', value: 'dingtalk' },
-                    // 企业微信（wechat）后端未实现 sender（G-36 / M3），暂不提供。
-                    // 保留禁用项：存量 wechat 行否则会显示裸值 wechat 而不是可读标签。
-                    { label: '企业微信（暂不支持）', value: 'wechat', disabled: true },
+                    { label: '企业微信', value: 'wechat' },
                     { label: 'Webhook', value: 'webhook' },
                   ]}
                 />
@@ -823,15 +827,12 @@ function Settings() {
                     )
                   }
                   if (type === 'wechat') {
-                    // 存量数据：wechat sender 未实现（G-36），下拉已禁用该选项。
-                    // 不能按 Webhook 渲染（键名对不上，且必填项永远过不了），给显式指引。
+                    // 只渲染 url：WeChatSender 的配置键是 url（群机器人 key 在 query 里），
+                    // 它**忽略** secret —— 这里给 secret 输入框等于制造"配了不生效"的死键。
                     return (
-                      <Alert
-                        type="warning"
-                        showIcon
-                        message="企业微信通知暂不支持"
-                        description="后端尚无 wechat sender（G-36）。请改选「邮件 / 钉钉 / Webhook」并重新填写配置后保存。"
-                      />
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true }]}>
+                        <Input placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" />
+                      </Form.Item>
                     )
                   }
                   return (

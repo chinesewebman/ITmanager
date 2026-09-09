@@ -372,21 +372,45 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     errSpy.mockRestore();
   });
 
-  // L-2（测试有效性审计）：去掉下拉项的 disabled 后原有用例仍全绿 → UI 会重新可选
-  // wechat（后端 400 挡住，不是静默失败，但选项本身就不该可选）。
-  it("wechat 下拉项被禁用", async () => {
-    render(<Settings />);
-    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
-    fireEvent.mouseDown(screen.getByLabelText("渠道类型"));
+  // G-36 M3：企微 sender 已实现 → 下拉可选、表单只产出 url（不含 secret）。
+  it("wechat 表单产出与样本一致（且不含 secret 死键）", async () => {
+    const modal = await openChannelForm("企业微信");
 
-    const opt = await screen.findByTitle("企业微信（暂不支持）");
-    expect(opt.className).toContain("ant-select-item-option-disabled");
+    // WeChatSender 忽略 secret —— 表单给这个框会造出"配了不生效"的死键。
+    // 必须在**保存前**断言：保存会 resetFields()，表单回到 type 未选中的兜底分支
+    // （那里有 secret），此时断言恒假红。
+    expect(modal.queryByLabelText("签名密钥（可选）")).not.toBeInTheDocument();
+
+    fireEvent.change(await modal.findByLabelText("Webhook URL"), {
+      target: { value: channelConfigSamples.wechat.url },
+    });
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+    await waitFor(() => expect(notificationApi.createChannel).toHaveBeenCalled());
+
+    const saved = savedConfig();
+    expect(saved.type).toBe("wechat");
+    expect(saved.config).toEqual(channelConfigSamples.wechat);
   });
 
-  // 正确性 M-1：存量 wechat 行既不能被当成 Webhook 渲染（键名对不上、必填永远过不了），
-  // 也不能显示裸值 wechat —— 类型框要显示可读标签 + 下线提示。
-  it("存量 wechat 行：可读标签 + 下线提示，不按 Webhook 渲染", async () => {
+  // M3 正确性审计 LOW-1：wechat 的 rules={[{ required: true }]} 此前无测试钉住 ——
+  // 删掉它全部用例仍绿（上面那条自己填了 URL），用户可从 UI 提交空 URL。
+  it("wechat 不填 URL 不可保存", async () => {
+    const modal = await openChannelForm("企业微信");
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    await waitFor(() =>
+      expect(modal.getByLabelText("Webhook URL")).toHaveClass(
+        "ant-input-status-error",
+      ),
+    );
+    expect(notificationApi.createChannel).not.toHaveBeenCalled();
+  });
+
+  // 存量 wechat 行：旧键名是 webhook_url（M1 前 seed 写的），WeChatSender 只认 url
+  // → 编辑时 URL 留空待补填，而不是静默把旧键回填进表单（保存后键名又变回去）。
+  it("存量 wechat 行：可读标签 + url 留空待补填", async () => {
     vi.mocked(notificationApi.listChannels).mockResolvedValue({
       data: {
         code: 0,
@@ -409,8 +433,38 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     const modal = within(
       (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement
     );
-    expect(modal.getByText("企业微信（暂不支持）")).toBeInTheDocument();
-    expect(modal.getByText("企业微信通知暂不支持")).toBeInTheDocument();
-    expect(modal.queryByLabelText("Webhook URL")).not.toBeInTheDocument();
+    expect(modal.getByText("企业微信")).toBeInTheDocument();
+    expect(modal.getByLabelText("Webhook URL")).toHaveValue("");
+  });
+
+  // 安全审计 L-3：保存失败时 console.error 不得把整个 axios error 丢出去 ——
+  // error.config.data 是请求体明文（smtp_password / sign_secret / 企微 key）。
+  it("保存失败只记状态码与已脱敏文案，不记 error 对象", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const leaky = {
+      response: {
+        status: 400,
+        data: { message: "配置无效" },
+        // 真实 axios 错误里这个字段就是请求体
+        config: { data: '{"smtp_password":"LEAKEDPW"}' },
+      },
+    };
+    vi.mocked(notificationApi.createChannel).mockRejectedValue(leaky);
+
+    const modal = await openChannelForm("企业微信");
+    fireEvent.change(modal.getByLabelText("Webhook URL"), {
+      target: { value: channelConfigSamples.wechat.url },
+    });
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    // jsdom 自己也会往 console.error 写噪声（getComputedStyle 等），按首参过滤
+    const call = await waitFor(() => {
+      const hit = errSpy.mock.calls.find((c) => c[0] === "保存通知渠道失败:");
+      expect(hit).toBeTruthy();
+      return hit;
+    });
+    expect(call).toEqual(["保存通知渠道失败:", 400, "配置无效"]);
+    expect(JSON.stringify(call)).not.toContain("LEAKEDPW");
+    errSpy.mockRestore();
   });
 });

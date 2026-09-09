@@ -1,4 +1,4 @@
-// Package notification 实现多渠道通知发送 (dingtalk/email/webhook) + 异步 worker。
+// Package notification 实现多渠道通知发送 (dingtalk/email/wechat/webhook) + 异步 worker。
 //
 // v1.4 落地: 把 v1.1 trigger 落的 pending notification_logs 真发出去。
 //
@@ -7,7 +7,7 @@
 //	alert.ack/resolve
 //	  └─ writeNotificationTrigger 落 pending log
 //	       └─ Worker.tick() 5s 拉 pending
-//	           └─ Sender.Send() 调对应渠道 (dingtalk/email/webhook)
+//	           └─ Sender.Send() 调对应渠道 (dingtalk/email/wechat/webhook)
 //	               └─ 更新 log.status = success/failed
 package notification
 
@@ -65,7 +65,7 @@ func urlErrCause(err error) error {
 type Sender interface {
 	// Send 发送一条通知, 返回 error 即视为失败
 	Send(ctx context.Context, recipient, content string) error
-	// Type 返回渠道类型 (dingtalk/email/webhook), 用于工厂选择
+	// Type 返回渠道类型 (dingtalk/email/wechat/webhook), 用于工厂选择
 	Type() string
 }
 
@@ -79,13 +79,15 @@ func NewSender(ch *models.NotificationChannel) (Sender, error) {
 		return NewDingTalkSender(ch)
 	case "email":
 		return NewEmailSender(ch)
+	case "wechat":
+		return NewWeChatSender(ch)
 	case "webhook":
 		return NewWebhookSender(ch)
 	default:
 		// 不回显 ch.Type：该错误经 service 脱敏后回显到 400 body，而 redact.Text 只挡
 		// URL / 键值形态，裸 token、JWT、percent 编码、无 scheme URL、多行文本都能穿过
 		// （安全审计 M-1）。支持的类型是静态信息，写死即可。
-		return nil, errors.New("unsupported channel type (支持: email/dingtalk/webhook)")
+		return nil, errors.New("unsupported channel type (支持: email/dingtalk/wechat/webhook)")
 	}
 }
 
@@ -105,7 +107,7 @@ func Resolver(ch *models.NotificationChannel) (Sender, error) {
 
 // channelConfig 通用配置 (从 NotificationChannel.Config JSON 解析)
 type channelConfig struct {
-	// webhook
+	// webhook / wechat（wechat 只用 url，忽略 secret —— 企微群机器人无需签名头）
 	URL    string `json:"url"`
 	Secret string `json:"secret,omitempty"`
 
@@ -172,6 +174,51 @@ func sanitizeSnippet(s string) string {
 // 的 200 rune 独立收敛，两者职责不同。
 const maxRespBytes = 64 << 10
 
+// credentialParams 是 URL query 里算凭据的参数名（大小写不敏感）。
+// 与 redact 规则 3 的名字集合同口径，另加企微的 `key`。
+var credentialParams = map[string]bool{
+	"key": true, "access_token": true, "access_key": true, "token": true,
+	"secret": true, "sign": true, "password": true, "passwd": true, "pwd": true, "apikey": true,
+}
+
+// credentialValues 取出 rawURL 里凭据参数的值，供 scrubSecrets 用。
+//
+// 直接切 RawQuery 而不用 u.Query()：后者只给**解码后**的值，而 `key=a%20b` 的原始
+// 形态是 `a%20b`、解码形态是 `a b`、再编码形态又是 `a+b` —— 上游回显哪一种都可能，
+// 两种都要收。同时 u.Query() 在畸形参数上会静默丢整段（同 M2 审计 LOW-4 的坑）。
+func credentialValues(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, seg := range strings.Split(u.RawQuery, "&") {
+		name, rawVal, _ := strings.Cut(seg, "=")
+		if !credentialParams[strings.ToLower(name)] || rawVal == "" {
+			continue
+		}
+		out = append(out, rawVal)
+		if dec, err := url.QueryUnescape(rawVal); err == nil && dec != rawVal && dec != "" {
+			out = append(out, dec)
+		}
+	}
+	return out
+}
+
+// scrubSecrets 把文本里出现的凭据值替换成 ***。
+//
+// 为什么需要它（安全审计 M-1）：redact.Text 只覆盖「URL 形状」与固定参数名，
+// 而企微凭据的参数名恰是 `key` —— 规则 3 刻意不收裸 `key=`（会误伤 "primary key="）。
+// 于是网关/WAF/反代只回显 path+query（`/cgi-bin/webhook/send?key=…`，无 scheme://host）
+// 或 `invalid key=…` 这类文本时，key 会经 errmsg 进 error_msg 与 stderr 日志。
+// 值级替换比放宽全局规则窄得多：只动本渠道自己 URL 里的凭据值，零回归。
+func scrubSecrets(s string, secrets []string) string {
+	for _, sec := range secrets {
+		s = strings.ReplaceAll(s, sec, "***")
+	}
+	return s
+}
+
 // respBody 读响应体（最多 64KiB）——上游响应体一律视为不可信（G-31 残余）。
 func respBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, maxRespBytes))
@@ -209,15 +256,19 @@ func dingTalkSignedURL(webhookURL, signSecret string, tsMillis int64) (string, e
 	return u.String(), nil
 }
 
-// dingRespErr 校验钉钉回执：HTTP 2xx 也可能 errcode != 0（310000 加签错误、关键词不匹配、
-// 频率限制）——只看状态码会把「根本没发出去」记成 success，正是 G-33 的原始问题。
-// 回执不可解析一律按失败处理（fail-closed）：钉钉恒返 JSON，拿到非 JSON 说明中间有代理/网关，
-// 此时无法确认送达。
+// errcodeRespErr 校验「{"errcode":N,"errmsg":"…"}」形态的回执（钉钉与企业微信同口径）。
+//
+// HTTP 2xx 也可能 errcode != 0（钉钉 310000 加签错误/关键词不匹配/频率限制；企微 93000
+// 等）——只看状态码会把「根本没发出去」记成 success，正是 G-33 的原始问题。
+// 回执不可解析一律按失败处理（fail-closed）：两家恒返 JSON，拿到非 JSON 说明中间有代理/
+// 网关，此时无法确认送达。
 //
 // errcode **必须存在且为整数**（用 *int 判空）：`{}`、`null`、`{"errmsg":"ok"}` 这类合法
 // JSON 旧版会因零值 0 被判成功——与「无法确认送达即失败」自相矛盾（安全审计 MEDIUM-1、
-// 正确性审计 MEDIUM-1，两路独立命中）。钉钉恒返 errcode，此约束对真实钉钉零影响。
-func dingRespErr(raw string) error {
+// 正确性审计 MEDIUM-1，两路独立命中）。两家恒返 errcode，此约束对真实端点零影响。
+//
+// label 只用于错误文案前缀（"dingtalk"/"wechat"），是静态字面量、不含配置值。
+func errcodeRespErr(raw, label string) error {
 	var r struct {
 		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
@@ -227,15 +278,15 @@ func dingRespErr(raw string) error {
 		// 带偏到「网关改写了响应」（正确性审计 LOW-3）
 		var typeErr *json.UnmarshalTypeError
 		if errors.As(err, &typeErr) {
-			return fmt.Errorf("dingtalk 回执 errcode 类型不是整数: %s", sanitizeSnippet(raw))
+			return fmt.Errorf("%s 回执 errcode 类型不是整数: %s", label, sanitizeSnippet(raw))
 		}
-		return fmt.Errorf("dingtalk 回执不是合法 JSON: %s", sanitizeSnippet(raw))
+		return fmt.Errorf("%s 回执不是合法 JSON: %s", label, sanitizeSnippet(raw))
 	}
 	if r.ErrCode == nil {
-		return fmt.Errorf("dingtalk 回执缺 errcode: %s", sanitizeSnippet(raw))
+		return fmt.Errorf("%s 回执缺 errcode: %s", label, sanitizeSnippet(raw))
 	}
 	if *r.ErrCode != 0 {
-		return fmt.Errorf("dingtalk errcode=%d: %s", *r.ErrCode, sanitizeSnippet(r.ErrMsg))
+		return fmt.Errorf("%s errcode=%d: %s", label, *r.ErrCode, sanitizeSnippet(r.ErrMsg))
 	}
 	return nil
 }
@@ -324,7 +375,64 @@ func (d *DingTalkSender) Send(ctx context.Context, _, content string) error {
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("dingtalk http %d", resp.StatusCode)
 	}
-	return dingRespErr(respBody(resp.Body))
+	return errcodeRespErr(respBody(resp.Body), "dingtalk")
+}
+
+// ==================== WeChat Work Sender ====================
+
+// WeChatSender 企业微信群机器人。
+//
+// 与 WebhookSender 的差别只在 **body 形状**：企微要 `{"msgtype":"text","text":{"content":…}}`，
+// 而通用 webhook 发 `{"content":…}`（G-36 的原始缺陷：键名对齐了也发不出去）。
+// 回执同为 errcode 形态，复用 errcodeRespErr（钉钉/企微同口径）。
+// 配置键是 `url`（webhook key 在 query 里），无签名头——企微群机器人不需要 secret。
+type WeChatSender struct {
+	cfg    channelConfig
+	client *http.Client
+	// secrets 是 cfg.URL 里的凭据值，用于抹掉上游回显（安全审计 M-1）
+	secrets []string
+}
+
+func NewWeChatSender(ch *models.NotificationChannel) (*WeChatSender, error) {
+	cfg, err := parseConfig(ch.Config)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.URL == "" {
+		return nil, errors.New("wechat: url is required")
+	}
+	return &WeChatSender{
+		cfg:     cfg,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		secrets: credentialValues(cfg.URL),
+	}, nil
+}
+
+func (w *WeChatSender) Type() string { return "wechat" }
+
+// Send 发企业微信 text 消息
+func (w *WeChatSender) Send(ctx context.Context, _, content string) error {
+	body, _ := json.Marshal(map[string]any{
+		"msgtype": "text",
+		"text":    map[string]string{"content": content},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.cfg.URL, bytes.NewReader(body))
+	if err != nil {
+		// 不包原 err：url.Parse 的失败文本含完整 URL（webhook key 就在 query 里）
+		return fmt.Errorf("wechat: 无效的 url: %w", urlErrCause(err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.client.Do(req)
+	if err != nil {
+		// G-28：只留 scheme://host + 底层 cause，不带 URL 的 path/query
+		return fmt.Errorf("wechat: POST %s: %w", redact.URL(w.cfg.URL), urlErrCause(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("wechat http %d", resp.StatusCode)
+	}
+	// 先抹凭据再校验：redact.Text 认不出裸 `key=`（见 scrubSecrets 注释）
+	return errcodeRespErr(scrubSecrets(respBody(resp.Body), w.secrets), "wechat")
 }
 
 // ==================== Email Sender ====================
