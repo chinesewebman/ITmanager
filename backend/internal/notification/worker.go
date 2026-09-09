@@ -281,6 +281,10 @@ func (w *Worker) markFailed(ctx context.Context, id uuid.UUID, errMsg string) {
 	// 非法字节让 PostgreSQL 直接拒收（22021）→ 这一行永远停在 pending 被无限重发，
 	// 且 ≤500 rune 时下面的截断分支根本走不到（审计 P4）。
 	errMsg = strings.ToValidUTF8(errMsg, "�")
+	// 控制字符：错误文本来源不止 sender（SMTP 服务端文本、驱动错误、上游响应体），
+	// NUL 让 PG 直接拒收（22021 → 行永远停在 pending 被无限重发）、CR/LF 可把行式
+	// 消费的 error_msg 伪造成多条记录，故在**入库出口**兜一层（安全审计 MEDIUM-1）。
+	errMsg = stripControlChars(errMsg)
 	// 按 rune 截断：列是 varchar(500)（**字符**数，migrations/000009），按字节截断
 	// 会切断多字节字符 → PostgreSQL 拒收（22021）→ 这一行永远停在 pending 被重发。
 	if utf8.RuneCountInString(errMsg) > 500 {

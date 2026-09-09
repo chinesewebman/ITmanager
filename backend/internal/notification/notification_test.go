@@ -468,6 +468,30 @@ func TestMarkFailed_非法UTF8被清理(t *testing.T) {
 	assert.Contains(t, got.ErrorMsg, "smtp: 535")
 }
 
+// TestMarkFailed_控制字符被剥 — 安全审计 MEDIUM-1：错误文本来源不止 sender
+// （SMTP 服务端文本、驱动错误、上游响应体），NUL 让 PG 拒收（22021 → 行永远停在
+// pending 被无限重发），CR/LF 可把行式消费的 error_msg 伪造成多条记录。
+func TestMarkFailed_控制字符被剥(t *testing.T) {
+	db := newSQLiteDB(t)
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour})
+
+	id := uuid.New()
+	require.NoError(t, db.Create(&models.NotificationLog{ID: id, Status: "pending"}).Error)
+
+	w.markFailed(context.Background(), id, "smtp: 535\x00\n[notification worker] forged\rbad")
+
+	var got models.NotificationLog
+	require.NoError(t, db.First(&got, "id = ?", id).Error)
+	require.Equal(t, "failed", got.Status, "UPDATE 必须真的写进去了")
+	assert.NotContains(t, got.ErrorMsg, "\x00", "NUL 不得入库")
+	assert.NotContains(t, got.ErrorMsg, "\n", "换行不得入库（可伪造多条记录）")
+	for _, r := range got.ErrorMsg {
+		require.GreaterOrEqual(t, r, rune(0x20), "不得含控制字符: %q", got.ErrorMsg)
+	}
+	assert.Contains(t, got.ErrorMsg, "smtp: 535")
+	assert.Contains(t, got.ErrorMsg, "[notification worker] forgedbad", "可打印内容保留，只剥控制字符")
+}
+
 // TestURLErrCause_剥壳与兜底 钉住「宁可丢诊断信息也不回传原串」的兜底分支。
 func TestURLErrCause_剥壳与兜底(t *testing.T) {
 	inner := errors.New("dial tcp: refused")

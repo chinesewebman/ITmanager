@@ -140,11 +140,27 @@ func parseConfig(s string) (channelConfig, error) {
 // 不限嵌入错误文本的长度（安全审计 M-3），故读取后再截断。
 const maxRespSnippet = 200
 
+// stripControlChars 剥掉控制字符（含 NUL / CR / LF / DEL）。
+//
+// 口径同 handlers.sanitizeAuditUsername（`r < 0x20 || r == 0x7f`，drop 不替换）：
+// NUL 让 PostgreSQL 直接拒收（22021 → 该行永远停在 pending 被无限重发），
+// CR/LF 可把行式消费的日志与 error_msg 伪造成多条记录（M2 安全审计 MEDIUM-1：
+// 本包新引入「第三方响应体进错误文本」这条通道，配套净化原先只做脱敏/UTF-8/截断）。
+func stripControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // sanitizeSnippet 把不可信文本（第三方响应体 / errmsg）规整成可安全嵌入错误文本的片段：
-// 脱敏 → 清理非法 UTF-8（第三方可能回传非 UTF-8 字节）→ 按 rune 截断（按字节截断会
-// 切断多字节字符，口径同 worker.markFailed）。
+// 去首尾空白 → 剥控制字符 → 脱敏 → 清理非法 UTF-8（第三方可能回传非 UTF-8 字节）→
+// 按 rune 截断（按字节截断会切断多字节字符，口径同 worker.markFailed）。
 func sanitizeSnippet(s string) string {
-	s = redact.Text(strings.TrimSpace(s))
+	s = stripControlChars(strings.TrimSpace(s))
+	s = redact.Text(s)
 	s = strings.ToValidUTF8(s, "�")
 	if utf8.RuneCountInString(s) > maxRespSnippet {
 		s = string([]rune(s)[:maxRespSnippet])
@@ -152,9 +168,14 @@ func sanitizeSnippet(s string) string {
 	return s
 }
 
-// respBody 读响应体（最多 4KiB）——上游响应体一律视为不可信（G-31 残余）。
+// maxRespBytes 回执读取量上界。只挡无限流：4KiB 会切断 JSON，把「真送达」判成
+// 「回执不是合法 JSON」（正确性审计 LOW-2）；嵌入错误文本的长度由 sanitizeSnippet
+// 的 200 rune 独立收敛，两者职责不同。
+const maxRespBytes = 64 << 10
+
+// respBody 读响应体（最多 64KiB）——上游响应体一律视为不可信（G-31 残余）。
 func respBody(r io.Reader) string {
-	b, _ := io.ReadAll(io.LimitReader(r, 4<<10))
+	b, _ := io.ReadAll(io.LimitReader(r, maxRespBytes))
 	return string(b)
 }
 
@@ -176,7 +197,13 @@ func dingTalkSignedURL(webhookURL, signSecret string, tsMillis int64) (string, e
 	ts := strconv.FormatInt(tsMillis, 10)
 	mac := hmac.New(sha256.New, []byte(signSecret))
 	mac.Write([]byte(ts + "\n" + signSecret))
-	q := u.Query()
+	// 显式 ParseQuery 并检查 error：u.Query() 会吞掉畸形 query（`?access_token=%zz`）
+	// 再被 Encode() 重写 → 凭据参数**无声消失**，钉钉只报 310000，排查会误判成签名问题
+	// （正确性审计 LOW-4）。畸形一律 fail-closed。
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", err
+	}
 	q.Set("timestamp", ts)
 	q.Set("sign", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
 	u.RawQuery = q.Encode()
@@ -187,22 +214,38 @@ func dingTalkSignedURL(webhookURL, signSecret string, tsMillis int64) (string, e
 // 频率限制）——只看状态码会把「根本没发出去」记成 success，正是 G-33 的原始问题。
 // 回执不可解析一律按失败处理（fail-closed）：钉钉恒返 JSON，拿到非 JSON 说明中间有代理/网关，
 // 此时无法确认送达。
+//
+// errcode **必须存在且为整数**（用 *int 判空）：`{}`、`null`、`{"errmsg":"ok"}` 这类合法
+// JSON 旧版会因零值 0 被判成功——与「无法确认送达即失败」自相矛盾（安全审计 MEDIUM-1、
+// 正确性审计 MEDIUM-1，两路独立命中）。钉钉恒返 errcode，此约束对真实钉钉零影响。
 func dingRespErr(raw string) error {
 	var r struct {
-		ErrCode int    `json:"errcode"`
+		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
 	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		// errcode 类型不符（字符串/浮点）时 JSON 本身合法，报「不是合法 JSON」会把人
+		// 带偏到「网关改写了响应」（正确性审计 LOW-3）
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			return fmt.Errorf("dingtalk 回执 errcode 类型不是整数: %s", sanitizeSnippet(raw))
+		}
 		return fmt.Errorf("dingtalk 回执不是合法 JSON: %s", sanitizeSnippet(raw))
 	}
-	if r.ErrCode != 0 {
-		return fmt.Errorf("dingtalk errcode=%d: %s", r.ErrCode, sanitizeSnippet(r.ErrMsg))
+	if r.ErrCode == nil {
+		return fmt.Errorf("dingtalk 回执缺 errcode: %s", sanitizeSnippet(raw))
+	}
+	if *r.ErrCode != 0 {
+		return fmt.Errorf("dingtalk errcode=%d: %s", *r.ErrCode, sanitizeSnippet(r.ErrMsg))
 	}
 	return nil
 }
 
 // webhookRespErr 通用 webhook 的 **best-effort** 回执校验：仅当响应体是合法 JSON 且含
 // 数值型 errcode/code 且非 0 时视为失败；其余形状维持「只看 HTTP 状态」——不假定第三方协议。
+//
+// 两个键都看完再决定：先命中就 return 会让 `{"errcode":0,"code":1}` 判成功、而
+// `{"code":0,"errcode":1}` 判失败——同一语义两种结果（正确性审计 LOW-1）。
 func webhookRespErr(raw string) error {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
@@ -220,7 +263,6 @@ func webhookRespErr(raw string) error {
 		if n != 0 {
 			return fmt.Errorf("webhook 回执 %s=%d: %s", k, n, sanitizeSnippet(raw))
 		}
-		return nil
 	}
 	return nil
 }

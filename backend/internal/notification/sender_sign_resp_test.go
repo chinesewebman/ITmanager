@@ -65,6 +65,13 @@ func TestDingTalkSignedURL_签名向量与query形态(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	// 正确性审计 LOW-4：u.Query() 吞掉 ParseQuery 的 error，畸形参数被无声丢弃
+	// （access_token 消失 → 钉钉恒 310000，排查会误判成签名问题）。
+	t.Run("畸形query返错而不是静默丢参", func(t *testing.T) {
+		_, err := dingTalkSignedURL("https://oapi.dingtalk.com/robot/send?access_token=%zz", signVectorSecret, signVectorTS)
+		require.Error(t, err, "畸形 query 必须 fail-closed，不能重写后把凭据参数丢掉")
+	})
+
 	t.Run("base64的加号与等号被percent编码", func(t *testing.T) {
 		got, err := dingTalkSignedURL("https://oapi.dingtalk.com/robot/send", signVectorSecret, signVectorTS)
 		require.NoError(t, err)
@@ -95,7 +102,8 @@ func TestDingTalkSender_加签请求带timestamp与sign(t *testing.T) {
 	assert.Equal(t, "tk", c.token, "原有 query 参数必须保留")
 	tsMillis, err := strconv.ParseInt(c.ts, 10, 64)
 	require.NoError(t, err, "timestamp 必须是毫秒整数")
-	assert.InDelta(t, time.Now().UnixMilli(), tsMillis, 60_000, "timestamp 应是当前毫秒时间戳")
+	// 上界收窄到 10s：60s 会让「取 50 秒前的时间戳」这种变异存活（安全审计 LOW-2）
+	assert.InDelta(t, time.Now().UnixMilli(), tsMillis, 10_000, "timestamp 应是当前毫秒时间戳")
 
 	// 用回执里的 timestamp 独立重算（不依赖测试运行时刻）
 	mac := hmac.New(sha256.New, []byte(signVectorSecret))
@@ -135,6 +143,68 @@ func TestDingTalkSender_回执errcode非0返错(t *testing.T) {
 	require.Error(t, err, "HTTP 200 + errcode!=0 必须算失败（G-33 原始问题：被记成 success）")
 	assert.Contains(t, err.Error(), "errcode=310000")
 	assert.Contains(t, err.Error(), "sign not match")
+}
+
+// 安全审计 MEDIUM-1 / 正确性审计 MEDIUM-1：合法 JSON 但拿不到 errcode 时必须 fail-closed。
+func TestDingTalkSender_回执缺errcode_fail_closed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"空对象", `{}`},
+		{"null", `null`},
+		{"只有errmsg", `{"errmsg":"ok"}`},
+		{"errcode为null", `{"errcode":null,"errmsg":"ok"}`},
+		{"无关键", `{"foo":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			s, err := NewDingTalkSender(&models.NotificationChannel{Config: `{"webhook_url":"` + srv.URL + `"}`}) //nolint:exhaustruct
+			require.NoError(t, err)
+
+			err = s.Send(context.Background(), "", "x")
+			require.Error(t, err, "拿不到 errcode 就无法确认送达（钉钉恒返它）→ 不能记 success")
+			assert.Contains(t, err.Error(), "缺 errcode")
+		})
+	}
+}
+
+// 正确性审计 LOW-3：字符串/浮点 errcode 是**合法 JSON**，旧版报「不是合法 JSON」会误导排障。
+func TestDingTalkSender_errcode类型错误报专用文案(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"errcode":"310000","errmsg":"sign not match"}`))
+	}))
+	defer srv.Close()
+
+	s, err := NewDingTalkSender(&models.NotificationChannel{Config: `{"webhook_url":"` + srv.URL + `"}`}) //nolint:exhaustruct
+	require.NoError(t, err)
+
+	err = s.Send(context.Background(), "", "x")
+	require.Error(t, err, "非整数 errcode 仍须 fail-closed")
+	assert.Contains(t, err.Error(), "errcode 类型不是整数")
+	assert.NotContains(t, err.Error(), "不是合法 JSON", "它其实是合法 JSON，别把排障带偏")
+}
+
+// 正确性审计 LOW-6：这条分支（带 sign_secret 且 URL 非法）此前零覆盖，且是
+// urlErrCause 的脱敏出口之一——错误文本不得含 URL 原串。
+func TestDingTalkSender_加签时URL非法不泄漏原串(t *testing.T) {
+	s, err := NewDingTalkSender(&models.NotificationChannel{ //nolint:exhaustruct
+		Config: `{"webhook_url":"http://[::1/SECRETPATH?token=SECRETQUERY","sign_secret":"` + signVectorSecret + `"}`,
+	})
+	require.NoError(t, err, "构造器只做必填校验，不解析 URL")
+
+	err = s.Send(context.Background(), "", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "无效的 webhook_url")
+	assert.NotContains(t, err.Error(), "SECRETPATH")
+	assert.NotContains(t, err.Error(), "SECRETQUERY")
+	assert.NotContains(t, err.Error(), signVectorSecret)
 }
 
 func TestDingTalkSender_回执非JSON_fail_closed(t *testing.T) {
@@ -188,6 +258,11 @@ func TestWebhookRespErr_best_effort(t *testing.T) {
 		{"code是字符串", `{"code":"40001"}`, false},
 		{"无errcode无code", `{"success":false}`, false},
 		{"空体", ``, false},
+		// 正确性审计 LOW-1：两个键都要看，先命中就 return 会漏掉后一个
+		{"errcode0但code非0", `{"errcode":0,"code":1}`, true},
+		{"code0但errcode非0", `{"code":0,"errcode":1}`, true},
+		{"两个都为0", `{"errcode":0,"code":0}`, false},
+		{"errcode负数", `{"errcode":-1}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := webhookRespErr(tc.body)
@@ -232,9 +307,24 @@ func TestSanitizeSnippet_按rune截断与脱敏(t *testing.T) {
 		got := sanitizeSnippet("bad\xff\xfe tail")
 		assert.True(t, utf8.ValidString(got))
 	})
+
+	// 安全审计 MEDIUM-1：NUL 会让 PG 拒收（22021 → 行永远 pending 被无限重发），
+	// CR/LF 可把行式消费的日志/error_msg 伪造成多条记录。
+	t.Run("控制字符被剥", func(t *testing.T) {
+		got := sanitizeSnippet("a\x00b\nc\rd\x7f e")
+		assert.Equal(t, "abcd e", got, "剥控制字符，可打印内容保留（口径同 sanitizeAuditUsername）")
+		for _, r := range got {
+			require.GreaterOrEqual(t, r, rune(0x20), "不得含控制字符: %q", got)
+		}
+	})
 }
 
-func TestRespBody_限读4KiB(t *testing.T) {
-	got := respBody(strings.NewReader(strings.Repeat("a", 10000)))
-	assert.Len(t, got, 4<<10, "LimitReader 只限读取量（回执文本进错误前还要再过 sanitizeSnippet）")
+func TestRespBody_限读64KiB(t *testing.T) {
+	got := respBody(strings.NewReader(strings.Repeat("a", 100_000)))
+	assert.Len(t, got, 64<<10, "LimitReader 只限读取量（嵌入错误文本的长度由 sanitizeSnippet 收敛）")
+
+	// 正确性审计 LOW-2：4KiB 会切断 JSON → 真送达被判「不是合法 JSON」。
+	// 用一条 >4KiB 的合法成功回执钉住（旧上界下这条必然红）。
+	big := `{"errcode":0,"errmsg":"` + strings.Repeat("x", 5<<10) + `"}`
+	assert.NoError(t, dingRespErr(respBody(strings.NewReader(big))), ">4KiB 的合法回执不得被截断成非法 JSON")
 }

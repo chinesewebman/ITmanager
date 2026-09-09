@@ -1,8 +1,8 @@
 # 测试现状报告
 
-**最后更新**: 2026-09-09（本次只增量更新本节与下方「通知渠道配置契约轮」的 rev5 数字；其余章节仍是 2026-06-16 快照）
+**最后更新**: 2026-09-09（本次只增量更新本节与下方「通知渠道配置契约轮」的 rev6 数字；其余章节仍是 2026-06-16 快照）
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
-**状态**: ✅ 981 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 174 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
+**状态**: ✅ 986 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 174 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
 
 ---
 
@@ -18,6 +18,19 @@
 | 新增残余 | **R-12**（webhook best-effort 会把 `{"code":200}` 判失败）、**R-13**（钉钉回执非 JSON 走 fail-closed，网关改写响应体会误判）——见 `docs/FIX-PLAN-NOTIFY-CHANNEL.md` §5 |
 
 > 验证口径：`go test ./... -count=1` 27 包全绿、`go vet` / `gofmt -l` 干净；frontend 本轮未改（27 文件 174 测试）。
+
+### 续：M2 两路审计处置（rev6）
+
+| 维度 | 数值 / 说明 |
+|---|---|
+| Backend 测试函数 | **986**（+5：钉钉回执缺 `errcode` 5 例表驱动、`errcode` 类型错专用文案、加签时 URL 非法不泄漏、`markFailed` 控制字符、`respBody` 限读改 64KiB + >4KiB 合法回执） |
+| 两路独立命中 | 安全 / 正确性两个只读子代理**各自独立**报出同一个 MEDIUM：`dingRespErr` 对「合法 JSON 但无 `errcode`」判成功（`{}`/`null`/`{"errmsg":"ok"}`）→ `ErrCode *int` + 缺键返错 |
+| 控制字符 | 新增 `stripControlChars`（口径同 `handlers.sanitizeAuditUsername`），`sanitizeSnippet` + `worker.markFailed`（入库出口）双接：NUL → PG 22021 拒收 → 行永远 pending 无限重发；CR/LF → 行式消费的日志/error_msg 可被伪造 |
+| 覆盖 | `stripControlChars`/`sanitizeSnippet`/`respBody`/`dingTalkSignedURL`/`dingRespErr`/`webhookRespErr`/`markFailed`/`DingTalkSender.Send` **100%** |
+| 变异反证 | **M7-1..M7-9 九条全红在断言上**（缺 errcode 判成功、类型错文案、webhook 先命中就 return、两处不剥控制字符、限读退回 4KiB、加签退回 `u.Query()`、时间戳取 50s 前、加签分支不剥 `url.Error`）；逐条确认非编译失败 |
+| 新增残余 | **R-14**（>64KiB 回执仍截断）、**R-15**（`Send` 需等 body 读完）；`customSenders` 无同步（既有）→ **G-38** |
+
+> 验证口径：`go test ./... -count=1` 27 包全绿 + `-race ./internal/notification/...` 绿、`go vet` / `gofmt -l` 干净；frontend 本轮未改（27 文件 174 测试）。
 
 ---
 

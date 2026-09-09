@@ -1,10 +1,11 @@
 # FIX-PLAN-NOTIFY-CHANNEL：通知渠道「配置契约」错位 + 钉钉加签缺失 + 业务失败被当成功（TODO G-33）
 
-- **状态**：rev5 — M1 已实现并过三路审计收口（§7.2/§7.3）；**M2（钉钉加签 + 回执校验）已实现**，见 §7.4。当前 **981 backend 测试函数 / 174 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a/V-18..V-22 + M2-1..M2-8 共十九条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4
+- **状态**：rev6 — M1 已实现并过三路审计收口（§7.2/§7.3）；**M2（钉钉加签 + 回执校验）已实现并过两路审计收口**，见 §7.4（交付）与 §7.5（审计处置）。当前 **986 backend 测试函数 / 174 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a/V-18..V-22 + M2-1..M2-8 + M7-1..M7-9 共二十八条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4
 - **关联**：G-33（seed 企微键名 / 钉钉 `SignSecret` 未生效）、G-28（错误文本脱敏）、G-31（回显点残余）、G-36（企微 sender）、G-37（OpenAPI 渠道路径漂移）
 - **发现路径**：G-28 第三轮审计后盘点「配置 → Sender」链路时发现
 - **rev2 变更**：见 §7 处置表。阻塞项 2 个（B-1 表单端口类型、B-2 变异设计错误）、HIGH 5 个（H-1 脱敏点、H-2 `Update` fail-open、H-3 既有测试、H-4 seed 邮件行、H-5 400 文案）全部落入 §2/§3/§4。
 - **rev3 变更**：实现后三路只读审计（安全 / 正确性 / 测试有效性）回执，处置见 §7.2。两个审计独立命中同一个 HIGH（`Update` 键名绕过，真 PG 实测 HTTP 200 落库），另有前端 Modal 串记录（H-2）、契约只钉必填键（M-2）、400 body 回显 Type 的非 URL 形态（安全 M-1）等；本 rev 的代码/测试改动即 §7.2 的处置结果。
+- **rev6 变更**：M2 交付后的**两路只读审计**（安全 / 正确性，各自独立设计变异）回执处置见 §7.5。两路**独立命中同一个 MEDIUM**——`dingRespErr` 对「合法 JSON 但无 `errcode`」（`{}`/`null`/`{"errmsg":"ok"}`）判成功，与「无法确认送达即失败」自相矛盾；另修 `sanitizeSnippet`/`markFailed` 的控制字符（NUL 让 PG 22021 拒收 → 行永远 pending 无限重发）、webhook 回执「先命中就 return」、回执限读 4KiB 截断合法 JSON、`errcode` 类型错报成「不是合法 JSON」、`u.Query()` 静默丢畸形 query 参数，并把 `InDelta` 从 60s 收窄到 10s。新增残余 R-14/R-15。
 - **rev5 变更**：M2 交付（§7.4）。钉钉加签按消歧义公式实现并用**独立实现算得的签名向量**钉住（key/msg 写反 → 恒定 310000 的失败形态被 M2-1 变异覆盖）；钉钉回执 `errcode != 0` 与「回执非 JSON」都算失败（fail-closed）；通用 webhook 做 best-effort `errcode`/`code` 校验（不认识形状时维持只看 HTTP 状态）；回执文本限读 4KiB + 脱敏 + 按 rune 截到 200。新增残余 R-12/R-13。
 - **rev4 变更**：第三路（测试有效性）审计回执的处置见 §7.3。核心结论：**代码无新缺陷，缺的是测试承重力**——seed 钉钉行 `sign_secret` 改名无测试钉住（H-1）、前端 `is_enabled` 保留逻辑与 wechat 禁用项、兜底样本键名、`touched` 跳过语义均存在「变异存活」；本轮逐条补断言并重跑变异（V-18..V-22）。M-2/M-3 两条存活判为结构性、明确接受（见 §7.3）。
 
@@ -290,7 +291,9 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 - **R-10（键白名单的兼容性）**：`Update` 现在对白名单外的键返 400（此前是静默更新或 500）。已知调用方（前端 `Settings.tsx`、`handleToggleChannel`）只发 `name/type/config/is_enabled`；若第三方依赖改 `id`/`created_at`，那本来就该拦（会造出悬空外键，本仓库无外键约束）。无证据表明存在此类调用方。
 - **R-11（`Update` 仍是读-校验-写）**：rev3 让「写入值 == 校验值」，但两个并发请求仍可能互相覆盖（last-writer-wins）。彻底消除需要事务 + 行锁（`clause.Locking{Strength:"UPDATE"}`，PG 限定）。当前渠道更新是低频管理操作，接受该窗口；若将来渠道配置改由自动化高频写入，再上事务。
 - **R-12（best-effort 回执校验可能误判既有 webhook）**：通用 webhook 现在把 `{"code":200}` / `{"errcode":200}` 这类「非 0 但其实是成功」的形状判为失败——那是第三方协议里真实存在的写法。失败模式：某条今天能用的 webhook 在 M2 上线后开始被记成 `failed`（并触发重发）。缓解：① 只对**合法 JSON 且含数值型 `errcode`/`code`** 判定，纯文本（Slack 的 `ok`）、`{"success":true}`、字符串型 code 一律放行；② 失败文案带原始回执片段，`notification_logs.error_msg` 里一眼能看出是误判；③ 钉钉走严格路径（钉钉协议固定 `errcode`），不受此风险影响。若线上出现误判，处置是「该渠道改用钉钉/邮件」或后续给 webhook 加开关（不在本轮）。
-- **R-13（钉钉回执非 JSON 的 fail-closed 边界）**：钉钉链路把「2xx 但回执不可解析」判为失败。失败模式：运维在钉钉机器人前挂了一层网关，网关对成功请求返回 200 + 空体/HTML（如 204 改写）→ 消息其实到了群里，但被记成 `failed` 并重发（重复告警）。缓解：钉钉官方 webhook 恒返 JSON；若确有此形态，属网关改造问题，应让网关透传上游回执。文档在此显式登记，不做「空体也算成功」的妥协——那会把真正丢消息的情况也吞掉。
+- **R-13（钉钉回执不可用的 fail-closed 边界）**：钉钉链路把「2xx 但回执**不是合法 JSON**、或**缺 `errcode`**（`{}`/`null`/`{"errmsg":"ok"}`）」一律判为失败（rev6 收紧，原先只挡「非 JSON」，见 §7.5 MED-1）。失败模式：运维在钉钉机器人前挂了一层网关，网关对成功请求返回 200 + 空体/HTML（如 204 改写）→ 消息其实到了群里，但被记成 `failed` 并重发（重复告警）。缓解：钉钉官方 webhook 恒返 `{"errcode":N,…}`；若确有此形态，属网关改造问题，应让网关透传上游回执。文档在此显式登记，不做「空体也算成功」的妥协——那会把真正丢消息的情况也吞掉。
+- **R-14（>64KiB 回执仍被截断）**：`respBody` 的读取上界 rev6 由 4KiB 提到 64KiB（修「截断合法 JSON → 真送达判失败」），但上界仍然存在。失败模式：回执超过 64KiB（网关包装了整个请求上下文）时截断 → 钉钉侧「合法回执」变「不是合法 JSON」判 failed 并重发，webhook 侧反之吞掉一个本该报的错。缓解：钉钉/企微回执都是几百字节量级；截断阈值有注释说明职责（只挡无限流）。若真遇到，处置是让网关透传而非再抬上界。
+- **R-15（`Send` 现在要等响应体读完）**：M2 之前 2xx 后立即返回；现在要读到 64KiB 或 EOF 才能校验回执。失败模式：对端发完 200 头后挂住不写 body → `Send` 阻塞到 `http.Client.Timeout`（10s），worker 侧 30s ctx 先到则由 ctx 兜底。缓解：有界、且 worker 是串行批处理 + 每渠道独立 ctx；已实测（正确性审计 LOW-5）400ms ctx 下按 ctx 返回。
 
 ## 6. 分期与状态
 
@@ -394,7 +397,7 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 验证与反证：
 
 - 新增 `sender_sign_resp_test.go`（10 个测试函数）：V-23 签名向量（**独立实现**算得 `w3RMHXzixTMdzr8OHJUmVLS4IoPJVdu+Ut1LE48MePE=`，并断言 ≠ key/msg 写反的 `g422EgUWUUtq1vqcbsWy00w6OM8jnLYKr0K4GIfygTQ=`）、V-24 端到端加签/不加签、V-25 钉钉回执三态、V-26 webhook 9 例表驱动、V-27 文本卫生。
-- 覆盖：`sanitizeSnippet`/`respBody`/`dingRespErr`/`webhookRespErr`/`dingTalkSignedURL` **100%**，`DingTalkSender.Send` 94.7%（未覆盖为 `NewRequestWithContext` 出错分支，既有用例已覆盖同类路径）。
+- 覆盖：`sanitizeSnippet`/`respBody`/`dingRespErr`/`webhookRespErr`/`dingTalkSignedURL` **100%**，`DingTalkSender.Send` 94.7%。（**rev6 更正归因**：未覆盖块实为 `sender.go:266-268`——带 `sign_secret` 且 URL 非法时 `urlErrCause` 的脱敏出口，不是这里原先写的 `NewRequestWithContext` 分支；已由 `TestDingTalkSender_加签时URL非法不泄漏原串` 覆盖，正确性审计 LOW-6。）
 - **变异 8/8 红在断言上**（`/tmp/mutate5.py`）：
 
 | # | 变异 | 红在哪 |
@@ -411,3 +414,42 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 **一条方法学记录**：M2-7 第一次写成直接 `s[:maxRespSnippet]`，结果 `unicode/utf8` 变成未使用 import → **红在编译上**，按 T-31 的规矩改成可编译变异（保留 `_ = utf8.RuneCountInString(s)`）后才红在断言上（`expected 200 / actual 68`）。脚本已加「红在编译上」的显式告警，避免把编译失败当成反证成立。
 
 全量：backend **27 包全绿 / 981 测试函数**（+10）/ `gofmt`+`go vet` 干净；frontend 未改（27 文件 174 测试）。
+
+### 7.5 M2 两路只读审计处置（rev5 → rev6）
+
+审计方式：安全 / 正确性两路各起独立只读子代理（仓库 `cp -a` 到 `/tmp` 副本跑测试与变异，原仓库零写入），各自**独立设计变异**（安全 7 条 + 正确性 MU1–MU16 条），并对照钉钉官方文档与独立 Python 实现复核签名公式。两路**独立命中同一个 MEDIUM**，无 HIGH/阻塞项。
+
+| # | 路 | 严重度 | 发现 | 处置 |
+|---|---|---|---|---|
+| MED-1 | 安全 + 正确性（**独立命中**） | MEDIUM | `dingRespErr` 对「合法 JSON 但无 `errcode`」判成功：`{}`、`null`、`{"errmsg":"ok"}`、`{"errcode":null}` 的零值 0 被当成 `errcode=0` → 与「无法确认送达即失败」自相矛盾；网关/代理把空响应序列化成 `null` 时消息没进群却记 success 且不再重发 | `ErrCode` 改 `*int`，**缺键/null 一律返错**（`缺 errcode: …`）。钉钉恒返 errcode，对真实钉钉零影响；新增 5 例表驱动用例 |
+| MED-2 | 安全 | MEDIUM | `sanitizeSnippet` 只做「脱敏/UTF-8/截断」，**保留控制字符**：NUL 进 `notification_logs.error_msg` → PG 22021 拒收 → 行永远 pending 被无限重发；CR/LF 可把行式消费的日志/error_msg 伪造成多条记录 | 新增 `stripControlChars`（口径同 `handlers.sanitizeAuditUsername`：`r < 0x20 \|\| r == 0x7f`，drop）；`sanitizeSnippet` 与 `worker.markFailed`（**入库出口**，覆盖 SMTP/驱动等非 sender 来源）都接上 |
+| LOW-1 | 正确性 | LOW | `webhookRespErr` 先命中就 `return`：`{"errcode":0,"code":1}` 判成功、`{"code":0,"errcode":1}` 判失败——同义两种结果；键序分支零覆盖（变异存活） | 两个键都看完再决定；表驱动补 4 例（含负值） |
+| LOW-2 | 正确性 | LOW | `respBody` 限读 4KiB 按字节截断 → 合法 JSON 被切断：钉钉侧「真送达」判失败、webhook 侧「真失败」判成功 | 上界提到 64KiB；用例用 >4KiB 的合法成功回执钉住；残余登记 R-14 |
+| LOW-3 | 正确性 | LOW | 字符串/浮点 `errcode`（合法 JSON）被报成「不是合法 JSON」，把排障带偏到「网关改写了响应」 | `errors.As(*json.UnmarshalTypeError)` → 专用文案「errcode 类型不是整数」，行为仍 fail-closed |
+| LOW-4 | 正确性 | LOW | `dingTalkSignedURL` 用 `u.Query()` 吞掉 `ParseQuery` 的 error 再 `Encode()` 重写 → `?access_token=%zz` 这类畸形参数**无声消失**（M2 新引入的往返），钉钉只报 310000，会误判成签名问题 | 显式 `url.ParseQuery` + 检查 error，畸形 fail-closed；用例断言返错而非丢参 |
+| LOW-5 | 正确性 | LOW | `Send` 现在要等响应体读完（最多 `Client.Timeout` 10s），是 M2 引入的行为变化 | 不改代码（有界 + worker 侧 30s ctx 兜底）；登记 R-15 |
+| LOW-6 | 正确性 | LOW | §7.4 把 `Send` 唯一未覆盖分支认错（实为 `sender.go:266-268` 加签分支的 `urlErrCause` 出口，且零测试） | 文档归因更正；补 `TestDingTalkSender_加签时URL非法不泄漏原串`（同时覆盖该脱敏出口） |
+| LOW-7 | 安全 | LOW | `InDelta(…, 60_000)` 过宽：把时间戳改成 50 秒前仍存活 | 收窄到 10s（`M7-8` 证明其承重） |
+| INFO | 安全 | — | `customSenders`（`sender.go:93-96`）是**既有**无同步的包级 map（本提交未引入，生产无写入者，仅测试用） | 不在本轮动；登记 TODO **G-38** |
+
+**未采纳**（明确记录，避免下一轮重复讨论）：
+
+- **`redact.Text` 对「裸」凭据无效**（`secret is SECtest123` 原样输出）：属形状识别的固有边界，已在 G-34/G-35 登记，不在本轮扩大改动。
+- **负值 `errcode`/`code` 放行**（变异 `!= 0 → > 0` 存活）：无测试覆盖但钉钉/常见 webhook 不返负值；本轮**顺手补了一条负值用例**（`{"errcode":-1}` → 失败），语义不变。
+- **`sanitizeSnippet` 去掉 `TrimSpace` 存活**：纯外观缺口，无断言价值。
+
+**变异反证 9/9 红在断言上**（`/tmp/mutate7.py`，逐条确认非编译失败）：
+
+| # | 变异 | 红在哪 |
+|---|---|---|
+| M7-1 | 缺 `errcode` 判成功（恢复 `r.ErrCode != nil && *r.ErrCode != 0`） | `回执缺errcode_fail_closed` 5 例子用例 |
+| M7-2 | 删掉 `UnmarshalTypeError` 专用文案 | `errcode类型错误报专用文案` |
+| M7-3 | webhook 回执先命中就 return | `{"errcode":0,"code":1}` 用例 |
+| M7-4 | `sanitizeSnippet` 不剥控制字符 | `控制字符被剥` 子用例（`Not equal`） |
+| M7-5 | `markFailed` 不剥控制字符 | `TestMarkFailed_控制字符被剥`（`should not contain "\x00"`） |
+| M7-6 | 限读退回 4KiB | `TestRespBody_限读64KiB` 两条断言 |
+| M7-7 | 加签退回 `u.Query()` | `畸形query返错而不是静默丢参` |
+| M7-8 | 时间戳取 50 秒前 | `Max difference … allowed is 10000, but difference was 50001` |
+| M7-9 | 加签分支错误文本不剥 `url.Error` | `加签时URL非法不泄漏原串`（原文含 `SECRETPATH`） |
+
+全量：backend **27 包全绿 / 986 测试函数**（+5）/ `-race` 绿 / `gofmt`+`go vet` 干净；`stripControlChars`/`sanitizeSnippet`/`respBody`/`dingTalkSignedURL`/`dingRespErr`/`webhookRespErr`/`markFailed`/`DingTalkSender.Send` 覆盖 **100%**；frontend 未改（27 文件 174 测试）。
