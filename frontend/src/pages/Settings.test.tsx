@@ -253,6 +253,53 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     return within(nameInput.closest(".ant-modal") as HTMLElement);
   }
 
+  // M6：required 无 message → 统一「请输入/请选择 XXX」（本文件 10 处）。
+  // 无 message 时 antd 默认英文「${label} is required」，语气不一致。
+  it("M6：渠道表单顶层必填项带中文提示", async () => {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    // 不填名称/类型直接保存 → 触发校验
+    const modal = (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement;
+    fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
+
+    expect(await within(modal).findByText("请输入渠道名称")).toBeInTheDocument();
+    expect(within(modal).getByText("请选择渠道类型")).toBeInTheDocument();
+  });
+
+  it("M6：email 渠道条件字段带中文提示", async () => {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    fireEvent.mouseDown(await screen.findByLabelText("渠道类型"));
+    fireEvent.click(await screen.findByTitle("邮件"));
+
+    const modal = (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement;
+    fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
+
+    expect(await within(modal).findByText("请输入SMTP服务器")).toBeInTheDocument();
+    expect(within(modal).getByText("请输入端口")).toBeInTheDocument();
+    expect(within(modal).getByText("请输入用户名")).toBeInTheDocument();
+    expect(within(modal).getByText("请输入发件人")).toBeInTheDocument();
+    expect(within(modal).getByText("请输入收件人")).toBeInTheDocument();
+  });
+
+  it("M6：dingtalk 渠道 Webhook URL 带中文提示", async () => {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    fireEvent.mouseDown(await screen.findByLabelText("渠道类型"));
+    fireEvent.click(await screen.findByTitle("钉钉"));
+
+    const modal = (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement;
+    fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
+
+    expect(await within(modal).findByText("请输入Webhook URL")).toBeInTheDocument();
+  });
+
   function savedConfig(): any {
     const payload: any = vi.mocked(notificationApi.createChannel).mock.calls[0][0];
     return { type: payload.type, config: JSON.parse(payload.config) };

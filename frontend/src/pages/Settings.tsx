@@ -785,10 +785,10 @@ function Settings() {
                   : {}
               }
             >
-              <Form.Item name="name" label="渠道名称" rules={[{ required: true }]}>
+              <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
                 <Input />
               </Form.Item>
-              <Form.Item name="type" label="渠道类型" rules={[{ required: true }]}>
+              <Form.Item name="type" label="渠道类型" rules={[{ required: true, message: '请选择渠道类型' }]}>
                 <Select
                   options={[
                     { label: '邮件', value: 'email' },
@@ -807,24 +807,24 @@ function Settings() {
                   if (type === 'email') {
                     return (
                       <>
-                        <Form.Item name={['config', 'smtp_host']} label="SMTP服务器" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'smtp_host']} label="SMTP服务器" rules={[{ required: true, message: '请输入SMTP服务器' }]}>
                           <Input />
                         </Form.Item>
-                        <Form.Item name={['config', 'smtp_port']} label="端口" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'smtp_port']} label="端口" rules={[{ required: true, message: '请输入端口' }]}>
                           {/* 必须用 InputNumber：<Input type="number"> 的 value 是字符串，
                               后端 channelConfig.SMTPPort 是 int → 反序列化失败（G-33 B-1） */}
                           <InputNumber style={{ width: '100%' }} />
                         </Form.Item>
-                        <Form.Item name={['config', 'smtp_user']} label="用户名" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'smtp_user']} label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
                           <Input />
                         </Form.Item>
                         <Form.Item name={['config', 'smtp_password']} label="密码">
                           <Input.Password />
                         </Form.Item>
-                        <Form.Item name={['config', 'from']} label="发件人" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'from']} label="发件人" rules={[{ required: true, message: '请输入发件人' }]}>
                           <Input placeholder="nmp@example.com" />
                         </Form.Item>
-                        <Form.Item name={['config', 'to']} label="收件人" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'to']} label="收件人" rules={[{ required: true, message: '请输入收件人' }]}>
                           <Select mode="tags" placeholder="输入邮箱后回车，可多个" tokenSeparators={[',', ' ']} />
                         </Form.Item>
                       </>
@@ -833,7 +833,7 @@ function Settings() {
                   if (type === 'dingtalk') {
                     return (
                       <>
-                        <Form.Item name={['config', 'webhook_url']} label="Webhook URL" rules={[{ required: true }]}>
+                        <Form.Item name={['config', 'webhook_url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
                           <Input />
                         </Form.Item>
                         <Form.Item name={['config', 'sign_secret']} label="加签密钥（可选）">
@@ -846,14 +846,14 @@ function Settings() {
                     // 只渲染 url：WeChatSender 的配置键是 url（群机器人 key 在 query 里），
                     // 它**忽略** secret —— 这里给 secret 输入框等于制造"配了不生效"的死键。
                     return (
-                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true }]}>
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
                         <Input placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" />
                       </Form.Item>
                     )
                   }
                   return (
                     <>
-                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true }]}>
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
                         <Input />
                       </Form.Item>
                       <Form.Item name={['config', 'secret']} label="签名密钥（可选）">
