@@ -58,6 +58,13 @@ beforeEach(() => {
 })
 
 describe('Topology', () => {
+  // M1：标题体系统一——Topology 原无可见标题（仅 useDocumentTitle 改浏览器标题），
+  // 用户进来不知道这是网络拓扑页。补 PageHeader title（h4）。
+  it('M1：页面标题统一到 PageHeader（h4「网络拓扑」）', () => {
+    renderPage()
+    expect(screen.getByRole('heading', { level: 4, name: '网络拓扑' })).toBeInTheDocument()
+  })
+
   it('渲染统计卡片 + 标题', () => {
     renderPage()
     expect(screen.getByText('网络拓扑图')).toBeInTheDocument()

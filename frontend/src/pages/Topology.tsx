@@ -12,6 +12,7 @@ import { useApiQuery } from '../hooks/useApiQuery'
 import api from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
+import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -102,6 +103,8 @@ export function Topology() {
 
   return (
     <div>
+      {/* M1：标题体系统一——原无可见标题（仅 useDocumentTitle），筛选开关悬空 */}
+      <PageHeader title="网络拓扑" />
       <Space style={{ marginBottom: 16 }}>
         <Text>仅显示告警节点：</Text>
         <Switch checked={onlyWithAlerts} onChange={setOnlyWithAlerts} />
