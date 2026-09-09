@@ -169,7 +169,7 @@ formatRelativeTime(iso?: string | null): string   // '3 分钟前'，空/非法 
 | H10 | HIGH | Ping/Traceroute 失败时诊断弹窗全白 | `Assets.tsx:352-370`（catch 空实现 `:102-104`） | 加 `diagError` 状态（放 `Assets` 组件层，不放 `destroyOnHidden` 的 Modal 内）+ 弹窗内 `Alert` + 重试 |
 | M4 | MED | 提交按钮无 loading → 连点重复创建 | `AlertSuppressions.tsx:160,194`、`Oncall.tsx:103,156`、`Runbook.tsx:180`、`Settings.tsx:741` | 加 `submitting` state + `confirmLoading`（范本 `AssetFormModal.tsx:64`）；`finally` 复位 |
 | M5 | MED | 危险操作确认质量不一致 | `AlertSuppressions.tsx:145`、`Runbook.tsx:167`、`Oncall.tsx:101,154` | 统一 `title` 带对象名 + `okText="删除"` + `okButtonProps={{danger:true}}` |
-| M6 | MED | 14 处 `required` 无 `message`，提示语气不一致 | `Settings.tsx:772,775,794,797,802,808,811,820,833,840`、`Oncall.tsx:105,158`、`TicketFormModal.tsx:56`、`AssetFormModal.tsx:100` | 统一句式「请输入/请选择 XXX」 |
+| M6 | MED | 14 处 `required` 无 `message`，提示语气不一致 | `Settings.tsx:772,775,794,797,802,808,811,820,833,840`、`Oncall.tsx:105,158`、`TicketFormModal.tsx:56`、`AssetFormModal.tsx:100` | 统一句式「请输入/请选择 XXX」。**实现时发现 2 处豁免**：`TicketFormModal.tsx:56` priority、`AssetFormModal.tsx:100` status 均默认值预填（`'normal'`/`'active'`）且 Select 无 `allowClear`，`required` 校验永不触发（死代码），加 message 属「为不可能状态写代码」且变异反证无法做 → 不改，M6 实际收口 12 处 |
 | M9 | MED | 搜索占位符承诺搜「资产标签/SN」，实际只搜 name/ip | `AssetFilterBar.tsx:25` / `Assets.tsx:162-165` | ✅ 已改「搜索名称 / IP」（`Asset` 类型里没有 `asset_tag`/`sn`，补搜索属扩功能） |
 | M10 | MED | 副标题计数用未过滤总数，与表格行数不符 | `Assets.tsx:238`、`Tickets.tsx:64` | ✅ Assets 已改 `filtered.length` +「（已筛选）」；`Tickets.tsx:64` 待随 Tickets 页处理 |
 
@@ -306,6 +306,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev19 | 2026-09-10 | **W4-M5（第 3 步 Oncall）完成，M5 全部 4 处收口**：值班组（`SchedulesTab`）+ 升级策略（`PoliciesTab`）两处 Popconfirm `title="删除？"`（无对象名、无 danger）→ 四件套 `title={`确认删除值班组/升级策略「${r.name}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。2 用例绿（两处确认框 title 带对象名 + `ant-btn-dangerous` + 确认后 DELETE `/oncall/schedules/s1`、`/oncall/policies/p1`），变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处完成（AlertSuppressions/Runbook/Oncall×2）** |
 | rev20 | 2026-09-10 | **W4-M6（第 1 步 Settings）完成**：渠道 Modal 10 处 `required: true` 无 message（antd 默认英文「${label} is required」语气不一致）→ 统一句式：name「请输入渠道名称」、type「请选择渠道类型」、smtp_host/port/user/from「请输入SMTP服务器/端口/用户名/发件人」、to「请输入收件人」、dingtalk/wechat/webhook 的 url「请输入Webhook URL」。3 用例绿（顶层不填保存断言 name+type 中文提示；email 条件字段 5 处；dingtalk URL），变异（去 smtp_host message）红在「找不到『请输入SMTP服务器』」断言。M6 剩 Oncall 2 处 + TicketFormModal 1 处 + AssetFormModal 1 处待续 |
 | rev21 | 2026-09-10 | **W4-M6（第 2 步 Oncall）完成**：值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个「名称」`required: true` 无 message → `message: '请输入名称'`。2 用例绿（两处不填名称保存断言「请输入名称」），变异（去值班组名称 message）红在「找不到『请输入名称』」断言。M6 剩 TicketFormModal 1 处 + AssetFormModal 1 处待续 |
+| rev22 | 2026-09-10 | **W4-M6 收口（12 处完成 + 2 处豁免）**：TicketFormModal.tsx:56 priority、AssetFormModal.tsx:100 status 两处 `required` 有默认值预填（`'normal'`/`'active'`）且 Select 无 `allowClear`，校验永不触发（死代码）→ 不加 message，豁免（违反「不为不可能状态写代码」且变异反证无法做）。§4.1 M6 描述与 §8 台账同步记录豁免理由。**M6 全部完成：Settings 10 + Oncall 2 已改，2 处豁免**。W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6） |
 
 ---
 
@@ -348,14 +349,14 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M5 危险操作确认 · Oncall.tsx（2 处） | ✅ 完成 | 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两处 Popconfirm 四件套（title 带 `r.name` + `okButtonProps danger`）；2 用例绿，变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处收口** |
 | W4-M6 required 无 message · Settings.tsx（10 处） | ✅ 完成 | 渠道 Modal name/type/smtp_host/smtp_port/smtp_user/from/to/dingtalk-url/wechat-url/webhook-url 统一「请输入/请选择 XXX」；3 用例绿，变异（去 smtp_host message）红在「请输入SMTP服务器」断言 |
 | W4-M6 required 无 message · Oncall.tsx（2 处） | ✅ 完成 | 值班组 + 升级策略「名称」→ `message: '请输入名称'`；2 用例绿，变异（去值班组名称 message）红在「请输入名称」断言 |
-| W4-M6 required 无 message · TicketFormModal/AssetFormModal（2 处） | ⬜ 未开始 | TicketFormModal.tsx:56「优先级」、AssetFormModal.tsx:100「状态」统一「请选择 XXX」 |
+| W4-M6 required 无 message · TicketFormModal/AssetFormModal（2 处） | ⏭️ 豁免 | priority/status 均默认值预填（`'normal'`/`'active'`）且 Select 无 `allowClear`，required 永不触发（死代码），加 message 违反「不为不可能状态写代码」且变异反证无法做。**M6 实际收口 12 处（Settings 10 + Oncall 2）** |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
-3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。**W4 批 1 剩余：M6（14 处 required 无 message）**。
+3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. W6 批 1 迁移 000016。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
