@@ -32,6 +32,7 @@ func main() {
 		log.Fatalf("配置加载失败: %v", err)
 	}
 
+	database.SetGormLogLevel(cfg.Log.Level)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		log.Fatalf("数据库连接失败: %v", err)

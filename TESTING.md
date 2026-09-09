@@ -2,7 +2,23 @@
 
 **最后更新**: 2026-09-09（本次只增量更新本节与下方「2026-09-09 增量」；其余章节仍是 2026-06-16 快照）
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
-**状态**: ✅ 928 backend 测试函数全过（`go test ./... -count=1`，26 个包）+ `db_smoke.sh` 两条真 PG 路径绿
+**状态**: ✅ 939 backend 测试函数全过（`go test ./... -count=1`，26 个包）+ `db_smoke.sh` 两条真 PG 路径绿
+
+---
+
+## 🆕 2026-09-09 增量（日志卫生轮，TODO G-16）
+
+| 维度 | 数值 / 说明 |
+|---|---|
+| Backend 测试函数 | **939**（+11；`grep -c "^func Test"`，含 12 个 `dbsmoke` 标签用例） |
+| 新增守门测试 | `internal/database/gorm_logger_test.go`（级别映射表 / 包级默认非零值 / 配置纯函数 / **普通查询与 `Scan` 两条路径都不落参数值** / setter 端到端接线）、`internal/middleware/recovery_test.go`（panic 不 dump 请求头）、`internal/api/middleware_chain_test.go` 的 `TestMiddleware_Recovery不dump请求头`（链路级）、`pkg/logger` 的级别归一化 + 小写 `info` 真过滤、`internal/config` 的 `NPM_LOG_LEVEL` 覆盖 |
+| 关键函数覆盖 | `mapGormLogLevel` / `gormLoggerConfig` / `newGormLogger` / `dropRecorderParams` / `SetGormLogLevel` / `Recovery` **各 100%**；包级：`middleware` **91.1%**（+1.9）、`config` **96.9%**、`logger` **72.1%**、`database` **63.8%** |
+| 变异反证 | **12 项全红且都红在断言上**：M1 映射默认值→Info、M2 包级默认去初始化、M3 `ParameterizedQueries`→false、M4 删 `RecorderParamsFilter`（Scan 路径实测打出 `password_hash = "$2a$10$…"`）、M5 `Colorful`→true、M6 `routes.go` 换回 `gin.Recovery()`（实测 dump 出 `Cookie: auth_token=eyJ…`）、M7 去 `ToUpper`、M8 删 `SetDefault`、M9 recovery 记 Cookie、M10 手写 recover→`gin.CustomRecovery`、M11 setter 改空操作、M12 `shouldLog` 去掉未知级别兜底 |
+| 审计后修正 | 三视角审计另发现 3 处并已修：`pkg/logger` 未知级别 fail-open（现按 INFO）、`gin.New()` 后丢掉最外层 Recovery（Logger/Recovery 移到链首）、测试覆写包级 `RecorderParamsFilter` 不复位。详见 `docs/FIX-PLAN-LOG-HYGIENE.md` §8.4 |
+| 新增 trap | `docs/TRAPS.md` **T-32**（一个 `log.level`、两条互不相干的日志路径，看着生效实则两条都没接上）、**T-33**（库级钩子绕过：设了 `ParameterizedQueries` 参数照样落日志） |
+| 为什么加 | 原先「容器日志里有完整 bcrypt 哈希 + 可重放的 JWT」：gorm 级别硬编码 `Info` 且参数全展开、`pkg/logger` 级别过滤因大小写不匹配而失效、gin `Recovery` 在 debug 模式 dump 整个 Cookie。单测走 sqlmock/内存库，不看 logger 输出，所以全绿 |
+
+> 本轮测试的两条硬要求（写进了 T-31/T-33）：① 断言前先 `require.Contains` 证明日志**真的被打印**，否则「不含敏感值」在日志被关掉时也成立；② 变异必须**红在断言上**，M4/M6 的价值在于红的时候把泄漏原文打了出来。
 
 ---
 

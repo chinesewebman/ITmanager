@@ -12,7 +12,6 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // MigrationsFS 在 main 包里 embed migrations/ 目录
@@ -34,16 +33,8 @@ var (
 
 // Init 初始化数据库 + 运行 migration
 func Init(cfg *config.DatabaseConfig) (*gorm.DB, error) {
-	// 配置日志
-	newLogger := logger.New(
-		log.New(log.Writer(), "\r\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold:             time.Second,
-			LogLevel:                  logger.Info,
-			IgnoreRecordNotFoundError: true,
-			Colorful:                  true,
-		},
-	)
+	// 配置日志：级别由 SetGormLogLevel 注入（默认 Warn），参数永不展开（见 gorm_logger.go）
+	newLogger := newGormLogger(log.Writer())
 
 	dsn := cfg.DSN()
 	log.Printf("📦 正在连接数据库: %s:%d/%s", cfg.Host, cfg.Port, cfg.Name)

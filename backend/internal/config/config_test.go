@@ -749,3 +749,35 @@ func TestRedisConfig_Addr_FormatCorrect(t *testing.T) {
 	r := RedisConfig{Host: "redis.local", Port: 6380}
 	assert.Equal(t, "redis.local:6380", r.Addr())
 }
+
+// ==================== log.level 默认值（G-16） ====================
+
+// TestLoad_LogLevelEnvOverride_YAML无键时仍生效 钉住 viper.SetDefault("log.level")：
+// 缺这个键时 cfg.Log.Level 是空串，两条日志路径（pkg/logger 与 gorm）都退化成最啰嗦档；
+// 而且 viper 只对 AllKeys（yaml 键 + SetDefault 键）做 env 覆盖，旧 config.yaml 上
+// NMP_LOG_LEVEL 会被静默忽略 —— 与 trusted_proxies / api_key_pepper 同一个坑。
+func TestLoad_LogLevelEnvOverride_YAML无键时仍生效(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+  api_key_pepper: "` + validPepper + `"
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	t.Setenv("NMP_LOG_LEVEL", "warn")
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "warn", cfg.Log.Level, "旧 config.yaml 缺 log.level 键时 env 也必须生效")
+
+	t.Setenv("NMP_LOG_LEVEL", "")
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "info", cfg.Log.Level, "无 env 时必须落到默认 info，不能是空串")
+}

@@ -115,7 +115,7 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	r := gin.Default()
+	r := gin.New()
 	// G-7：受信代理必须显式配置。gin 默认信任 0.0.0.0/0，会让 ClientIP() 取
 	// X-Forwarded-For 的**最左值**（攻击者可控）——登录限流可被逐请求换 XFF 绕过、
 	// 审计 IP 可伪造、API Key 的 IP 白名单可绕过。见 docs/FIX-PLAN-TRUSTED-PROXY.md。
@@ -133,6 +133,15 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		slog.Info("受信代理已配置：ClientIP() 会采信这些来源追加的 X-Forwarded-For",
 			slog.Any("trusted_proxies", cfg.Server.TrustedProxies))
 	}
+	// G-16：Logger 在外、Recovery 在内（与 gin.Default() 的相对顺序一致）——
+	// panic 被 Recovery 接住后 c.Next() 正常返回，gin.Logger() 才记得到这条 500 的
+	// 访问日志；反过来把 Logger 放到 Recovery 内侧，panic 请求就没有 access log 了。
+	// Recovery 同时要放在 CORS/metrics 之前：那几层自身 panic 时同样有兜底
+	// （原 gin.Default() 在最外层带 Recovery，改成 gin.New() 后必须显式补回来）。
+	r.Use(gin.Logger())
+	// G-16：不用 gin.Recovery() —— 它会把整个请求头 dump 进日志且只屏蔽
+	// Authorization，Cookie 里的 auth_token（JWT）会明文落盘。
+	r.Use(middleware.Recovery())
 	// 无论「没配」还是「配错」：只要 XFF 来自未受信来源就告警一次（G-7）。
 	r.Use(middleware.WarnUntrustedForwardedFor(cfg.Server.TrustedProxies))
 	r.Use(middleware.CORS(cfg))
@@ -140,8 +149,6 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 	if platformMetrics != nil {
 		r.Use(middleware.HTTPMetrics(platformMetrics))
 	}
-	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
 
 	// C-P1 + C-P5: 健康/就绪/metrics 探针（无需鉴权）
 	db := database.GetDB()

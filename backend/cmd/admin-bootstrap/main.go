@@ -51,6 +51,7 @@ func run() error {
 	// 又与迁移 DDL 漂移（实测 "insufficient arguments"）。注入后走的就是
 	// 生产同一条迁移路径（幂等、advisory lock 保护）。
 	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
+	database.SetGormLogLevel(cfg.Log.Level)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		return err

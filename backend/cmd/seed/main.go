@@ -23,6 +23,7 @@ func main() {
 	// 必须注入 MigrationsFS：否则走 gorm AutoMigrate 兜底，在真实 postgres 上
 	// 与迁移 DDL 漂移（实测 "insufficient arguments"），且不会创建迁移里的种子数据。
 	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
+	database.SetGormLogLevel(cfg.Log.Level)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
@@ -71,7 +72,7 @@ func seedData(db *gorm.DB) int {
 			fail("创建管理员用户失败", err)
 			return failures
 		}
-		log.Printf("创建管理员用户: admin (密码: admin123) — ⚠️ 首次登录需改密")
+		log.Printf("创建管理员用户: admin（默认演示密码，首次登录强制改密）")
 
 		// 创建普通用户
 		userHash, _ := bcrypt.GenerateFromPassword([]byte("user123"), bcrypt.DefaultCost)
@@ -91,7 +92,7 @@ func seedData(db *gorm.DB) int {
 		if err := db.Create(&operator).Error; err != nil {
 			fail("创建普通用户失败", err)
 		}
-		log.Printf("创建普通用户: operator (密码: user123)")
+		log.Printf("创建普通用户: operator（默认演示密码，首次登录强制改密）")
 
 		readonly := models.User{
 			Username:     "viewer",
@@ -104,7 +105,7 @@ func seedData(db *gorm.DB) int {
 		if err := db.Create(&readonly).Error; err != nil {
 			fail("创建只读用户失败", err)
 		}
-		log.Printf("创建只读用户: viewer (密码: user123)")
+		log.Printf("创建只读用户: viewer（默认演示密码，首次登录强制改密）")
 	}
 
 	// 检查是否需要初始化其他数据

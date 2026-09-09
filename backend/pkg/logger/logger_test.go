@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"network-monitor-platform/internal/config"
 )
 
 // makeTestEnv 重置全局 level + writers 到测试 buffer。
@@ -35,6 +37,11 @@ func TestShouldLog(t *testing.T) {
 		{"WARN", "INFO", false},
 		{"ERROR", "ERROR", true},
 		{"WARN", "ERROR", true},
+		// 未知/空级别必须按 INFO（fail-closed）。查表 miss 的零值等价 DEBUG，
+		// 会把拼错的级别（"warning"）静默变成最啰嗦档 —— 与 gorm 侧相反。
+		{"WARNING", "DEBUG", false},
+		{"WARNING", "INFO", true},
+		{"", "DEBUG", false},
 	}
 	for _, c := range cases {
 		if got := shouldLog(c.current, c.msg); got != c.want {
@@ -172,6 +179,71 @@ func TestInfo_Debug_Variants(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "debug msg") {
 		t.Errorf("Debug not working: %s", lines[1])
+	}
+}
+
+// snapshotGlobal 保存全局 level/writers，cleanup 时恢复（Init 会覆盖它们）。
+func snapshotGlobal(t *testing.T) {
+	t.Helper()
+	mu.Lock()
+	oldLevel := level
+	oldWriters := map[string]io.Writer{}
+	for k, v := range writers {
+		oldWriters[k] = v
+	}
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		level = oldLevel
+		for k, v := range oldWriters {
+			writers[k] = v
+		}
+		mu.Unlock()
+	})
+}
+
+// TestInit_级别归一化 钉住 G-16：shouldLog 的级别表只有大写键，而 config.yaml 写的是
+// 小写 "info" —— 原样存会让 order["info"] 取到零值（等价 DEBUG），级别过滤完全失效。
+func TestInit_级别归一化(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"info", "INFO"}, {"INFO", "INFO"}, {" Info ", "INFO"},
+		{"debug", "DEBUG"}, {"warn", "WARN"}, {"error", "ERROR"}, {"", "INFO"},
+	} {
+		t.Run("in="+c.in, func(t *testing.T) {
+			snapshotGlobal(t)
+			Init(&config.LogConfig{Level: c.in})
+			mu.Lock()
+			got := level
+			mu.Unlock()
+			if got != c.want {
+				t.Errorf("Init(level=%q) → %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestInit_小写info真的过滤DEBUG 断言行为而不只是字段：没做归一化时 Debug 行会照打。
+func TestInit_小写info真的过滤DEBUG(t *testing.T) {
+	snapshotGlobal(t)
+	Init(&config.LogConfig{Level: "info"})
+
+	mu.Lock()
+	buf := &threadSafeBuf{}
+	for _, l := range []string{"DEBUG", "INFO", "WARN", "ERROR"} {
+		writers[l] = buf
+	}
+	isatty = func(io.Writer) bool { return false }
+	mu.Unlock()
+
+	Debug("不该出现的 debug 行")
+	Info("该出现的 info 行")
+
+	out := buf.String()
+	if strings.Contains(out, "不该出现的 debug 行") {
+		t.Errorf("level=info 时 DEBUG 行必须被过滤，实际输出: %s", out)
+	}
+	if !strings.Contains(out, "该出现的 info 行") {
+		t.Errorf("INFO 行必须保留，实际输出: %s", out)
 	}
 }
 

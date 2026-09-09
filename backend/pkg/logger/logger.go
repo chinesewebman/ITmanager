@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,7 +42,12 @@ const (
 func Init(cfg *config.LogConfig) {
 	mu.Lock()
 	defer mu.Unlock()
-	level = cfg.Level
+	// shouldLog 的级别表只有大写键（DEBUG/INFO/WARN/ERROR），而 config.yaml 写的是
+	// 小写 "info" —— 原样存会让 order["info"] 取到零值，等价 DEBUG，级别过滤完全失效。
+	level = strings.ToUpper(strings.TrimSpace(cfg.Level))
+	if level == "" {
+		level = "INFO" // 未配置时的默认档，与 config 的 log.level 默认一致
+	}
 
 	if cfg.Output == "file" {
 		dir := filepath.Dir(cfg.File.Path)
@@ -138,7 +144,14 @@ func Errorf(msg string, kv ...any) { Log("ERROR", msg, kv...) }
 
 func shouldLog(currentLevel, msgLevel string) bool {
 	order := map[string]int{"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
-	return order[msgLevel] >= order[currentLevel]
+	cur, ok := order[currentLevel]
+	if !ok {
+		// 查表 miss 的零值等于 DEBUG —— 级别拼错（如 "warning"）会静默变成
+		// 「最啰嗦档」，与 gorm 侧 mapGormLogLevel 的 fail-closed 相反。
+		// 未知级别一律按 INFO 处理：宁可少打，不可多打。
+		cur = order["INFO"]
+	}
+	return order[msgLevel] >= cur
 }
 
 func colorFor(level string) string {

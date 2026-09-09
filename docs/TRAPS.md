@@ -149,6 +149,36 @@
 
 ---
 
+### T-32. 「一个 `log.level`，两条互不相干的日志路径」——配置看起来生效，实际两条都没接上
+**状态**: FIXED | **类别**: 可观测性 / 配置未贯通 (G-16 轮) | **修复日期**: 2026-09-09
+**现象**：`config.yaml` 写着 `log.level: info`，运维以为级别已配置。实测两条日志路径**各自失效**：
+1. **gorm SQL 日志**：`internal/database/database.go` 硬编码 `logger.Info` —— 与 `cfg.Log.Level` 毫无关系，release 下照样逐条打印 SQL。
+2. **应用日志**：`pkg/logger` 的 `shouldLog` 级别表只含**大写**键（`DEBUG`/`INFO`/`WARN`/`ERROR`），而 `Init` 把 `cfg.Level` **原样**存进 `currentLevel`；`config.yaml` 写的是小写 `info` → `order["info"]` 取到零值 `0`，恰好等于 DEBUG 的序号 → **级别过滤完全失效**，debug 行照打。
+
+两者叠加的结果是「改了配置，日志一条没少」，而配置本身看起来完全正确。
+**根因**：配置项有多个消费者，但只有一个消费者被接上；且「消费者」用的键空间（大小写/词表）与配置来源不一致，而**不一致是静默的**——查表 miss 得到零值，零值又恰好是合法级别。
+**检测方法**：
+- 配置项有几个消费路径就写几条「改配置 → 行为变化」的测试。G-16 的做法：`TestInit_小写info真的过滤DEBUG`（把 level 设成 `info`，断言 DEBUG 行**不出现**）比 `TestInit_级别归一化`（只断言存进去的字符串）更值钱——前者才钉住行为。
+- 查表类逻辑不要依赖零值语义：`map[k]` 的 miss 必须显式判定（`v, ok := m[k]; if !ok {…}`），否则「拼写错误 / 大小写不符 / 词表外值」全都退化成某个合法值。
+- 归一化放在**入口**（`Init` 里 `strings.ToUpper(strings.TrimSpace(...))` + 空串给默认档），不要在每个查表点各归一一次。
+- 反向检查：把 `log.level` 调成 `error` 起一次服务，确认 SQL 与 DEBUG 行都消失——这是唯一能自证「配置真的接上了」的检查。
+**推广**：`SetDefault` 也属于这一族——viper 只对 `AllKeys`（yaml 键 + `SetDefault` 键）做 env 覆盖，shipped yaml 缺键时纯 env 注入会被静默忽略（见 G-13）。**配置文件的键、env 名、消费点三者必须各有一条测试**，否则漂移永远静默。
+
+---
+
+### T-33. 库级钩子绕过：设了 `ParameterizedQueries` 参数照样落日志
+**状态**: FIXED | **类别**: 凭据泄漏 / 第三方库内部路径 (G-16 轮) | **修复日期**: 2026-09-09
+**现象**：给 gorm 配 `logger.Config{ParameterizedQueries: true}` 后，普通查询日志确实只剩占位符，但 `DB.Scan` 的日志**仍带参数值**——实测打出 `SELECT password_hash FROM secrets WHERE password_hash = "$2a$10$…"`。
+**根因**：`ParameterizedQueries` 只在 `(*logger).ParamsFilter` 里生效（`gorm.io/gorm/logger/logger.go:193-198`）。而 `(*DB).Scan` 会把 logger 换成内部的 `traceRecorder`（`finisher_api.go:527-533`），后者的 `ParamsFilter` 调的是**包级变量** `logger.RecorderParamsFilter`（`logger.go:220-225`），默认是恒等 no-op（`logger.go:85-88`）→ 参数原样展开。也就是说：**同一个库里有第二条过滤通道，配置项只覆盖了其中一条。**
+**检测方法**：
+- 别只测「典型路径」。这里的缺口只有走 `Scan`（`Find` 不走）才暴露；测试必须**两条路径各一条**：`TestGormLogger_普通查询不落参数值` + `TestGormLogger_Scan路径不落参数值`。
+- 断言写法：先 `require.Contains(out, "SELECT password_hash FROM secrets")`（证明**这条日志真的被打印了**），再 `assert.NotContains(out, "$2a$10$")`。只写 NotContains 会在「日志压根没输出」时假绿。
+- 修完做一次「删掉修复」的变异，确认测试**红在断言上**且红的时候能把泄漏原文打出来——这是唯一能证明过滤真的生效的方式。
+**推广**：第三方库的「配置开关」经常只覆盖它自己的主路径，内部包装器（recorder / proxy / adapter）走另一条。审计时先找**同一个语义有几处实现**（这里是 `ParamsFilter` × 2），再确认配置是否覆盖全部。
+**边界（实测）**：还有第三条路 —— `migrator.printSQLLogger`（`gorm.io/gorm@v1.30.0/migrator/migrator.go:45-53`）内嵌的是 `logger.Interface`、**不实现** `ParamsFilter`，且用 `fmt.Println` 不看 `LogLevel`；但它只在 `DryRun` 时挂载（`migrator.go:115`），本仓库生产路径不置 `DryRun`（仅 `internal/integration/upsert_test.go:112`），故当前不可达 —— 记录在此，避免下次「已全部覆盖」的结论又被推翻。
+
+---
+
 ## 二、前端陷阱
 
 ### T-16. Settings.tsx 死表单 (B1-1/B1-2 修复中)
@@ -273,6 +303,8 @@
 | — (G-20 轮) | T-29 | FIXED |
 | — (G-22 轮) | T-30 | FIXED |
 | — (G-22 轮) | T-31 | FIXED |
+| — (G-16 轮) | T-32 | FIXED |
+| — (G-16 轮) | T-33 | FIXED |
 
 ---
 

@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -195,7 +196,7 @@ func TestMiddleware_Recovery_HandlerPanic返500不挂进程(t *testing.T) {
 // ==================== Logger 中间件 (副作用写 stdout) ====================
 
 func TestMiddleware_Logger_请求不挂掉(t *testing.T) {
-	// gin.Default() 含 Logger + Recovery，这里只验证不挂
+	// SetupRouter 现在是 gin.New() + 显式挂载 Logger/Recovery（G-16），这里只验证不挂
 	r := setupTestRouter(t)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -331,6 +332,39 @@ func genExpiredToken(t *testing.T) string {
 	signed, err := tok.SignedString([]byte(cfg.Auth.JWT.Secret))
 	require.NoError(t, err)
 	return signed
+}
+
+// TestMiddleware_Recovery不dump请求头 — G-16 的链路级防线。
+// middleware/recovery_test.go 只证明 Recovery() 自己不 dump；这条钉住 SetupRouter
+// 真的挂了它 —— 有人改回 gin.Recovery() 即红（默认实现会把 Cookie 里的 JWT dump 出来）。
+func TestMiddleware_Recovery不dump请求头(t *testing.T) {
+	// 必须在 setupTestRouter 之前替换 DefaultErrorWriter：gin.Recovery() 构造时就把
+	// 它绑进闭包（RecoveryWithWriter(DefaultErrorWriter)），之后再换就晚了。
+	var dump bytes.Buffer
+	oldW := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &dump
+	t.Cleanup(func() { gin.DefaultErrorWriter = oldW })
+
+	r := setupTestRouter(t)
+
+	// gin.Recovery() 只在 debug 模式才 dump 请求头（recovery.go:91-96 的 IsDebugging()
+	// 分支），而本项目默认 server.mode=debug。测试必须显式进 debug 模式，否则变异成
+	// gin.Recovery() 也照样绿 —— 测试自己假绿。
+	oldMode := gin.Mode()
+	gin.SetMode(gin.DebugMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	r.GET("/__panic_probe", func(c *gin.Context) { panic("boom") })
+
+	const jwt = "eyJhbGciOiJIUzI1NiJ9.SECRET-JWT-VALUE"
+	req := httptest.NewRequest(http.MethodGet, "/__panic_probe", nil)
+	req.Header.Set("Cookie", "auth_token="+jwt)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "panic 必须被恢复成 500")
+	assert.NotContains(t, dump.String(), jwt,
+		"gin.Recovery() 会把整个请求头（含 Cookie）dump 到 DefaultErrorWriter")
 }
 
 // 防 database 包未用报警

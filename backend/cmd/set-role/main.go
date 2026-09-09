@@ -47,6 +47,7 @@ func run() error {
 	// 必须注入 MigrationsFS：否则走 gorm AutoMigrate 兜底，在真实 postgres 上
 	// 与迁移 DDL 漂移（实测 "insufficient arguments"）。
 	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
+	database.SetGormLogLevel(cfg.Log.Level)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		return err

@@ -164,6 +164,10 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("auth.jwt.expire", 86400)
+	// G-16：缺这个键时 cfg.Log.Level 为空串，两条日志路径（pkg/logger 与 gorm）都会
+	// 退化成最啰嗦档。SetDefault 同时让 NMP_LOG_LEVEL 在旧 config.yaml 上生效
+	// （viper 只对 AllKeys 里的键做 env 覆盖，同 trusted_proxies / api_key_pepper）。
+	viper.SetDefault("log.level", "info")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)

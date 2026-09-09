@@ -37,6 +37,7 @@ func main() {
 	logger.Init(&cfg.Log)
 
 	// 3. 初始化数据库
+	database.SetGormLogLevel(cfg.Log.Level)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		logger.Fatal("数据库初始化失败: %v", err)
