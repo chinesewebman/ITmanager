@@ -27,6 +27,14 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
 
 - **C6 docker-compose healthcheck** (`77bfdd9`) — 7 服务加 healthcheck + `depends_on: service_healthy`
 - **Go 1.25 fmt 重排** (`3bae43f` 既有文件 / `96f14d8` metric_sync 文件)
+- **compose 运行时收口**（G-9/G-10/G-13 收尾，本次提交；方案 `docs/FIX-PLAN-COMPOSE-RUNTIME.md`）
+  — **破坏性变更**：① secret 不再有硬编码默认值，三个必需变量（`NMP_DATABASE_PASSWORD` /
+  `NMP_AUTH_JWT_SECRET` / `NMP_AUTH_API_KEY_PEPPER`）走 `${VAR:?}`，缺值 compose 直接报错；
+  ② 默认 `docker compose up -d` 只起主链 4 服务（postgres/redis/api/web），
+  netbox/zabbix/glpi/graylog/elasticsearch/mongoDB 移入 `profiles: ["aux"]`；
+  ③ 端口收敛：postgres 只绑 `127.0.0.1:5432`、redis 不发布、api 只绑 `127.0.0.1:8080`；
+  ④ 新增 `backend/Dockerfile`、`frontend/Dockerfile`（此前被 `.gitignore` 的裸规则挡住，从未进仓库）。
+  另：迁移改由 api 启动时执行（单副本约束），三个 CLI 注入 `MigrationsFS`。
 
 ### 版本号缺口 — 待补
 

@@ -1,0 +1,12 @@
+# 构建上下文瘦身 + 防止宿主机产物污染镜像
+bin/
+*.test
+coverage.out
+coverage.html
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+Dockerfile
+.dockerignore

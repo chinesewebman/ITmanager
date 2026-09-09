@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"network-monitor-platform"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
@@ -45,6 +46,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// 必须注入 MigrationsFS：否则 database.Init 走 gorm AutoMigrate 兜底，
+	// 在真实 postgres 上既建不出种子角色（roles 里没有 admin → 本命令必失败），
+	// 又与迁移 DDL 漂移（实测 "insufficient arguments"）。注入后走的就是
+	// 生产同一条迁移路径（幂等、advisory lock 保护）。
+	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		return err

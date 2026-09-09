@@ -1,18 +1,32 @@
-version: '3.8'
-
+# 主链（默认 `docker compose up -d` 只起这些）：
+#   postgres → redis → api → web
+#
+# 环境变量：本文件用 ${VAR:?} 强制要求 .env 提供 secret，缺值直接报错退出
+# （不再有 nmp123 这类硬编码凭据进仓库）。变量名必须与 backend 的 viper 键一致：
+# NMP_ + 配置路径（`.` → `_`），如 database.password → NMP_DATABASE_PASSWORD。
+# 参考 `.env.example`。
+#
+# 辅助系统（netbox/zabbix/glpi/graylog/elasticsearch/mongoDB）全部在 `aux` profile 下，
+# 需 `docker compose --profile aux up -d` 显式拉起。原因：它们目前是占位凭据、
+# 独立库也未初始化，默认拉起会失败并把已知凭据暴露到宿主。生产化见 TODO G-17。
 services:
   # PostgreSQL 数据库 (主数据库)
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: nmp-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: nmp
-      POSTGRES_PASSWORD: nmp123
+      # 与 api 的 NMP_DATABASE_PASSWORD 同源同变量：避免「库密码改了、api 没改」
+      POSTGRES_PASSWORD: ${NMP_DATABASE_PASSWORD:?必须在 .env 里设置（openssl rand -hex 32）}
       POSTGRES_DB: network_monitor
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # 只绑环回：`make deploy` 的 db-migrate/db-seed 在**宿主机**上跑，需要连
+      # localhost:5432；不绑 0.0.0.0 是为了避免无 TLS 的库暴露到局域网。
+      # 容器内互访走服务名，与这个映射无关。
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nmp"]
       interval: 10s
@@ -23,10 +37,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: nmp-redis
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     volumes:
       - redis_data:/data
+    # 同样不发布端口：redis 无密码，绑宿主等于把可写缓存交出去。
+    # （本机宿主已占用 6379，发布也起不来。）
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -34,29 +49,50 @@ services:
       retries: 5
       start_period: 5s
 
-  # 后端 API
+  # 后端 API（启动时自动执行数据库迁移，见 docs/FIX-PLAN-COMPOSE-RUNTIME.md D-C）
+  # 单副本约束：迁移用非阻塞 pg_try_advisory_lock，多副本冷启动时抢不到锁的副本会启动失败。
   api:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: nmp-api
+    restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 仅环回：给本机调试/smoke 用，不暴露到局域网（唯一对外入口是 web）
+      - "127.0.0.1:8080:8080"
     environment:
-      - DATABASE_URL=postgres://nmp:nmp123@postgres:5432/network_monitor
-      - REDIS_URL=redis://redis:6379/0
-      - NETBOX_URL=http://netbox:8000
-      - ZABBIX_URL=http://zabbix:8080
-      - GLPI_URL=http://glpi:80
+      - NMP_SERVER_HOST=0.0.0.0
+      # 生产必须显式设 release：debug 下弱集成凭据不会被启动期拒绝、
+      # 登录 cookie 的 Secure 也不会开。当前默认 debug 的原因见 R-5（G-15 解耦后可翻）。
+      - NMP_SERVER_MODE=${NMP_SERVER_MODE:-debug}
+      - NMP_DATABASE_HOST=postgres
+      - NMP_DATABASE_PORT=5432
+      - NMP_DATABASE_USER=nmp
+      - NMP_DATABASE_PASSWORD=${NMP_DATABASE_PASSWORD:?必须在 .env 里设置}
+      - NMP_DATABASE_NAME=network_monitor
+      - NMP_DATABASE_SSLMODE=disable
+      - NMP_REDIS_HOST=redis
+      - NMP_INTEGRATIONS_NETBOX_URL=http://netbox:8000
+      - NMP_INTEGRATIONS_ZABBIX_URL=http://zabbix:8080
+      - NMP_INTEGRATIONS_GLPI_URL=http://glpi:80
+      - NMP_AUTH_JWT_SECRET=${NMP_AUTH_JWT_SECRET:?必须在 .env 里设置（openssl rand -hex 32）}
+      - NMP_AUTH_API_KEY_PEPPER=${NMP_AUTH_API_KEY_PEPPER:?必须在 .env 里设置（openssl rand -hex 32）}
       # G-7: 只信任前端容器（下方 web 的静态 IP）。缺了它 ClientIP() 取直连对端
       # （即 nginx 容器 IP）→ 登录限流退化为全站单桶、审计 IP 失真、
       # IP 白名单 API Key 一律 403。见 docs/FIX-PLAN-TRUSTED-PROXY.md。
-      - NMP_SERVER_TRUSTED_PROXIES=172.28.0.10
+      # 可被 .env 覆盖：scripts/smoke-compose.sh 的负例就靠覆盖它验证
+      # 「配错 → ClientIP() 退化为直连对端（nginx 容器 IP）」。
+      - NMP_SERVER_TRUSTED_PROXIES=${NMP_SERVER_TRUSTED_PROXIES:-172.28.0.10}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      default:
+        # 别名只为兼容 frontend/nginx.conf 的 `proxy_pass http://backend:8080/api/`
+        # （container_name 不注册 DNS，服务名才是 `api`）。不要删。
+        aliases: [backend]
 
   # 前端
   web:
@@ -64,8 +100,13 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: nmp-web
+    restart: unless-stopped
     ports:
-      - "3000:80"
+      # 只绑环回：本容器提供的是**明文 HTTP**（nginx.conf 是 listen 80），
+      # 绑 0.0.0.0 等于把未加密的登录入口暴露到局域网（与 PCI DSS 的 TLS 1.2+ 要求冲突）。
+      # 对外提供必须前置 TLS 终结：宿主机反代/LB 指向 127.0.0.1:3000，
+      # 或改绑 0.0.0.0 并挂载 frontend/nginx-tls.conf.example（见 08-部署运维.md §8.2.2）。
+      - "127.0.0.1:3000:80"
     # G-7: 固定 IP，供 api 的 NMP_SERVER_TRUSTED_PROXIES 精确指向（只信任这一个容器，
     # 不信任整个子网 —— 同网段还有 postgres/redis/netbox，任一被攻陷即可伪造 XFF）。
     networks:
@@ -73,19 +114,22 @@ services:
         ipv4_address: 172.28.0.10
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
+
+  # ---------------- 以下为 aux profile（docker compose --profile aux up -d）----------------
 
   # NetBox (资产管理)
   netbox:
     image: netboxcommunity/netbox:v4.0
     container_name: nmp-netbox
+    profiles: ["aux"]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - DB_HOST=postgres
       - DB_NAME=netbox
       - DB_USER=nmp
-      - DB_PASSWORD=nmp123
+      - DB_PASSWORD=${NMP_DATABASE_PASSWORD:?}
       - REDIS_HOST=redis
       - SECRET_KEY=your-secret-key-here-change-in-production
     healthcheck:
@@ -101,15 +145,18 @@ services:
         condition: service_healthy
 
   # Zabbix (监控)
+  # 注意：这是 zabbix-server 进程，没有 Web/API；api 侧的 ZABBIX_URL 需要
+  # zabbix-web-nginx-pgsql（见 08-部署运维.md §8.3）。
   zabbix:
     image: zabbix/zabbix-server-pgsql:latest
     container_name: nmp-zabbix
+    profiles: ["aux"]
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     environment:
       - DB_SERVER_HOST=postgres
       - POSTGRES_USER=nmp
-      - POSTGRES_PASSWORD=nmp123
+      - POSTGRES_PASSWORD=${NMP_DATABASE_PASSWORD:?}
       - POSTGRES_DB=zabbix
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 10051 || exit 1"]
@@ -125,8 +172,9 @@ services:
   glpi:
     image: linuxserver/glpi:latest
     container_name: nmp-glpi
+    profiles: ["aux"]
     ports:
-      - "8001:80"
+      - "127.0.0.1:8001:80"
     environment:
       - PUID=1000
       - PGID=1000
@@ -147,11 +195,12 @@ services:
   graylog:
     image: graylog/graylog:6.0
     container_name: nmp-graylog
+    profiles: ["aux"]
     ports:
-      - "9000:9000"
-      - "5044:5044"
-      - "5140:5140"
-      - "5555:5555"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:5044:5044"
+      - "127.0.0.1:5140:5140"
+      - "127.0.0.1:5555:5555"
     environment:
       - GRAYLOG_PASSWORD_SECRET=your-password-secret-here
       - GRAYLOG_ROOT_PASSWORD_SHA2=your-hashed-password
@@ -173,6 +222,7 @@ services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: nmp-elasticsearch
+    profiles: ["aux"]
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -190,6 +240,7 @@ services:
   mongoDB:
     image: mongo:7
     container_name: nmp-mongodb
+    profiles: ["aux"]
     volumes:
       - mongodb_data:/data/db
     healthcheck:
@@ -198,18 +249,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-
-  # Nginx 反向代理 (可选)
-  # nginx:
-  #   image: nginx:latest
-  #   container_name: nmp-nginx
-  #   ports:
-  #     - "80:80"
-  #   volumes:
-  #     - ./nginx/docker-compose.yml:/etc/nginx/conf.d/default.conf
-  #   depends_on:
-  #     - web
-  #     - api
 
 networks:
   # G-7: 固定子网，让 web 容器拿到可预期的静态 IP（172.28.0.10）。

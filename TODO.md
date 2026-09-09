@@ -65,8 +65,19 @@
 - [ ] **G-11 API Key 白名单接受 CIDR 但按字符串精确比对 → CIDR 条目永不命中**（2026-09-09 新增，G-7 审计连带发现，非本次引入）— 创建/更新 API Key 时 `handlers/api_key_handler.go:82-90` 只做 `net.ParseIP` 或 CIDR 格式校验（接受 `10.0.0.0/8`），而鉴权侧 `middleware/auth.go:148-153` 用 `entry == clientIP` 精确比较——填 CIDR 的 Key 永远匹配不上，表现为「白名单莫名 403」。IPv6 文本形式差异（`::1` vs `0:0:0:0:0:0:0:1`）同理。待办：① 要么两侧统一为「CIDR/裸 IP 都按网段匹配」（`net.ParseCIDR` + `Contains`，裸 IP 补 /32、/128）；② 要么创建时就拒绝 CIDR 并写清「只接受单个 IP」。**倾向 ①**（与 `server.trusted_proxies` 的语义一致），但需同时决定 IPv6 规范化。关联 G-7（同一个 `ClientIP()` 消费者）
 - [x] **G-6 Web 界面 TLS 最低版本无强制、无验证**（2026-09-09 新增 → 当日结案，PCI DSS 4.2.1）— 原状：仓库内没有任何 TLS 终止或最低版本约束（`frontend/nginx.conf` 只有 `listen 80`，Go 后端 `cmd/server/main.go:104` 明文 `ListenAndServe()`），「只支持 TLS 1.2+」完全依赖外部反代、无法自证。**已交付**：① `08-部署运维.md` §8.2.2「TLS 终止与最低版本」——终止点（nginx/`nmp-web`）、最低版本、套件/HSTS/票据策略、80→443、后端明文不得直接暴露、自证命令；② `scripts/check-tls.sh`——用 `openssl s_client` **主动发起** TLS 1.0/1.1 握手断言被拒（curl 无法降级尝试），退出码 0/1/2，OpenSSL 3.x 缺 legacy provider 时按「无法判定」退出而非假通过；③ `frontend/nginx-tls.conf.example`——443 + `ssl_protocols TLSv1.2 TLSv1.3` + HSTS + 80→443 模板（opt-in，需自备证书）。**已验证**：真实 nginx:alpine 套模板 → 脚本退出 0；故意放开 `ssl_protocols`+`SECLEVEL=0` 的 nginx → 脚本退出 1 并逐条点名 TLS 1.0/1.1。**残余（属部署方动作，非代码）**：生产必须套模板（或外部反代等效配置）并跑一次 `check-tls.sh`，退出码须为 0
 - [ ] **G-12 `routes.go` 重复挂载 Logger/Recovery + `healthCheck` 死函数**（2026-09-09 新增，G-7 审计连带发现，非本次引入）— ① `gin.Default()` 已包含 `gin.Logger()` + `gin.Recovery()`，`routes.go:139-140` 又 `r.Use` 了一次，实测每请求访问日志打两遍；② `routes.go:445` 的 `healthCheck` 无任何调用点、0% 覆盖。待办：删掉重复的两行 `r.Use`（或改用 `gin.New()` + 显式挂载，语义更清楚）；确认 `healthCheck` 无外部引用后删除
-- [ ] **G-10 compose 的 env 变量名与 config 体系不符 + 反代 upstream 名与服务名不一致**（2026-09-09 新增，G-7 连带发现）— `docker-compose.yml:46-50` 给 api 传的是 `DATABASE_URL` / `REDIS_URL` / `NETBOX_URL` / `ZABBIX_URL` / `GLPI_URL`，而 `config.Load()` 只认 `NMP_` 前缀 + mapstructure 路径（`NMP_DATABASE_PASSWORD`、`NMP_INTEGRATIONS_NETBOX_URL`…），**这五个变量一个都不会生效**；且缺 `NMP_AUTH_JWT_SECRET` / `NMP_DATABASE_PASSWORD` / `NMP_API_KEY_PEPPER`，release 模式下 `Validate()` 必然拒启。另：`frontend/nginx.conf:14` 的 `proxy_pass http://backend:8080/` 指向服务名 `backend`，compose 里该服务叫 `api`（`container_name: nmp-api`）——DNS 解析不到。待办：① 逐项改成 `NMP_` 变量（含 `NMP_SERVER_TRUSTED_PROXIES`，G-7 已加；`backend/.env.example` 同样缺 `NMP_AUTH_API_KEY_PEPPER`——照抄它会因 `Validate()` 拒启）；② 统一 upstream 名（改 nginx.conf 为 `api` 或给 api 加网络别名 `backend`）；③ 与 G-9 的 Dockerfile 一起做一次 `docker compose up` 真跑通并记录
-- [ ] **G-9 `docker-compose.yml` 引用的 Dockerfile 在仓库中不存在 → `docker compose build` 必失败**（2026-09-09 新增，TLS 任务连带发现）— `docker-compose.yml:40-41` 与 `:59-61` 分别声明 `context: ./backend` / `./frontend` + `dockerfile: Dockerfile`，但 `git ls-files | grep -i dockerfile` 与全盘 `find` 均为空——**仓库里没有任何 Dockerfile**。后果：README/文档里的 `docker compose up -d` 开箱即失败；`nmp-api` / `nmp-web` 两个容器名（G-7 的受信代理讨论、§8.2.2 的 TLS 终止点都按它写的）在当前仓库状态下根本起不来。待办：① 补 `backend/Dockerfile`（Go 多阶段构建：`golang:1.22-alpine` 编译 → `alpine`/`distroless` 运行，非 root 用户）；② 补 `frontend/Dockerfile`（`node` 构建 → `nginx:alpine` 托管，默认站点用 `frontend/nginx.conf`，TLS 场景见 §8.2.2）；③ CI 增一步 `docker compose config`（不 build）防止引用漂移；④ 若决定不提供 Dockerfile，则从 compose 中删掉 `build:` 段并改用镜像名
+- [x] **G-10 compose 的 env 变量名与 config 体系不符 + 反代 upstream 名与服务名不一致**（2026-09-09 新增，G-7 连带发现）— `docker-compose.yml:46-50` 给 api 传的是 `DATABASE_URL` / `REDIS_URL` / `NETBOX_URL` / `ZABBIX_URL` / `GLPI_URL`，而 `config.Load()` 只认 `NMP_` 前缀 + mapstructure 路径（`NMP_DATABASE_PASSWORD`、`NMP_INTEGRATIONS_NETBOX_URL`…），**这五个变量一个都不会生效**；且缺 `NMP_AUTH_JWT_SECRET` / `NMP_DATABASE_PASSWORD` / `NMP_API_KEY_PEPPER`，release 模式下 `Validate()` 必然拒启。另：`frontend/nginx.conf:14` 的 `proxy_pass http://backend:8080/` 指向服务名 `backend`，compose 里该服务叫 `api`（`container_name: nmp-api`）——DNS 解析不到。待办：① 逐项改成 `NMP_` 变量（含 `NMP_SERVER_TRUSTED_PROXIES`，G-7 已加；`backend/.env.example` 同样缺 `NMP_AUTH_API_KEY_PEPPER`——照抄它会因 `Validate()` 拒启）；② 统一 upstream 名（改 nginx.conf 为 `api` 或给 api 加网络别名 `backend`）；③ 与 G-9 的 Dockerfile 一起做一次 `docker compose up` 真跑通并记录 **已交付（2026-09-09）**：① compose 传给 api 的变量全部改为 `NMP_*`（逐项与 mapstructure 键核对：`NMP_DATABASE_{HOST,PORT,USER,PASSWORD,NAME,SSLMODE}` / `NMP_REDIS_HOST` / `NMP_INTEGRATIONS_{NETBOX,ZABBIX,GLPI}_URL` / `NMP_AUTH_JWT_SECRET` / `NMP_AUTH_API_KEY_PEPPER`）；② 三个必需 secret 用 `${VAR:?}` 强制，缺值 compose 直接报错退出（不再有 `nmp123` 硬编码进仓库）；③ upstream 名用**网络别名** `backend` 对齐（实测 compose 网络里 `container_name` 不注册 DNS，只有服务名/别名可以；不改 `nginx.conf`，它同时是非 compose 部署模板）；④ 端口收敛：postgres 只绑环回 `127.0.0.1:5432`（宿主机 `make deploy` 的 db-migrate/db-seed 要连它）、redis 不发布、api 只绑 `127.0.0.1:8080`、web 也只绑 `127.0.0.1:3000`（它提供明文 HTTP，对外必须前置 TLS 终结——安全审计 P1；顺带解决宿主机已占用 6379 导致的 `port is already allocated`）；⑤ aux 服务加 `profiles: ["aux"]`；⑥ `backend/.env.example` 补 `NMP_AUTH_API_KEY_PEPPER`（照抄旧文件会因 Validate 拒启），根目录新增 `.env.example`；⑦ 文档 §8.3 重写——旧示例（image 拉取 + 全量发布端口 + 非 NMP_ 变量名）与仓库文件漂移，已废弃。
+- [x] **G-13 `auth.api_key_pepper` 在 shipped config.yaml 里没有键 → env 被静默忽略 + 报错文案写错变量名**（2026-09-09 新增 → 当日结案，commit `954c79f`）— 实测：`NMP_AUTH_JWT_SECRET`/`NMP_AUTH_API_KEY_PEPPER`/`NMP_DATABASE_PASSWORD` 三个 env 齐备，`go run ./cmd/migrate status` 仍报「auth.api_key_pepper 不能为空（通过 **NMP_API_KEY_PEPPER** 注入）」——两个独立缺陷：① viper 的 `Unmarshal` 只遍历 `AllKeys`（yaml 键 + `SetDefault` 键），纯 env 键不进 AllKeys，shipped yaml 缺 `auth.api_key_pepper` 键 → 该 secret 无论怎么注入都读不进来（fail-closed，但文档化部署路径是死的；生产挂载自定义/旧 config.yaml 同样中招）；② 报错文案写的 `NMP_API_KEY_PEPPER` 不是 viper 认的名字（正确是 `NMP_AUTH_API_KEY_PEPPER`），运维照提示改仍然起不来。**已交付**：yaml 补 `api_key_pepper: ""` 占位 + `viper.SetDefault("auth.api_key_pepper", "")`（覆盖「挂载的 yaml 无该键」场景）+ 报错文案改正 + 三条单测（shipped yaml + env 能启动、旧 yaml 无键时 env 仍生效、报错文案变量名）。变异反证：删 `SetDefault` → 红；文案改回错名 → 红。已逐字段核对：**唯一缺口就是 pepper**。
+- [ ] **G-14 迁移与运行时解耦（多副本部署前置）**（2026-09-09 新增，compose 轮审查发现）— `database.Init` **无条件**执行 `migrate.Up`（`internal/database/database.go:71-75` + `cmd/server/main.go:34` 注入 `MigrationsFS`），没有开关；迁移锁是非阻塞 `pg_try_advisory_lock`（`migrate/migrate.go:70-78`），**多副本同时冷启动时抢不到锁的副本会启动失败并反复重启**。本轮只把「api 单副本」写进文档，未改代码（改动需新配置键 `database.automigrate`，而新键又要防 G-13 的 viper AllKeys 坑）。待办：① yaml + `SetDefault` 落 `database.automigrate` 占位；② `database.Init` 读该开关；③ compose 加独立 one-shot `migrate` 服务 + `depends_on: service_completed_successfully`（注意 `cmd/migrate` 走全量 `config.Load`→`Validate`，容器必须注入全部必需 secret，否则 gate 永不满足）；④ 多副本部署文档 + `--scale api=N` 验证。
+- [ ] **G-15 release 校验与「集成可选」耦合 → compose 默认模式只能留在 debug**（2026-09-09 新增，compose 轮审查发现）— `Config.Validate()` 在 release 下**无条件**要求 `integrations.netbox.token` 与 `glpi.*_token`（`config.go:222-237`，zabbix 已是「URL 非空才校验」的模式），于是 `docker compose` 默认`NMP_SERVER_MODE=debug` 才不会拒启；而 debug 的代价是：弱集成凭据不被启动期拒绝、登录 cookie 的 `Secure` 不开（`auth_handler.go:134-135`）。待办：① netbox/glpi 改成与 zabbix 一致的「URL 配置了才校验」；② 校验解耦后把 compose 默认翻成 `release`；③ 文档同步。
+- [ ] **G-16 GORM logger 硬编码 `LogLevel: logger.Info` → release 也全量打印每条 SQL**（2026-09-09 新增，compose 轮审查发现）— `internal/database/database.go:38-46` 固定 Info 级别（含参数展开），容器 stdout 会落全量 SQL，生产上是敏感信息与噪声双输。待办：把 GORM 级别接到 `cfg.Log.Level`（warn/release 下静默或只报慢查询），并加单测钉住「release → 不打印 SQL」。**2026-09-09 安全审计补充实证（P4）**：会落日志的敏感语句包括 `middleware/auth.go:134` 的 `WHERE key_hash = '<...>'` 与 `auth_handler.go:280` 改密后的 `UPDATE users SET password_hash='$2a$10$...'`；`/tmp/smoke-compose2.log:184` 可见完整 bcrypt 值被打进容器日志 → `docker compose logs api` 或转发到 Graylog/Splunk 后，任何只读日志账号都能拿到哈希离线爆破。
+- [ ] **G-17 aux 服务生产化（netbox/zabbix/glpi/graylog/elasticsearch/mongoDB）**（2026-09-09 新增，compose 轮审查发现）— 本轮只做了 `profiles: ["aux"]` 隔离（默认不启动）+ DB 密码与主链同源，其余仍是占位/不安全默认：① 与主链共享 postgres `nmp` 角色（应各建独立角色与库，库也未初始化）；② `SECRET_KEY`/`GRAYLOG_*` 占位凭据（graylog 的 SHA2 值非法，根本起不来）；③ `elasticsearch` 关掉 `xpack.security`；④ 版本标签全是可变的（`latest`/`6.0`/`7`）；⑤ 与 api 同处 default 网络（可直连内部 gRPC 50051）；⑥ zabbix 用的是 `zabbix-server-pgsql`（无 Web/API），`NMP_INTEGRATIONS_ZABBIX_URL` 目标不对，需 `zabbix-web-nginx-pgsql`。**2026-09-09 安全审计补充（P2/P5）**：⑦ aux 与主链共用同一个 postgres 超级用户 `nmp` 与同一个 `default` 网络 → 拿下任一 aux 容器（netbox 的 `SECRET_KEY` 是公开占位值，可伪造会话）即从容器内 `env` 读到主库密码，直连读写 `users`/`audit_logs`；同网段还是 L2 共享域，可 ARP 冒充 web 的静态 IP `172.28.0.10` 从而变成「受信代理」伪造 XFF。加固方向：aux 各建独立角色/库 + 独立 network + `cap_drop: [ALL]` + `no-new-privileges`；ES 至少开 `xpack.security`。⑧ 版本标签钉死（`latest-pg16`/`latest` 会静默换版，带持久卷的 postgres 尤其危险）。
+- [x] **G-9 `docker-compose.yml` 引用的 Dockerfile 在仓库中不存在 → `docker compose build` 必失败**（2026-09-09 新增，TLS 任务连带发现）— `docker-compose.yml:40-41` 与 `:59-61` 分别声明 `context: ./backend` / `./frontend` + `dockerfile: Dockerfile`，但 `git ls-files | grep -i dockerfile` 与全盘 `find` 均为空——**仓库里没有任何 Dockerfile**。后果：README/文档里的 `docker compose up -d` 开箱即失败；`nmp-api` / `nmp-web` 两个容器名（G-7 的受信代理讨论、§8.2.2 的 TLS 终止点都按它写的）在当前仓库状态下根本起不来。待办：① 补 `backend/Dockerfile`（Go 多阶段构建：`golang:1.22-alpine` 编译 → `alpine`/`distroless` 运行，非 root 用户）；② 补 `frontend/Dockerfile`（`node` 构建 → `nginx:alpine` 托管，默认站点用 `frontend/nginx.conf`，TLS 场景见 §8.2.2）；③ CI 增一步 `docker compose config`（不 build）防止引用漂移；④ 若决定不提供 Dockerfile，则从 compose 中删掉 `build:` 段并改用镜像名 **已交付（2026-09-09）**：① `backend/Dockerfile`（golang:1.25-alpine 编译 → alpine:3.20 运行，`CGO_ENABLED=0` 静态二进制，非 root uid 10001，busybox 自带 wget 做健康检查，build `server`/`migrate`/`admin-bootstrap` 三个命令；用 `CMD` 而非 `ENTRYPOINT`——ENTRYPOINT + compose `command` 会拼接成 `./server ./migrate up`，迁移会静默变成起 server）；② `frontend/Dockerfile`（node:22-alpine → nginx:1.27-alpine）+ 两个 `.dockerignore`；③ **根因之一：`.gitignore:48-49` 的裸 `Dockerfile`/`.dockerignore` 规则匹配任意深度，当年就算写了也进不了仓库**——已删除该规则（`git check-ignore` 复核）；④ CI 新增 `compose-config` job（`test -f` 四文件 + `docker compose config -q`，作用范围按实证收窄：config 不 stat Dockerfile、也不懂 `NMP_` 语义，env 名对齐靠 backend 单测）；⑤ `scripts/smoke-compose.sh` 真跑通并端到端验证 G-7。方案 `docs/FIX-PLAN-COMPOSE-RUNTIME.md`。
+
+- [ ] **G-18 `database.Init` 的 gorm `AutoMigrate` 兜底在真实 postgres 上不可用**（2026-09-09 新增，compose smoke 实测）— `MigrationsFS` 未注入时 `Init` 走 else 分支的 `autoMigrate()`（`internal/database/database.go:71-81`）。实测：空库上它建表但**不建迁移里的种子数据**（roles 无 admin → `admin-bootstrap` 报「未找到 admin 角色」）；已迁移的库上它与迁移 DDL 漂移，`AutoMigrate` 直接报 `insufficient arguments`（`database.go:106`）。受影响的三个 CLI （`cmd/admin-bootstrap`、`cmd/seed`、`cmd/set-role`）已在 compose 轮注入 `MigrationsFS` 修复（D-I），但兜底本身仍在：待办 ① 删掉兜底改为显式报错（「请注入 MigrationsFS」），或 ② 限定为 sqlite 测试专用（加注释 + 在 postgres 驱动下拒绝进入该分支）。**注意**：现有单测依赖 sqlite 走这条兜底，改动需同步。
+
+- [ ] **G-19 `web` 容器以 root 运行、无最小权限**（2026-09-09 新增，安全审计 P3）— `frontend/Dockerfile` 的 `FROM nginx:1.27-alpine` 之后没有 `USER`，nginx master 以 root 跑（默认 caps 全开），而它是**唯一对外入口**；对比 `backend/Dockerfile` 的 `adduser -u 10001` / `USER nmp`。本轮已补 `HEALTHCHECK`（`--wait` 才真的等到 nginx 可用）。待办：换 `nginxinc/nginx-unprivileged:1.27-alpine`（或自行 `USER nginx` + 改 pid/temp 路径 + `listen 8080`），并加 `read_only: true` + `tmpfs: [/var/cache/nginx, /var/run]` + `cap_drop: [ALL]`。注意 `frontend/nginx.conf` 同时是非 compose 部署模板，改监听端口要同步 `08-部署运维.md` 与 `frontend/nginx-tls.conf.example`。
+
+- [ ] **G-20 `models.Asset.CustomFields` 零值 `''` 在真 Postgres 上是非法 JSON → 建资产失败**（2026-09-09 新增，CLI 真库回归实测）— `internal/models/asset.go:49` `CustomFields string \`gorm:"type:jsonb"\``；客户端/种子不传该字段时 Go 零值 `""` 被写进 `assets.custom_fields JSONB`，Postgres 报 `invalid input syntax for type json (SQLSTATE 22P02)`。实测：`cmd/seed` 在真 PG 上**每一条资产都建不出来**（`创建服务器失败/创建交换机失败` 刷屏，但进程仍 exit 0 → 静默半失败）；`CreateAsset` 走 `c.ShouldBindJSON(&asset)` 直接绑定模型，POST 不带 `custom_fields` 时同样 500。sqlite 单测不报（动态类型不校验 JSON）。**唯一显式写 `"{}"` 的地方**是 `internal/integration/service.go:128`。待办：① 列加 `NOT NULL DEFAULT '{}'::jsonb` 并让模型用 `*string`/`datatypes.JSON`，或 ② 入库前归一化空串 → `{}`；③ 补一条 dbsmoke 断言（真 PG 上建资产 + seed 资产数 > 0）。注意 `Tags` 同为 jsonb 且 seed 里显式给了值，同样有零值风险。
 
 ### v1.0.2 已发布（6/17）
 - [x] **README.md**：6 GitHub badges (Release/CI/License/Go/React/Docker) + 状态推进
@@ -193,22 +204,32 @@
 
 每条任务完成后跑：编写代码 → 代码审查 → 单元测试 → pre-commit → commit。
 
-## 一键部署 (v1.0.1 新增)
+## 一键部署 (v1.0.1 新增，2026-09-09 按主链/aux 重构)
+
+前置：`cp .env.example .env && chmod 600 .env`，三个 secret 用 `openssl rand -hex 32` 各生成一份
+（缺值 compose 直接报错退出）。
 
 ```bash
-# 全自动：装依赖 + 起 8 服务 + migrate + seed（含演示数据）
-make deploy
-# 首次 5-10min (拉镜像)，后续 1-2min (缓存)
-
-# 生产：同上但无种子
+# 生产（推荐）：装依赖 + 起主链 4 服务(postgres/redis/api/web)；迁移由 api 启动时执行
 make deploy-min
+# 首次 5-10min (拉镜像 + build)，后续 1-2min (缓存)
+# 首个管理员：docker compose exec api env FIRST_ADMIN_USERNAME=admin \
+#   FIRST_ADMIN_PASSWORD='<强密码>' ./admin-bootstrap
 
-# 健康检查：8 服务 UP/DOWN 一表
+# 演示环境：同上 + seed（⚠️ 写入 admin/admin123 等已知密码账号，勿用于生产）
+make deploy
+
+# 健康检查：主链 4 服务 + aux（未启动显示 ⏸️）
 make deploy-status
 
+# 辅助系统（netbox/zabbix/glpi/graylog + es/mongo）：默认不启动
+make docker-up-aux
+
 # 详细命令
-make help    # 列全部 24 个 target
+make help
 ```
+
+详见 [08-部署运维.md](08-部署运维.md) §8.3 与 [README.md](README.md) 快速开始。
 
 ## 启动命令（手动模式，无 Docker）
 

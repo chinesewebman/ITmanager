@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 
+	"network-monitor-platform"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/middleware"
@@ -43,6 +44,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// 必须注入 MigrationsFS：否则走 gorm AutoMigrate 兜底，在真实 postgres 上
+	// 与迁移 DDL 漂移（实测 "insufficient arguments"）。
+	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		return err

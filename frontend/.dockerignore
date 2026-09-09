@@ -1,0 +1,13 @@
+# 关键：node_modules 与 dist 若进构建上下文，会覆盖镜像内的安装/构建产物，
+# 且上下文体积从几 MB 涨到几百 MB。
+node_modules/
+dist/
+coverage/
+.vite/
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+Dockerfile
+.dockerignore

@@ -4,13 +4,13 @@
 //  2. 验证用普通 == 比较（时序侧信道泄露）
 //
 // 新设计：
-//   - HMAC-SHA256 + server-side pepper（来自 NMP_API_KEY_PEPPER 环境变量）
+//   - HMAC-SHA256 + server-side pepper（来自 NMP_AUTH_API_KEY_PEPPER 环境变量）
 //   - crypto/subtle.ConstantTimeCompare 防时序侧信道
 //   - 同时支持旧 SHA-256 hash（双读滚动迁移），但每次验证会提示
 //
 // 部署步骤：
 //  1. 生成 pepper：openssl rand -hex 32
-//  2. 设置环境变量 NMP_API_KEY_PEPPER=xxx
+//  2. 设置环境变量 NMP_AUTH_API_KEY_PEPPER=xxx
 //  3. 重启服务后所有新 API Key 自动用新 hash
 //  4. 旧 key 仍可登录（fallback），但建议在 console 重新签发并废弃旧 hash
 package apikey

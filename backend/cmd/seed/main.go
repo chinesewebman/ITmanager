@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"network-monitor-platform"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/models"
@@ -19,6 +20,9 @@ func main() {
 		log.Fatalf("配置加载失败: %v", err)
 	}
 
+	// 必须注入 MigrationsFS：否则走 gorm AutoMigrate 兜底，在真实 postgres 上
+	// 与迁移 DDL 漂移（实测 "insufficient arguments"），且不会创建迁移里的种子数据。
+	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
 	db, err := database.Init(&cfg.Database)
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)

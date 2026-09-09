@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# 四个 job 都只需要读仓库；显式收紧默认 token 权限
+permissions:
+  contents: read
+
 jobs:
   backend:
     name: Backend (Go)
@@ -97,6 +101,49 @@ jobs:
           SMOKE_PG_PORT: '5432'
         run: scripts/db_smoke.sh
 
+      # D-I 回归（变异审计 E4：三个 CLI 的 MigrationsFS 注入此前零自动化保护）。
+      # 三个 CLI 在真 Postgres 上跑，走的是与 cmd/server 相同的迁移执行器。
+      # 反证：去掉任一 CLI 的 database.SetMigrationsFS → 该 CLI 落到 gorm AutoMigrate 兜底，
+      # 空库上不建种子角色（admin-bootstrap 报「未找到 admin 角色」）、已迁移库上与 DDL 漂移
+      # （实测 insufficient arguments）→ 本步必红。
+      - name: CLI 迁移路径回归（admin-bootstrap / set-role / seed）
+        working-directory: backend
+        env:
+          NMP_DATABASE_HOST: 127.0.0.1
+          NMP_DATABASE_PORT: '5432'
+          NMP_DATABASE_USER: postgres
+          NMP_DATABASE_PASSWORD: smoke_pw
+          NMP_DATABASE_SSLMODE: disable
+          NMP_AUTH_JWT_SECRET: ci-dummy-jwt-secret-at-least-32-bytes!!
+          NMP_AUTH_API_KEY_PEPPER: ci-dummy-pepper-at-least-32-bytes!!
+          FIRST_ADMIN_USERNAME: ciadmin
+          FIRST_ADMIN_PASSWORD: 'CiSmokeP@ssw0rd-123'
+        run: |
+          set -euo pipefail
+          q() { PGPASSWORD=smoke_pw psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -tAc "$1" "${@:2}"; }
+
+          # ① admin-bootstrap：空库 → 注入的 MigrationsFS 跑完 13 个迁移并建出种子角色
+          PGPASSWORD=smoke_pw createdb -h 127.0.0.1 -U postgres itmanager_cli_admin
+          NMP_DATABASE_NAME=itmanager_cli_admin go run ./cmd/admin-bootstrap
+          test "$(q "select count(*) from users where username='ciadmin'" itmanager_cli_admin)" = "1"
+
+          # ② set-role：需要第二个 admin，否则触发防自锁守卫（「唯一管理员不许降级」）
+          FIRST_ADMIN_USERNAME=ciadmin2 \
+            NMP_DATABASE_NAME=itmanager_cli_admin go run ./cmd/admin-bootstrap
+          SET_ROLE_USERNAME=ciadmin SET_ROLE_ROLE=auditor \
+            NMP_DATABASE_NAME=itmanager_cli_admin go run ./cmd/set-role
+          test "$(q "select count(*) from user_roles ur join roles r on r.id=ur.role_id where r.code='auditor'" itmanager_cli_admin)" = "1"
+          SET_ROLE_USERNAME=ciadmin SET_ROLE_ROLE=admin \
+            NMP_DATABASE_NAME=itmanager_cli_admin go run ./cmd/set-role
+          test "$(q "select role from users where username='ciadmin'" itmanager_cli_admin)" = "admin"
+
+          # ③ seed：另一个空库，验证演示数据路径可用。
+          # 只断言用户路径——seed 的资产插入在真 PG 上另有既存缺陷（jsonb 空串，
+          # TODO G-20），且它失败时不改退出码，故这里不把资产纳入断言。
+          PGPASSWORD=smoke_pw createdb -h 127.0.0.1 -U postgres itmanager_cli_seed
+          NMP_DATABASE_NAME=itmanager_cli_seed go run ./cmd/seed
+          test "$(q "select count(*) from users where username='admin'" itmanager_cli_seed)" = "1"
+
   frontend:
     name: Frontend (Node)
     runs-on: ubuntu-latest
@@ -139,3 +186,30 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist/
+
+  compose-config:
+    name: Compose config
+    runs-on: ubuntu-latest
+    # 作用范围（实证收窄，见 docs/FIX-PLAN-COMPOSE-RUNTIME.md D-F）：
+    #   `docker compose config -q` 只能抓 YAML 语法 / ${VAR:?} 缺值 / compose schema；
+    #   它不 stat Dockerfile（指向不存在的文件也 exit 0），也不懂 NMP_ 语义（变量名拼错无感）。
+    #   所以：Dockerfile 漂移靠下面的 test -f，env 名与 viper 键的对齐靠 backend 单测。
+    # 不在这里 build/up：Go+Node 全量构建会给每次 push 加 3–5 分钟，
+    # 编译由 backend/frontend job 覆盖、迁移由 dbsmoke 覆盖。
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dockerfile 存在性（G-9 回归）
+        run: |
+          set -euo pipefail
+          test -f backend/Dockerfile
+          test -f frontend/Dockerfile
+          test -f backend/.dockerignore
+          test -f frontend/.dockerignore
+
+      - name: Render compose file
+        env:
+          NMP_DATABASE_PASSWORD: ci-dummy-password
+          NMP_AUTH_JWT_SECRET: ci-dummy-jwt-secret-at-least-32-bytes!!
+          NMP_AUTH_API_KEY_PEPPER: ci-dummy-pepper-at-least-32-bytes!!
+        run: docker compose config -q

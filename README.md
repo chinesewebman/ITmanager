@@ -27,33 +27,57 @@
 
 ### 前置要求
 
-- Go 1.21+ / Node.js 18+ / Docker & Docker Compose
+- Go 1.25+（见 `backend/go.mod`）/ Node.js 22+ / Docker & Docker Compose
 
-### 一键部署（首次推荐）
+### 首次部署
+
+compose 的 secret 全部走 `${VAR:?}`（缺值直接报错，不再有 `nmp123` 这类硬编码凭据），
+**必须先准备 `.env`**：
 
 ```bash
 git clone <repo> && cd ITmanager
-make deploy          # install + docker-up + db-migrate + db-seed
-                     # 首次 5-10min (拉镜像)，后续 1-2min (缓存)
+cp .env.example .env && chmod 600 .env
+# 三个 secret 各生成一份，不要复用：
+#   NMP_DATABASE_PASSWORD / NMP_AUTH_JWT_SECRET / NMP_AUTH_API_KEY_PEPPER
+#   sed -i "s/^NMP_DATABASE_PASSWORD=.*/NMP_DATABASE_PASSWORD=$(openssl rand -hex 32)/" .env  （其余同理）
+```
+
+生产（无演示数据）：
+
+```bash
+make deploy-min      # install + docker-up（主链 4 服务；迁移由 api 启动时自动执行）
+                     # 首次 5-10min (拉镜像 + build)，后续 1-2min (缓存)
+# 创建首个管理员（密码自定，>=12 位）：
+docker compose exec api env FIRST_ADMIN_USERNAME=admin \
+  FIRST_ADMIN_PASSWORD='<强密码>' ./admin-bootstrap
+```
+
+> ⚠️ **生产上线前必做两件事**（默认值只面向本地开发）：
+> 1. `.env` 里设 `NMP_SERVER_MODE=release` —— debug 下登录 cookie 不带 `Secure`、
+>    且弱集成凭据（zabbix 默认 Admin/zabbix 等）不会被启动期拒绝。
+> 2. 在 web 前面做 TLS 1.2+ 终结（`frontend/nginx-tls.conf.example` 或外部 LB）——
+>    `web` 默认 `3000:80` 是**明文 HTTP**，`make deploy-min` 不会替你加密。
+>    详见 [08-部署运维.md](08-部署运维.md) §8.2.2 / §8.3。
+
+演示环境（⚠️ 会写入 `admin/admin123` 等已知密码的演示账号，勿用于生产）：
+
+```bash
+make deploy          # install + docker-up + db-seed
 ```
 
 完成后访问：
 
 - 前端: http://localhost:3000
-- 后端 API: http://localhost:8080
-- Swagger: http://localhost:8080/swagger/index.html
-- 默认账号: `admin / admin123`
+- 后端 API: http://127.0.0.1:8080（仅环回，唯一对外入口是 web）
+- Swagger: http://127.0.0.1:8080/swagger/index.html
 
 ```bash
-make deploy-status   # 检查 8 服务健康
+make deploy-status   # 检查服务健康（主链 4 + aux 未启动时显示 ⏸️）
 make docker-logs     # 跟踪日志
 ```
 
-### 生产部署（无种子数据）
-
-```bash
-make deploy-min      # install + docker-up + db-migrate（无 seed）
-```
+> 辅助系统（NetBox / Zabbix / GLPI / Graylog）在 `aux` profile 下，默认不启动：
+> `make docker-up-aux`。它们目前是占位凭据、独立库未初始化，生产化见 TODO G-17。
 
 ### 本地开发（不跑 NetBox/Zabbix/GLPI/Graylog）
 
@@ -65,8 +89,8 @@ make dev             # 启 api (8080) + web (3000)，需自带 PG/Redis
 ### 测试
 
 ```bash
-make test            # 后端 603 tests
-make test-frontend   # 前端 117 tests
+make test            # 后端全量单测
+make test-frontend   # 前端单测 + 类型检查
 make test-coverage   # 生成 coverage.html
 ```
 

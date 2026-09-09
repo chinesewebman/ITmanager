@@ -45,6 +45,7 @@ dumps/
 *.db
 
 # Docker
-.dockerignore
-Dockerfile
+# 注意：这里曾有一条裸 `Dockerfile` / `.dockerignore` 规则，匹配任意深度，导致
+# backend/frontend 的 Dockerfile 永远进不了仓库（G-9 的根因之一）。现在这两个文件
+# 是交付物，必须跟踪；只忽略本地覆盖文件。
 docker-compose.override.yml

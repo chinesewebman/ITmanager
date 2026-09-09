@@ -54,9 +54,12 @@ auth:
     secret: ""  # 必须从环境变量 NMP_AUTH_JWT_SECRET 注入
     expire: 86400  # 24小时 (秒)
   # F1/C-F6: API Key 的 HMAC pepper，必须从环境变量 NMP_AUTH_API_KEY_PEPPER 注入。
-  # 这个空占位是**必需的**：viper 只对 AllKeys（yaml 键 + SetDefault 键）做 env 覆盖，
+  # 这个空占位是**双保险**：viper 只对 AllKeys（yaml 键 + SetDefault 键）做 env 覆盖，
   # 键不存在时 NMP_AUTH_API_KEY_PEPPER 会被静默忽略、服务永远起不来（G-13）。
-  # 不要在这里写死值——pepper 落库/落仓会削弱防离线彩虹表的意义。
+  # 功能上的保证来自 config.go 的 `SetDefault("auth.api_key_pepper","")`（覆盖
+  # 「生产挂载了不含该键的旧/自定义 config.yaml」）；这里留着是为了让 shipped 配置
+  # 自解释。变异反证：单独删这一行不会让任何测试变红，删 SetDefault 才会。
+  # 不要在这里写死值——pepper 落仓会削弱防离线彩虹表的意义。
   api_key_pepper: ""
   ldap:
     enabled: false
