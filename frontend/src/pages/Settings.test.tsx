@@ -203,6 +203,11 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     vi.mocked(notificationApi.createChannel).mockResolvedValue({
       data: { code: 0, data: {} },
     } as any);
+    // L-6（测试有效性审计）：vi.clearAllMocks() 不清实现，本 describe 不设
+    // apiKeyApi.list 时会继承上一 describe 的 mockRejectedValue（stderr 噪声 + 顺序耦合）。
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
   });
 
   // 页面里还有 Zabbix 表单的「用户名」等同名 label → 所有字段查询都限定在渠道弹窗内
@@ -312,7 +317,9 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
             name: "渠道B",
             type: "dingtalk",
             config: JSON.stringify(channelConfigSamples.dingtalk),
-            is_enabled: true,
+            // M-1（测试有效性审计）：停用状态必须原样保留 —— 硬编码 true 会让编辑
+            // 一条已停用渠道把它静默启用（开始真发告警）。
+            is_enabled: false,
           },
         ],
       },
@@ -340,6 +347,41 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     expect(modalB.getByLabelText("Webhook URL")).toHaveValue(
       channelConfigSamples.dingtalk.webhook_url
     );
+
+    // M-1：保存时 is_enabled 必须沿用当前记录（false），不能硬编码 true
+    fireEvent.click(modalB.getByRole("button", { name: "保 存" }));
+    await waitFor(() => expect(notificationApi.updateChannel).toHaveBeenCalled());
+    const payload: any = vi.mocked(notificationApi.updateChannel).mock.calls[0][1];
+    expect(payload.is_enabled).toBe(false);
+  });
+
+  // L-1（测试有效性审计）：listChannels 失败时的兜底样本也是 M1 的改动（原来键名全错），
+  // 但没有任何用例让请求失败 → 改回坏键全绿。这里用编辑弹窗的回填值钉住兜底键名。
+  it("listChannels 失败：兜底样本键名可回填", async () => {
+    vi.mocked(notificationApi.listChannels).mockRejectedValue(new Error("500"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "编辑" }))[0]);
+
+    const modal = within(
+      (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement
+    );
+    expect(modal.getByLabelText("SMTP服务器")).toHaveValue("smtp.example.com");
+    errSpy.mockRestore();
+  });
+
+  // L-2（测试有效性审计）：去掉下拉项的 disabled 后原有用例仍全绿 → UI 会重新可选
+  // wechat（后端 400 挡住，不是静默失败，但选项本身就不该可选）。
+  it("wechat 下拉项被禁用", async () => {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+    fireEvent.mouseDown(screen.getByLabelText("渠道类型"));
+
+    const opt = await screen.findByTitle("企业微信（暂不支持）");
+    expect(opt.className).toContain("ant-select-item-option-disabled");
   });
 
   // 正确性 M-1：存量 wechat 行既不能被当成 Webhook 渲染（键名对不上、必填永远过不了），

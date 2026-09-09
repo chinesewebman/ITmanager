@@ -10,14 +10,14 @@
 
 | 维度 | 数值 / 说明 |
 |---|---|
-| Backend 测试函数 | **971**（+12 相对 2026-09-09 早期快照；`grep -rh "^func Test"`，含 12 个 `dbsmoke` 标签用例）。新增：`channel_service_test.go` 6 个（跨语言样本 V-1、坏配置不落库 V-2、Update 合并校验 V-3、非字符串 config fail-closed V-4、错误文本带原因且脱敏 V-8、**键白名单 H-1**）、`channel_config_contract_test.go` 5 个（Create 六形态不回显 M-1、Update 不回显 M-1、Create 400 文案 V-8、Update 坏 config 返 400、**Update 键白名单 H-1**）、`notification/sender_contract_test.go` 1 个（**样本键集合 ↔ `channelConfig` json tag，契约第三条腿 M-2**）、`cmd/seed` 扩展既有用例（每行可构造 V-6） |
-| Frontend 测试数 | **172**（27 文件；新增 5 个：email/dingtalk/webhook 表单产出与样本 deep-equal（含端口必须是数字）、**连续编辑两条渠道（H-2）**、**存量 wechat 行显示可读标签 + 下线提示**） |
+| Backend 测试函数 | **971**（+12 相对 2026-09-09 早期快照；`grep -rh "^func Test"`，含 12 个 `dbsmoke` 标签用例）。新增：`channel_service_test.go` 6 个（跨语言样本 V-1、坏配置不落库 V-2、Update 合并校验 V-3、非字符串 config fail-closed V-4、错误文本带原因且脱敏 V-8、**键白名单 H-1**）、`channel_config_contract_test.go` 5 个（Create 六形态不回显 M-1、Update 不回显 M-1、Create 400 文案 V-8、Update 坏 config 返 400、**Update 键白名单 H-1**）、`notification/sender_contract_test.go` 1 个（**样本键集合 ↔ `channelConfig` json tag，契约第三条腿 M-2**）、`cmd/seed` 扩展既有用例（每行可构造 V-6 + rev4 追加**逐类型键集合断言**，钉住可选键 `sign_secret`） |
+| Frontend 测试数 | **174**（27 文件；新增 7 个：email/dingtalk/webhook 表单产出与样本 deep-equal（含端口必须是数字）、**连续编辑两条渠道（H-2，rev4 追加 `is_enabled` payload 断言）**、**存量 wechat 行显示可读标签 + 下线提示**、**兜底样本键名可回填（L-1）**、**wechat 下拉项被禁用（L-2）**） |
 | 跨语言契约单一来源 | `frontend/src/pages/__fixtures__/channelConfigSamples.json` —— **三条腿**：① 前端表单产出 deep-equal 它；② 后端 `channel_service_test.go` 读同一文件喂 `notification.NewSender`；③ `sender_contract_test.go` 断言样本键集合 == `channelConfig` 的 json tag 集合（路径 `../../../frontend/...`）。缺 ③ 时「表单与样本一起改名」（尤其可选键）两侧都绿（正确性审计 M-2） |
-| 变异反证 | **V-9 / V-10 / V-13 / V-14 / V-15 / V-16a 六条红在断言上，V-16b 绿（对照组）**：V-13 `sender.go` 恢复回显 `ch.Type` → service + handler 的不回显用例红；V-14 停用键白名单 → 键白名单用例红（`{"id":…}`/`{"foo":…}` 被放行）；V-15 去掉打开弹窗的 `form.resetFields()` → 连续编辑用例红；V-16a 把 `SignSecret` 的 tag 改成 `sign_secret2` → 契约第三条腿红，而 **V-16b「样本可构造」仍绿**（证明 M-2 缺口真实存在、新断言确实补上了它）；V-9/V-10 在 rev3 后复验仍红。**V-11（删 `redact.Text`）已失效**：400 出口不再有任何调用方可控内容，该变异保持可编译后实测**绿**（`_ = redact.Text` 版本），文档 §4 已写明由 V-13 取代——变异失效本身就是修复生效的证据 |
+| 变异反证 | **V-9 / V-10 / V-13 / V-14 / V-15 / V-16a 六条红在断言上，V-16b 绿（对照组）**：V-13 `sender.go` 恢复回显 `ch.Type` → service + handler 的不回显用例红；V-14 停用键白名单 → 键白名单用例红（`{"id":…}`/`{"foo":…}` 被放行）；V-15 去掉打开弹窗的 `form.resetFields()` → 连续编辑用例红；V-16a 把 `SignSecret` 的 tag 改成 `sign_secret2` → 契约第三条腿红，而 **V-16b「样本可构造」仍绿**（证明 M-2 缺口真实存在、新断言确实补上了它）；V-9/V-10 在 rev3 后复验仍红。**V-11（删 `redact.Text`）已失效**：400 出口不再有任何调用方可控内容，该变异保持可编译后实测**绿**（`_ = redact.Text` 版本），文档 §4 已写明由 V-13 取代——变异失效本身就是修复生效的证据。**rev4（第三路测试有效性审计）新增 5 条，全红在断言上**：V-18 seed 钉钉行 `sign_secret`→`secret`（rev4 前存活，`NewDingTalkSender` 不要求该键）→ seed 键集合断言红；V-19 前端 `is_enabled` 改回硬编码 `true` → 编辑 payload 断言红；V-20 wechat 下拉项去 `disabled` → 禁用断言红；V-21 兜底样本 `smtp_host`→`smtp` → 回填断言红；V-22 `touched` 初值改 `true` → 「只改name不触发校验」红（该子用例此前不承重）。**两条存活判为结构性、明确接受**：删 `redact.Text`（无向量可造）、`Update` 写回 `effType/effConfig`（顺序执行下行为等价，需 `-race` + 可控交错） |
 | 新增 trap | `docs/TRAPS.md` **T-36**（fail-closed 的写法陷阱：`if s, ok := v.(string); ok { 校验 }` 是 fail-open——`Update(map)` 会把 `float64/bool` 静默写成 `"12345.0"`/`"1"`）、**T-37**（校验用的键 ≠ 落库用的键：gorm `Updates(map)` 的 `LookUpField` 把 Go 字段名解析到同一列，`{"Config":…}` 绕过小写键校验照样落库） |
 | 为什么加 | UI 表单、seed、OpenAPI、后端 `channelConfig` 四份契约各自手写且无人校验；写入端只校验名称 → 错配要等「告警发不出去」才暴露，钉钉/企微 HTTP 200 + `errcode != 0` 还会把它吞成 success |
 
-> 验证口径：`go test ./... -count=1` 27 包全绿、`go vet` / `gofmt -l` 干净、`npx tsc --noEmit` 0 错、`npm run lint` 0 warning、`npx vitest run` 27 文件 170 测试全过。
+> 验证口径：`go test ./... -count=1` 27 包全绿、`go vet` / `gofmt -l` 干净、`npx tsc --noEmit` 0 错、`npm run lint` 0 warning、`npx vitest run` 27 文件 **174** 测试全过。
 
 ---
 

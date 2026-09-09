@@ -1,10 +1,11 @@
 # FIX-PLAN-NOTIFY-CHANNEL：通知渠道「配置契约」错位 + 钉钉加签缺失 + 业务失败被当成功（TODO G-33）
 
-- **状态**：rev3 — M1 已实现、已过三路审计并迭代收口（**971 backend 测试函数 / 172 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a 六条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4），待推送验证 CI
+- **状态**：rev4 — M1 已实现、已过三路审计并迭代收口（**971 backend 测试函数 / 174 frontend 测试全绿**；变异 V-9/V-10/V-13/V-14/V-15/V-16a/V-18..V-22 十一条红在断言上、V-16b 绿为对照组、V-11 已失效见 §4），rev4 处置见 §7.3
 - **关联**：G-33（seed 企微键名 / 钉钉 `SignSecret` 未生效）、G-28（错误文本脱敏）、G-31（回显点残余）、G-36（企微 sender）、G-37（OpenAPI 渠道路径漂移）
 - **发现路径**：G-28 第三轮审计后盘点「配置 → Sender」链路时发现
 - **rev2 变更**：见 §7 处置表。阻塞项 2 个（B-1 表单端口类型、B-2 变异设计错误）、HIGH 5 个（H-1 脱敏点、H-2 `Update` fail-open、H-3 既有测试、H-4 seed 邮件行、H-5 400 文案）全部落入 §2/§3/§4。
 - **rev3 变更**：实现后三路只读审计（安全 / 正确性 / 测试有效性）回执，处置见 §7.2。两个审计独立命中同一个 HIGH（`Update` 键名绕过，真 PG 实测 HTTP 200 落库），另有前端 Modal 串记录（H-2）、契约只钉必填键（M-2）、400 body 回显 Type 的非 URL 形态（安全 M-1）等；本 rev 的代码/测试改动即 §7.2 的处置结果。
+- **rev4 变更**：第三路（测试有效性）审计回执的处置见 §7.3。核心结论：**代码无新缺陷，缺的是测试承重力**——seed 钉钉行 `sign_secret` 改名无测试钉住（H-1）、前端 `is_enabled` 保留逻辑与 wechat 禁用项、兜底样本键名、`touched` 跳过语义均存在「变异存活」；本轮逐条补断言并重跑变异（V-18..V-22）。M-2/M-3 两条存活判为结构性、明确接受（见 §7.3）。
 
 ## 1. 问题（What / Why）
 
@@ -241,6 +242,11 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 | V-15 | **变异反证 F**：删掉前端打开弹窗时的 `form.resetFields()` → H-2 用例（连续编辑两条渠道）必红 | 变异 |
 | V-16 | **变异反证 G**：把 `channelConfig.SignSecret` 的 json tag 改成 `sign_secret2` → 契约第三条腿（V-17）必红，而「样本可构造」仍绿（证明新断言补上了 M-2 的缺口） | 变异 |
 | V-17 | 契约第三条腿：样本键集合 ↔ `channelConfig` json tag 逐类型 `ElementsMatch`，且清单里的键本身必须是真实 tag | notification 单测 |
+| V-18 | **变异反证 H**：seed 钉钉行 `sign_secret` → `secret` → V-6（键集合断言）必红（rev4 前存活） | 变异 |
+| V-19 | **变异反证 I**：前端 `is_enabled` 改回硬编码 `true` → 「连续编辑两条渠道」的 payload 断言必红（rev4 前存活） | 变异 |
+| V-20 | **变异反证 J**：wechat 下拉项去掉 `disabled: true` → 「wechat 下拉项被禁用」必红（rev4 前存活） | 变异 |
+| V-21 | **变异反证 K**：兜底样本 `smtp_host` → `smtp` → 「兜底样本键名可回填」必红（rev4 前存活） | 变异 |
+| V-22 | **变异反证 L**：`Update` 的 `touched` 初值改 `true`（恒校验）→ 「只改name不触发校验」必红（rev4 前该子用例不承重） | 变异 |
 
 **§4.1 存量坏行修复步骤（V-12，照做即可）**
 
@@ -281,7 +287,7 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 
 | 期 | 内容 | 状态 |
 |---|---|---|
-| M1 | 配置契约对齐（后端写入校验 + 前端表单 + seed + OpenAPI + 跨语言样本） | 已实现 + 三路审计收口，待推送验证 CI |
+| M1 | 配置契约对齐（后端写入校验 + 前端表单 + seed + OpenAPI + 跨语言样本） | 已实现 + 三路审计收口（rev4），待推送验证 CI |
 | M2 | 钉钉加签 + 响应回执校验 | 待 M1 完成后 |
 | M3 | 企微渠道（`wechat` sender + seed + 前端） | 登记 G-36 |
 
@@ -341,3 +347,25 @@ if err := validateChannelConfig(ch.Type, ch.Config); err != nil {
 **正确性审计已核实无问题**：测试基线为真（副本里 27 包全 `ok`、968 测试函数、前端 27 文件 170 测试、`gofmt`/`go vet`/`tsc`/`lint` 全干净）；`api.types.ts` 与 OpenAPI 无漂移（重新生成 byte-identical）；V-9/V-10/V-11 独立复跑全红在断言上；`Create` 的 fail-fast 顺序（校验早于 INSERT）；handler 错误映射完备；前端表单键名逐键对齐；`notification_channels` 只有 `ChannelService` 与 `cmd/seed` 两个写入点。
 
 **一条耦合提示（非缺陷，记录备查）**：`channel_service_test.go` 读 `../../../frontend/...` 的样本，跨出 Go module。CI（`ci.yml:30-39`，`working-directory: backend` 但 checkout 全仓）与 `make test` 都成立，只在「只挂载 backend 目录」的容器里会红——这是 §2.2 第 7 条刻意选择的单源方案的代价。
+
+### 7.3 第三路（测试有效性）审计处置（rev3 → rev4）
+
+第三路审计以 20:15 快照 + 全文件内容比对为基准（代码文件与仓库**逐字节一致**），在 `/tmp/audit2` 副本里自设计 **20 条后端 + 9 条前端**变异逐条实测。结论：**代码无新缺陷**，`validateChannelConfig` 100% / `Create` 88.9% / `Update` 93.8% 覆盖、未覆盖的只有 DB 错误出口等既有分支；但 4 处「变异存活」= 断言不承重，另有 3 条结构性存活。
+
+| 编号 | 结论（含证据） | 处置 |
+|---|---|---|
+| **H-1** | seed 钉钉行 `sign_secret` 无测试钉住：`NewDingTalkSender` 只要求 `webhook_url` 非空，把键名改成 `secret` 仍能构造成功 → 变异 S17 存活（`cmd/seed/main_test.go` 只断言 `NewSender` 成功） | `TestSeed_空DB_创建通知渠道` 增加逐类型**键集合断言**（email 5 键 / dingtalk `webhook_url`+`sign_secret` / webhook `url`）；V-18 变异 |
+| **M-1** | 前端 `is_enabled` 保留逻辑无断言：「连续编辑」用例只看表单显示值，改回硬编码 `true` 全绿（变异 F3 存活）→ 编辑已停用渠道会静默启用、真发告警 | 用例 fixture 的渠道 B 改 `is_enabled: false`，保存后断言 `updateChannel` payload 的 `is_enabled === false`；V-19 变异 |
+| **M-2** | `redact.Text` 在 `validateChannelConfig` 中已不可验证（变异 S6 存活）——唯一能造出「带凭据错误文本」的向量已随安全 M-1 移除 | **接受**（rev3 §4 V-11 已自曝）。保留为纵深防御 + 代码注释约定；残余风险「将来构造器把值拼进错误文本」由 §2.2 第 9 条约定与评审清单兜 |
+| **M-3** | `Update` 写回 `effType/effConfig` 无测试（变异 S10 存活）：顺序执行下写回与不写回行为等价，任何非并发测试都区分不了 | **接受**（结构性）。需 `-race` + 可控交错，成本高于收益；残余窗口已在 R-11 记录 |
+| **L-1** | 前端兜底样本（`listChannels` 失败分支）无测试，改回坏键全绿（变异 F7 存活） | 新增「兜底样本键名可回填」用例（点开兜底行编辑，断言 `SMTP服务器` 回填值）；V-21 变异 |
+| **L-2** | wechat 下拉项的 `disabled: true` 无测试（变异 F4b 存活）→ UI 会重新可选 wechat（后端 400 挡住，非静默失败） | 新增「wechat 下拉项被禁用」用例（断言 `ant-select-item-option-disabled`）；V-20 变异 |
+| **L-3** | 「只改name不触发校验」子用例不承重：种子行合法，恒校验也通过（变异 `touched=true` 存活于该子用例） | 种子改为一**存量坏行**（`type=email, config={}`），name-only 更新必须成功；V-22 变异 |
+| **L-4** | 契约第三条腿的残余共因：样本+表单+前端测试+`allowedConfigKeys` **四处同步**改 `sign_secret`→`secret` 仍全绿（`secret` 是 webhook 段的合法 tag，清单校验过不了语义） | **接受**（可达性低：需改到测试文件本身）。语义级校验会引入第二份手写映射，与「最小改动」冲突 |
+| **L-5** | 前端用例耦合 antd 内部细节（`.ant-modal`、`ant-select-item-option-disabled`、`"保 存"` CJK 空格）；email 用例 2.5–4.8s vs `testTimeout: 20000` | **接受**（连跑稳定）。antd 升级时按整体假红处理；本轮新用例沿用同一耦合风格 |
+| **L-6** | G-33 describe 未重置 `apiKeyApi.list`，继承上一 describe 的 `mockRejectedValue`（stderr 噪声 + 顺序耦合，无断言影响） | describe 的 `beforeEach` 补 `apiKeyApi.list` 的 `mockResolvedValue` |
+| **L-7** | `Update` 的 DB 写失败路径未覆盖（`channel_service.go:144-146`） | **不修**（既有形态、非 M1 新分支），登记备查 |
+
+**审计已核实无问题（承重力正证）**：S1–S5、S7–S9、S11–S19、F1/F2/F4/F5/F6/F8/F9 全部**红在断言上**（无红在编译/超时/空断言）；`assert.Zero` 有正控且正控在「跳过 INSERT」变异下**红**（S20），证明「坏配置不落库」不是恒真；service/handler 测试用**真 sqlite**（非 sqlmock），`-count=10` 无偶发；`NotContains` 均与 `Contains` 成对；不 mock 被测代码（handler 契约用真 service + 真 sqlite，前端只 mock `services/api` 与 `antd.message`）；fixture 缺失即失败（不 skip）。
+
+**本轮复跑（rev4）**：`python3 /tmp/mutate4.py` 五条全部按预期红（S17 / L-3 / F3 / F4b / F7），并逐条确认红在断言上（`expected true to be false`、`toHaveValue(smtp.example.com)`、`to contain 'ant-select-item-option-disabled'`）。全量：backend 27 包 `ok` / 971 测试函数 / `gofmt`+`go vet` 干净；frontend 27 文件 **174** 测试 / `tsc` 0 错 / `lint` 0 warning。

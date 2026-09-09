@@ -325,8 +325,15 @@ func TestChannelService_Update_合并校验(t *testing.T) {
 	}).Error)
 
 	t.Run("只改name不触发校验", func(t *testing.T) {
-		got, err := svc.Update(ctx, id.String(), map[string]interface{}{"name": "改名"})
-		require.NoError(t, err)
+		// L-3（测试有效性审计）：必须用一条「存量坏行」才承重 —— 用合法行时无论是否
+		// 真跳过校验都通过（把 touched 初值改成 true 恒校验，这条仍绿）。
+		badID := uuid.New()
+		require.NoError(t, db.Create(&models.NotificationChannel{
+			ID: badID, Name: "存量坏行", Type: "email", Config: `{}`,
+		}).Error)
+
+		got, err := svc.Update(ctx, badID.String(), map[string]interface{}{"name": "改名"})
+		require.NoError(t, err, "只改 name 不应触发配置校验")
 		assert.Equal(t, "改名", got.Name)
 	})
 

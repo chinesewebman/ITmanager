@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"testing"
 
@@ -389,6 +390,15 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 	require.NoError(t, db.Find(&channels).Error)
 	assert.Equal(t, 3, len(channels), "应有 3 个通知渠道 (email/dingtalk/webhook)")
 
+	// H-1（测试有效性审计）：只断言 NewSender 成功钉不住可选键 —— NewDingTalkSender
+	// 只要求 webhook_url 非空，把 sign_secret 改成 secret 照样构造成功、全绿（变异 S17）。
+	// 这里对原始 Config JSON 逐类型断言键名，可选键的键名也被钉住。
+	requiredKeys := map[string][]string{
+		"email":    {"smtp_host", "smtp_port", "smtp_user", "from", "to"},
+		"dingtalk": {"webhook_url", "sign_secret"},
+		"webhook":  {"url"},
+	}
+
 	types := map[string]bool{}
 	for _, c := range channels {
 		types[c.Type] = true
@@ -396,6 +406,12 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 		// 这里独立断言每行都能构造出 Sender（键名/必填项与 channelConfig 对齐）。
 		_, err := notification.NewSender(&c)
 		assert.NoError(t, err, "seed 渠道 %q(type=%s) 必须能构造出 Sender", c.Name, c.Type)
+
+		var cfg map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(c.Config), &cfg), "seed %q 的 Config 必须是 JSON 对象", c.Name)
+		for _, k := range requiredKeys[c.Type] {
+			assert.Contains(t, cfg, k, "seed %q 缺少键 %q（键名须与 channelConfig tag 一致）", c.Name, k)
+		}
 	}
 	assert.True(t, types["email"])
 	assert.True(t, types["dingtalk"])
