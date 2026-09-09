@@ -223,6 +223,11 @@ paths:
           schema:
             type: integer
             default: 20
+        - name: keyword
+          in: query
+          description: 按名称/资产标签/序列号模糊匹配（name/asset_tag/sn）
+          schema:
+            type: string
       responses:
         '200':
           description: 成功

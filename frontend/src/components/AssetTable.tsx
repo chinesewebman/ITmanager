@@ -56,13 +56,19 @@ export interface AssetTableProps {
     selectedRowKeys: React.Key[]
     onChange: (keys: React.Key[]) => void
   }
+  // M3/P5: 服务端分页受控。total 传入时启用受控分页（current/pageSize/onChange 由父组件持有），
+  // 否则回落到 antd 内部分页（前端假分页，仅兼容旧调用方）。
+  total?: number
+  page?: number
+  pageSize?: number
+  onPageChange?: (page: number, pageSize: number) => void
 }
 
 /**
  * AssetTable - 资产列表展示 + 行内编辑/删除/退役。
  * 父组件持有数据状态和表单弹窗状态。
  */
-export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, onRetire, onRestore, rowSelection }: AssetTableProps) {
+export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPostmortem, onRetire, onRestore, rowSelection, total, page, pageSize, onPageChange }: AssetTableProps) {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const handleDelete = async (id: string) => {
@@ -215,11 +221,23 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
       loading={loading}
       rowSelection={rowSelection}
       scroll={{ x: 1000 }}
-      pagination={{
-        showSizeChanger: true,
-        showTotal: (t) => `共 ${t} 条`,
-        pageSizeOptions: ['10', '20', '50', '100'],
-      }}
+      pagination={
+        total !== undefined
+          ? {
+              current: page ?? 1,
+              pageSize: pageSize ?? 20,
+              total,
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+              pageSizeOptions: ['10', '20', '50', '100'],
+              onChange: (p, ps) => onPageChange?.(p, ps),
+            }
+          : {
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+              pageSizeOptions: ['10', '20', '50', '100'],
+            }
+      }
       locale={{
         emptyText: (
           <EmptyState

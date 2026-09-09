@@ -1620,6 +1620,8 @@ export interface operations {
                 status?: string;
                 page?: number;
                 page_size?: number;
+                /** @description 按名称/资产标签/序列号模糊匹配（name/asset_tag/sn） */
+                keyword?: string;
             };
             header?: never;
             path?: never;

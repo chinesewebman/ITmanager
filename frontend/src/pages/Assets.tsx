@@ -9,7 +9,7 @@ import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // 资产类型筛选项
@@ -27,6 +27,9 @@ function Assets() {
   const [editing, setEditing] = useState<Asset | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [filter, setFilter] = useState({ keyword: '', assetType: '' })
+  // M3/P5：服务端分页——page/pageSize 由父组件持有；筛选变化时重置回第 1 页
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
   useDocumentTitle('资产管理')
   const { isMobile } = useResponsiveTable()
@@ -42,13 +45,20 @@ function Assets() {
   const [traceResult, setTraceResult] = useState<TracerouteResult | null>(null)
 
   // C-P9: React Query 拉取列表（30s 内不重 fetch）
-  // W1：fetcher 只做形状归一（items 非数组 → 空数组），不吞异常、不回落假数据
-  const { data, isLoading, isError, error, refetch } = useApiQuery<Asset[]>(
-    queryKeys.assets.list(),
+  // M3/P5：服务端分页——keyword/type/page/page_size 全部下沉到后端（后端契约最完整），
+  // 前端不再本地过滤（原 filtered 只对已拉取的 20 条过滤，静默漏掉其它页）。
+  // W1：fetcher 只做形状归一（items 非数组 → 空数组、total 缺失 → 0），不吞异常、不回落假数据。
+  const { data, isLoading, isError, error, refetch } = useApiQuery<{ items: Asset[]; total: number }>(
+    queryKeys.assets.list({ ...filter, page, pageSize }),
     async () => {
-      const res: any = await assetApi.list()
-      const items = res?.data?.data?.items
-      return Array.isArray(items) ? items : []
+      const res: any = await assetApi.list({
+        page,
+        page_size: pageSize,
+        keyword: filter.keyword || undefined,
+        type: filter.assetType || undefined,
+      })
+      const body = res?.data?.data
+      return { items: Array.isArray(body?.items) ? body.items : [], total: body?.total ?? 0 }
     },
   )
 
@@ -156,18 +166,9 @@ function Assets() {
     },
   ]
 
-  // 前端过滤
-  const filtered = useMemo(() => {
-    return (data ?? []).filter((item) => {
-      const kw = filter.keyword.toLowerCase()
-      const matchKw =
-        !kw ||
-        item.name.toLowerCase().includes(kw) ||
-        (item.ip_address ?? '').includes(filter.keyword)
-      const matchType = !filter.assetType || item.asset_type === filter.assetType
-      return matchKw && matchType
-    })
-  }, [data, filter])
+  // M3/P5：服务端分页后 items/total 直接来自后端，不再前端过滤。
+  const items = data?.items ?? []
+  const total = data?.total ?? 0
 
   const handleEdit = (asset: Asset) => {
     setEditing(asset)
@@ -239,7 +240,7 @@ function Assets() {
     <div>
       <PageHeader
         title="资产管理"
-        subtitle={`共 ${filtered.length} 台资产${hasFilter ? '（已筛选）' : ''}`}
+        subtitle={`共 ${total} 台资产${hasFilter ? '（已筛选）' : ''}`}
         onCreate={handleCreate}
         createText="添加资产"
         extra={
@@ -253,11 +254,15 @@ function Assets() {
       ) : (
         <>
           <div style={{ marginBottom: 16 }}>
-            <AssetFilterBar value={filter} onChange={setFilter} typeOptions={TYPE_OPTIONS} />
+            <AssetFilterBar
+              value={filter}
+              onChange={(v) => { setFilter(v); setPage(1) }}
+              typeOptions={TYPE_OPTIONS}
+            />
           </div>
           {isMobile ? (
             <MobileCardList
-              data={filtered}
+              data={items}
               loading={isLoading}
               renderCard={(asset: Asset) => (
                 <div>
@@ -277,8 +282,12 @@ function Assets() {
             />
           ) : (
             <AssetTable
-              data={filtered}
+              data={items}
               loading={isLoading}
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={(p, ps) => { setPage(p); setPageSize(ps) }}
               onEdit={handleEdit}
               onChanged={() => refetch()}
               onDiagnose={handleDiagnose}

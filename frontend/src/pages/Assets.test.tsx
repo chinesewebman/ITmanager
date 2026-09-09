@@ -1,4 +1,4 @@
-// Assets page：W1 去假数据兜底 + M9 搜索占位符 + M10 副标题计数。
+// Assets page：W1 去假数据兜底 + M9 搜索占位符 + M10 副标题计数 + M3/P5 服务端分页。
 // 修前：filtered 用 `data ?? MOCK_DATA` 兜底，接口失败渲染 5 台假资产且 isError 永远看不到。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -9,6 +9,7 @@ import Assets from './Assets'
 const h = vi.hoisted(() => ({
   overrides: {} as Record<string, unknown>,
   refetch: vi.fn(),
+  lastKey: null as unknown,
 }))
 
 const mockAssets = [
@@ -17,17 +18,22 @@ const mockAssets = [
   { id: '3', name: 'no-ip-asset', asset_type: 'server', ip_address: '', status: 'active', site_name: '机房A', rack_name: 'Rack-03' },
 ]
 
+// M3/P5：data 结构改为 {items, total}（服务端分页契约）。useApiQuery mock 记录 queryKey，
+// 供分页/筛选变化断言（原 filtered 前端过滤已删除，筛选下沉到后端，仅触发 queryKey 更新）。
 vi.mock('../hooks/useApiQuery', () => ({
-  useApiQuery: () => ({
-    data: mockAssets,
-    isLoading: false,
-    isError: false,
-    error: undefined,
-    refetch: h.refetch,
-    ...h.overrides,
-  }),
+  useApiQuery: (key: unknown) => {
+    h.lastKey = key
+    return {
+      data: { items: mockAssets, total: mockAssets.length },
+      isLoading: false,
+      isError: false,
+      error: undefined,
+      refetch: h.refetch,
+      ...h.overrides,
+    }
+  },
   useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
-  queryKeys: { assets: { list: () => ['assets', 'list'] } },
+  queryKeys: { assets: { list: (f?: Record<string, unknown>) => ['assets', 'list', f ?? {}] } },
 }))
 
 // mock diagnosticApi（ping/traceroute）
@@ -68,7 +74,7 @@ const mockPostmortem = vi.fn().mockResolvedValue(new Blob(['%PDF-1.4 mock'], { t
 
 vi.mock('../services/api', () => ({
   assetApi: {
-    list: () => Promise.resolve({ data: { data: { items: [] } } }),
+    list: () => Promise.resolve({ data: { data: { items: [], total: 0 } } }),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -85,6 +91,7 @@ vi.mock('../services/api', () => ({
 beforeEach(() => {
   h.overrides = {}
   h.refetch.mockClear()
+  h.lastKey = null
 })
 
 describe('Assets page', () => {
@@ -180,19 +187,40 @@ describe('Assets page', () => {
   })
 
   it('W1：200 + 空 items 不白屏（走空态，不是假资产）', () => {
-    h.overrides = { data: [] }
+    h.overrides = { data: { items: [], total: 0 } }
     render(<Assets />)
     expect(screen.getByText('暂无资产')).toBeInTheDocument()
     expect(screen.getByText('共 0 台资产')).toBeInTheDocument()
   })
 
-  it('M10：副标题计数跟随筛选结果，筛选后带「（已筛选）」', () => {
+  // M10 + M3/P5：副标题计数跟随服务端 total（此前用未过滤/截断总数，与表格行数不符）。
+  it('M10：副标题计数来自服务端 total', () => {
+    h.overrides = { data: { items: mockAssets, total: 100 } }
     render(<Assets />)
-    expect(screen.getByText('共 3 台资产')).toBeInTheDocument()
+    expect(screen.getByText('共 100 台资产')).toBeInTheDocument()
+  })
+
+  // M3/P5：服务端分页——total 不再丢弃 + 翻页更新 queryKey（page 变化），筛选变化重置 page。
+  it('M3/P5：服务端分页——翻页更新 queryKey 的 page，筛选重置回第 1 页', async () => {
+    h.overrides = { data: { items: mockAssets, total: 100 } }
+    const { container } = render(<Assets />)
+
+    // 初始 queryKey 含 page:1/pageSize:20
+    expect((h.lastKey as any)[2]).toMatchObject({ page: 1, pageSize: 20 })
+
+    // 点「下一页」→ onPageChange(2, 20) → setPage(2) → queryKey page 变 2
+    const next = container.querySelector('.ant-pagination-next')
+    expect(next).toBeTruthy()
+    fireEvent.click(next as Element)
+    await waitFor(() => {
+      expect((h.lastKey as any)[2]).toMatchObject({ page: 2 })
+    })
+
+    // 输入筛选关键词 → 重置 page 回 1，keyword 下沉进 queryKey
     fireEvent.change(screen.getByPlaceholderText('搜索名称 / IP'), { target: { value: 'web' } })
-    expect(screen.getByText('共 1 台资产（已筛选）')).toBeInTheDocument()
-    expect(screen.getByText('web-server-01')).toBeInTheDocument()
-    expect(screen.queryByText('db-server-01')).toBeNull()
+    await waitFor(() => {
+      expect((h.lastKey as any)[2]).toMatchObject({ keyword: 'web', page: 1 })
+    })
   })
 
   // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
@@ -200,10 +228,13 @@ describe('Assets page', () => {
   // 数值序（192.168.1.2 应排在 192.168.1.10 前，字典序会错序）。
   it('M2：IP 地址列按八位组数值排序（192.168.1.2 排在 192.168.1.10 前）', async () => {
     h.overrides = {
-      data: [
-        { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
-        { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.2', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
-      ],
+      data: {
+        items: [
+          { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
+          { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.2', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
+        ],
+        total: 2,
+      },
     }
     const { container } = render(<Assets />)
     // 整行 textContent（rowSelection 会加 checkbox 首列，不能取 td[0]）
@@ -226,16 +257,5 @@ describe('Assets page', () => {
   it('M9：搜索占位符只承诺「名称 / IP」（不再承诺资产标签/SN）', () => {
     render(<Assets />)
     expect(screen.getByPlaceholderText('搜索名称 / IP')).toBeInTheDocument()
-  })
-
-  it('W1：ip_address 为 undefined 时筛选不抛异常', () => {
-    h.overrides = {
-      data: [{ id: '9', name: 'ghost', asset_type: 'server', ip_address: undefined, status: 'active' }],
-    }
-    render(<Assets />)
-    expect(() => {
-      fireEvent.change(screen.getByPlaceholderText('搜索名称 / IP'), { target: { value: '192' } })
-    }).not.toThrow()
-    expect(screen.getByText('共 0 台资产（已筛选）')).toBeInTheDocument()
   })
 })

@@ -331,6 +331,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev44 | 2026-09-10 | **批 2 第 15 步 M2（表格排序）第 5 处 Oncall 值班组表完成**：值班组表给名称/时区/启用/说明加前端本地排序（名称/说明 `localeCompare`，时区空值默认 `Asia/Shanghai`，启用布尔权重）。**副产物**：sorter 让表头 `<th>` 带 `aria-label=title`，与既有 M4 测试 `getByLabelText('名称')`（定位表单输入）冲突 → 改 `getByRole('textbox', { name: '名称' })` 精确定位。1 用例绿（点「名称」表头后 ops-team 变 dev-team 字母升序），变异（去 name sorter）红在 `toContain('dev-team')` 断言。**剩 Oncall 升级策略表/MetricSnapshot** |
 | rev45 | 2026-09-10 | **批 2 第 16 步 M2（表格排序）第 6 处 Oncall 升级策略表完成（Oncall 全收口）**：升级策略表给名称（`localeCompare`）/层级数（`levels?.length` 数值）/启用（布尔权重）加前端本地排序；层级详情是多值 Tag 列表不加。1 用例绿（点「层级数」表头后 2 级的 critical 变 1 级的 info 数值升序），变异（去 levels sorter）红在 `toContain('info')` 断言。**剩 MetricSnapshot 一表** |
 | rev46 | 2026-09-10 | **批 2 第 17 步 M2（表格排序）第 7 处 MetricSnapshot 完成（M2 全站收口）**：`MetricSnapshot` 给时间（`new Date(...).getTime()`，RFC3339 字典序会错序）/Asset ID/Key（`localeCompare`）/Value（数值）加前端本地排序。1 用例绿（点「Value」表头后 60.30 变 45.20 数值升序），变异（去 value sorter）红在 `toContain('45.20')` 断言。**M2 全站收口：AlertTable/TicketTable/AssetTable/Runbook/Oncall 两表/MetricSnapshot 七个表格** |
+| rev47 | 2026-09-10 | **批 2 第 18 步 M3/P5（服务端分页）第 1 处资产页完成**：列表无服务端分页——`assetApi.list()` 不带参数默认 `page=1/page_size=20`，`total` 被丢弃，antd 分页是假分页（对已截断的 20 条再分页）。改三处：① `openapi.yaml` `/assets` GET 补 `keyword` 参数（后端 `asset_handler.go:47` 已支持但契约未声明 → 重新 `gen:api`）；② `Assets.tsx` 加 `page/pageSize` state，fetcher 传 `page/page_size/keyword/type`，解包 `items+total`，删前端 `filtered`（原只对已拉取的 20 条过滤、静默漏页），筛选变化重置 `page=1`；③ `AssetTable` 加 `total/page/pageSize/onPageChange` 受控分页。2 用例绿（副标题「共 100 台资产」用服务端 total；翻页/筛选更新 queryKey 的 page/keyword），两条变异（subtitle 改 `items.length` / 删 `onChange`）均红在断言。**待确认**：keyword 语义=`name/asset_tag/sn`（不含 IP，因 assets 表无 IP 列），与 M9 placeholder「名称/IP」有口径差，见 §8 阻塞 |
 
 ---
 
@@ -381,20 +382,21 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P17 assets name 索引（迁移 000020） | ✅ 完成 | `idx_assets_name (name)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 20→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P18 audit_logs path 索引（迁移 000021） | ✅ 完成 | `idx_audit_logs_path (path text_pattern_ops)`；dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链 21→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P19 ticket_service cursor Count（3 行，无迁移） | ✅ 完成 | 把无条件 `COUNT(*)` 挪到 cursor 分支之后；cursor 模式不再跑 Count；单测 + 变异（挪回）红在 `SELECT count(*)` 未匹配 |
-| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(五页全收口)、M2(七表全收口) 已完成（rev30–46）；剩 M3+P4/P5/P6/P7/M13/M15 |
+| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11、M1(五页全收口)、M2(七表全收口)、M3/P5 资产页服务端分页 已完成（rev30–47）；剩 P4 表格 memo、M3/P5 工单+告警页、P6、P7、M13、M15 |
 | 批 2 · M14 批量操作确认 | ✅ 完成 | Alerts「批量确认/解决」套 Popconfirm 二次确认（title 带已选数量）；1 用例绿；变异（去 Popconfirm）红在确认框缺失 |
 | 批 2 · M7 升级策略 JSON 异常文案 | ✅ 完成 | Oncall 升级策略 Levels 非法 JSON 给友好中文（结构化编辑器登记不做）；1 用例绿；变异（去 SyntaxError 判断）红在 toHaveBeenCalledWith |
 | 批 2 · M11 严重度配色统一（AssetTimeline + Runbook + AlertSuppressions） | ✅ 完成 | 三处自造配色（AssetTimeline 6 档错位 / Runbook 2 档 / AlertSuppressions 3 档）统一到 SEVERITY_META 权威 6 档；3 处各 1 用例绿 + 变异红 |
 | 批 2 · M1 标题体系统一（五页全收口） | ✅ 完成 | Oncall「值班管理」、AlertSuppressions「告警抑制」+ 按钮入 extra、Topology「网络拓扑」、Settings h2 改「系统设置」、Runbook 手写 Space 改「故障 Runbook」+ 计数 Tag/按钮入 extra（h4）；各 1 用例绿；变异均红在 heading 断言。AssetTimeline 子页（带返回链接）+ MetricSnapshot（标题带 Tag）无对应 slot，登记待定 |
 | 批 2 · M2 表格排序（全站零 sorter） | ✅ 完成 | AlertTable 四列（rev40）+ TicketTable 六列（rev41，优先级按 PRIORITY_WEIGHT 权重）+ AssetTable 六列（rev42，IP 走 ipCompare 八位组数值序）+ Runbook 四列（rev43）+ Oncall 值班组四列（rev44）+ Oncall 升级策略三列（rev45）+ MetricSnapshot 四列（rev46）共七表已加前端本地排序；各 1 用例绿；变异（去/改 sorter）红在行顺序断言 |
+| 批 2 · M3/P5 服务端分页（资产页） | ✅ 完成 | 资产页 `assetApi.list()` 原不带参数默认截断 20 条、`total` 丢弃、antd 假分页 → openapi 补 `keyword` 参数 + Assets.tsx 加 page/pageSize 下沉 page/page_size/keyword/type + 删前端 filtered + AssetTable 受控分页（total/page/pageSize/onPageChange）；2 用例绿（副标题用服务端 total / 翻页筛选更新 queryKey）；两条变异（subtitle 改 items.length / 删 onChange）均红在断言。**剩工单页 + 告警页** |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
-5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）+ M2 七表（rev40–46，全站收口）已完成**；剩 M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M13 移动端、M15 空态/加载态。
+5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）+ M2 七表（rev40–46）+ M3/P5 资产页服务端分页（rev47）已完成**；剩 P4 表格 memo（与 M3 同批）+ M3/P5 工单页+告警页 + P6 进度节流、M13 移动端、M15 空态/加载态。
 
-**已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
+**已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。M3/P5 keyword 口径（资产页）：后端 `keyword` 匹配 `name/asset_tag/sn`（assets 表无 IP 列，IP 在 asset_networks 一对多），与 M9 placeholder「搜索名称 / IP」的「IP」承诺有口径差——改前前端 `ip_address` 在真实列表本就 undefined（后端未返回该字段），故「搜 IP」实为死逻辑，下沉后仅由「死逻辑」变「明确不支持」，未造成可感知回退；是否补后端 join 搜 IP 属独立决策，登记待确认。
 
 **测试盲区（W1 系列共有）**：本批单测 mock 掉 `useApiQuery`，故 `queryFn` 内的形状归一（`Array.isArray(items) ? items : []`）与 `catch` 删除不被单测覆盖。防回归靠两点：① `MOCK_*` 常量已从源码删除，重新引入无法通过编译；② `isError` 分支有断言。接口真实形状逐页核对 handler——`oncall_handler.go:35/124/135` 均返回 `{code,data:[...]}` 裸数组，`apiGet` 解包后即数组。
