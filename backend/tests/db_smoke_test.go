@@ -662,19 +662,19 @@ func mustJSON(t *testing.T, v any) string {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000020，故八次 Down = 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000021，故九次 Down = 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
-	// 前置 1：必须已应用到 000020（本用例回滚 20→19→18→17→16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
+	// 前置 1：必须已应用到 000021（本用例回滚 21→20→19→18→17→16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 20`).
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 21`).
 		Scan(&applied).Error; err != nil {
 		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
 	}
 	if applied == 0 {
-		t.Fatalf("库未应用到 000020 —— 本用例要回滚 20→19→18→17→16→15→14→13，前置不满足")
+		t.Fatalf("库未应用到 000021 —— 本用例要回滚 21→20→19→18→17→16→15→14→13，前置不满足")
 	}
 
 	// 前置 2：必须是**升级路径**库。回滚链里要断言 000014 的回填值仍在（assertJSONB），
@@ -691,7 +691,15 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// 第一次 Down = 回滚 000020：删除 name 索引
+	// 第一次 Down = 回滚 000021：删除 path text_pattern_ops 索引
+	require.NoError(t, migrate.Down(db), "回滚 000021 失败")
+	var pathIdxExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_audit_logs_path')`).
+		Scan(&pathIdxExists).Error)
+	assert.False(t, pathIdxExists, "down 000021 应 DROP idx_audit_logs_path")
+
+	// 第二次 Down = 回滚 000020：删除 name 索引
 	require.NoError(t, migrate.Down(db), "回滚 000020 失败")
 	var nameIdxExists bool
 	require.NoError(t, db.Raw(
@@ -699,7 +707,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&nameIdxExists).Error)
 	assert.False(t, nameIdxExists, "down 000020 应 DROP idx_assets_name")
 
-	// 第二次 Down = 回滚 000019：删除 external_id 索引
+	// 第三次 Down = 回滚 000019：删除 external_id 索引
 	require.NoError(t, migrate.Down(db), "回滚 000019 失败")
 	var extIdxExists bool
 	require.NoError(t, db.Raw(
@@ -707,7 +715,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&extIdxExists).Error)
 	assert.False(t, extIdxExists, "down 000019 应 DROP idx_tickets_external_id")
 
-	// 第三次 Down = 回滚 000018：删除 trigger_id 索引
+	// 第四次 Down = 回滚 000018：删除 trigger_id 索引
 	require.NoError(t, migrate.Down(db), "回滚 000018 失败")
 	var trigIdxExists bool
 	require.NoError(t, db.Raw(
@@ -715,7 +723,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&trigIdxExists).Error)
 	assert.False(t, trigIdxExists, "down 000018 应 DROP idx_alerts_trigger_id")
 
-	// 第四次 Down = 回滚 000017：删除 problem_start 索引
+	// 第五次 Down = 回滚 000017：删除 problem_start 索引
 	require.NoError(t, migrate.Down(db), "回滚 000017 失败")
 	var psIdxExists bool
 	require.NoError(t, db.Raw(
@@ -723,7 +731,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&psIdxExists).Error)
 	assert.False(t, psIdxExists, "down 000017 应 DROP idx_alerts_problem_start")
 
-	// 第五次 Down = 回滚 000016：删除 pending 部分索引
+	// 第六次 Down = 回滚 000016：删除 pending 部分索引
 	require.NoError(t, migrate.Down(db), "回滚 000016 失败")
 	var pendingIdxExists bool
 	require.NoError(t, db.Raw(
@@ -731,11 +739,11 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&pendingIdxExists).Error)
 	assert.False(t, pendingIdxExists, "down 000016 应 DROP idx_notification_logs_pending")
 
-	// 第六次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
+	// 第七次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
 	require.NoError(t, migrate.Down(db), "回滚 000015 失败")
 	assertNetBoxIDIndexUnique(t, db, false)
 
-	// 第七次 Down = 回滚 000014：只撤列默认值，数据不动
+	// 第八次 Down = 回滚 000014：只撤列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
 	var def *string
 	require.NoError(t, db.Raw(
@@ -744,7 +752,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
 	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
 
-	// 第八次 Down = 回滚 000013：本用例真正要守的那个
+	// 第九次 Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool
@@ -943,4 +951,36 @@ func TestDBSmoke_AssetsNameIndex(t *testing.T) {
 		`EXPLAIN (COSTS OFF) SELECT * FROM assets WHERE name IN ('a','b')`)
 	assert.Contains(t, plan, "idx_assets_name",
 		"name IN 查询应走索引：\n%s", plan)
+}
+
+// TestDBSmoke_AuditLogsPathIndex 守 000021 的 path text_pattern_ops 索引（W6 P18）。
+//
+// 审计列表 `path LIKE 'x%'` 前缀匹配无可用索引（审计实测罕见过滤 455ms）。
+// text_pattern_ops 专为 LIKE 前缀设计（非 C collation 下默认 btree 不加速 LIKE）。
+// 真 PG 两层断言：① 索引形态（列 path + opclass text_pattern_ops）；
+// ② EXPLAIN 走该索引（LIKE 前缀查询）。
+func TestDBSmoke_AuditLogsPathIndex(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 21`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000021（idx_audit_logs_path）—— 本用例前置不满足")
+	}
+
+	// ① 索引形态：text_pattern_ops 索引，列 path
+	var def string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_audit_logs_path'`).
+		Scan(&def).Error)
+	require.NotEmpty(t, def, "idx_audit_logs_path 不存在 —— 000021 没跑？")
+	assert.Contains(t, def, "path", "索引应建在 path 上：%s", def)
+	assert.Contains(t, def, "text_pattern_ops", "应为 text_pattern_ops 索引（LIKE 前缀）：%s", def)
+
+	// ② EXPLAIN 断言：`path LIKE 'x%'` 前缀查询走该索引（pattern_ops 的 ~>=~ / ~<~）。
+	plan := explainSeqScanOff(t, db,
+		`EXPLAIN (COSTS OFF) SELECT * FROM audit_logs WHERE path LIKE 'x%'`)
+	assert.Contains(t, plan, "idx_audit_logs_path",
+		"path LIKE 前缀查询应走索引：\n%s", plan)
 }
