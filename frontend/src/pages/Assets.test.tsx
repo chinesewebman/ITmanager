@@ -128,6 +128,29 @@ describe('Assets page', () => {
     })
   })
 
+  // H10：诊断失败原 catch 空实现 → 弹窗全白。加 diagError + Alert + 重试。
+  it('H10：Ping 失败时弹窗显示错误 Alert + 重试（而非全白）', async () => {
+    mockPing.mockClear()
+    mockPing.mockRejectedValue(new Error('网络错误'))
+    render(<Assets />)
+    fireEvent.click(screen.getAllByText('Ping')[0])
+
+    // 失败后弹窗内渲染错误 Alert，不再全白
+    await waitFor(() => {
+      expect(screen.getByText('诊断失败')).toBeInTheDocument()
+    })
+    expect(screen.getByText('网络错误')).toBeInTheDocument()
+
+    // 重试：mockPing 改成功，点重试后再次调用
+    mockPing.mockResolvedValue({
+      data: { code: 0, data: { host: '192.168.1.10', count: 4, transmitted: 4, received: 4, loss_percent: 0, min_ms: 0.1, avg_ms: 0.2, max_ms: 0.3, duration_ms: 2100 } },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }))
+    await waitFor(() => {
+      expect(mockPing).toHaveBeenCalledTimes(2)
+    })
+  })
+
   it('每行显示复盘按钮', () => {
     render(<Assets />)
     // 3 个资产 → 3 个复盘按钮

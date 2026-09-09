@@ -1,5 +1,5 @@
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
-import { Button, Form, Input, message, Modal, Table, Tag } from 'antd'
+import { Alert, Button, Form, Input, message, Modal, Table, Tag } from 'antd'
 import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
@@ -35,6 +35,9 @@ function Assets() {
   const [diagAsset, setDiagAsset] = useState<Asset | null>(null)
   const [diagKind, setDiagKind] = useState<'ping' | 'traceroute'>('ping')
   const [diagLoading, setDiagLoading] = useState(false)
+  // H10：诊断失败态放 Assets 组件层（destroyOnHidden 的 Modal 内 state 会被清空），
+  // 失败时弹窗内渲染 Alert + 重试，避免原 catch 空实现导致的「失败全白」。
+  const [diagError, setDiagError] = useState<string | null>(null)
   const [pingResult, setPingResult] = useState<PingResult | null>(null)
   const [traceResult, setTraceResult] = useState<TracerouteResult | null>(null)
 
@@ -86,6 +89,7 @@ function Assets() {
     setDiagKind(kind)
     setDiagOpen(true)
     setDiagLoading(true)
+    setDiagError(null)
     setPingResult(null)
     setTraceResult(null)
     try {
@@ -96,8 +100,9 @@ function Assets() {
         const res: any = await diagnosticApi.traceroute(asset.ip_address, 20)
         setTraceResult(res?.data?.data)
       }
-    } catch (e) {
-      // 错误已由 axios 拦截器提示
+    } catch (e: any) {
+      // H10：错误已由 axios 拦截器 toast，这里再记到组件层 state 供弹窗内 Alert 展示
+      setDiagError(e?.message || '诊断失败，请稍后重试')
     } finally {
       setDiagLoading(false)
     }
@@ -355,7 +360,20 @@ function Assets() {
         destroyOnHidden
       >
         {diagLoading && <div style={{ padding: 24, textAlign: 'center' }}>执行中…</div>}
-        {!diagLoading && diagKind === 'ping' && pingResult && (
+        {!diagLoading && diagError && (
+          <Alert
+            type="error"
+            showIcon
+            message="诊断失败"
+            description={diagError}
+            action={
+              <Button size="small" onClick={() => diagAsset && handleDiagnose(diagAsset, diagKind)}>
+                重试
+              </Button>
+            }
+          />
+        )}
+        {!diagLoading && !diagError && diagKind === 'ping' && pingResult && (
           <div>
             <p>
               <b>目标：</b>{pingResult.host} &nbsp; <b>包：</b>{pingResult.transmitted} 发送 / {pingResult.received} 接收 &nbsp; <b>丢包率：</b>
@@ -372,7 +390,7 @@ function Assets() {
             <p style={{ color: '#999', fontSize: 12 }}>耗时 {pingResult.duration_ms} ms</p>
           </div>
         )}
-        {!diagLoading && diagKind === 'traceroute' && traceResult && (
+        {!diagLoading && !diagError && diagKind === 'traceroute' && traceResult && (
           <div>
             <p>
               <b>目标：</b>{traceResult.host} &nbsp; <b>最大跳数：</b>{traceResult.max_hops} &nbsp;
