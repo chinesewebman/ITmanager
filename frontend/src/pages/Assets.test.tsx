@@ -195,6 +195,34 @@ describe('Assets page', () => {
     expect(screen.queryByText('db-server-01')).toBeNull()
   })
 
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // AssetTable 给名称/类型/IP/机房/机柜/状态加前端本地排序；这里验证 IP 列走八位组
+  // 数值序（192.168.1.2 应排在 192.168.1.10 前，字典序会错序）。
+  it('M2：IP 地址列按八位组数值排序（192.168.1.2 排在 192.168.1.10 前）', async () => {
+    h.overrides = {
+      data: [
+        { id: '1', name: 'web-server-01', asset_type: 'server', ip_address: '192.168.1.10', status: 'active', site_name: '机房A', rack_name: 'Rack-01' },
+        { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.2', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
+      ],
+    }
+    const { container } = render(<Assets />)
+    // 整行 textContent（rowSelection 会加 checkbox 首列，不能取 td[0]）
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：web-server-01（192.168.1.10）在前
+    expect(rowTexts()[0]).toContain('web-server-01')
+
+    // 点「IP 地址」表头升序 → 数值序 192.168.1.2 < 192.168.1.10，db-server-01 排前
+    // （scroll+fixed 列导致 header 渲染两份 title span，取第一个）
+    fireEvent.click(screen.getAllByText('IP 地址')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('db-server-01')
+    })
+  })
+
   it('M9：搜索占位符只承诺「名称 / IP」（不再承诺资产标签/SN）', () => {
     render(<Assets />)
     expect(screen.getByPlaceholderText('搜索名称 / IP')).toBeInTheDocument()

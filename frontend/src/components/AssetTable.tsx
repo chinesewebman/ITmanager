@@ -21,6 +21,27 @@ export interface Asset {
   retired_reason?: string | null
 }
 
+// M2：IPv4 按八位组数值排序（字典序会把 192.168.1.10 排在 192.168.1.2 前）；
+// 空值排最后；非 IPv4（IPv6 / 非法串）回落 localeCompare。
+function ipCompare(a?: string, b?: string): number {
+  const na = (a ?? '').trim()
+  const nb = (b ?? '').trim()
+  if (!na && !nb) return 0
+  if (!na) return 1
+  if (!nb) return -1
+  const pa = na.split('.')
+  const pb = nb.split('.')
+  const isV4 = (p: string[]) => p.length === 4 && p.every((s) => /^\d+$/.test(s))
+  if (isV4(pa) && isV4(pb)) {
+    for (let i = 0; i < 4; i++) {
+      const d = Number(pa[i]) - Number(pb[i])
+      if (d !== 0) return d
+    }
+    return 0
+  }
+  return na.localeCompare(nb)
+}
+
 export interface AssetTableProps {
   data: Asset[]
   loading: boolean
@@ -58,22 +79,26 @@ export function AssetTable({ data, loading, onEdit, onChanged, onDiagnose, onPos
   }
 
   const columns: ColumnsType<Asset> = [
-    { title: '资产名称', dataIndex: 'name', key: 'name', width: 180 },
+    // M2：加前端本地排序。名称/类型/机房/机柜/状态字符串 localeCompare；IP 走 ipCompare
+    // 八位组数值序（字典序会错序）；机房/机柜可能为空，空值 ?? ''。
+    { title: '资产名称', dataIndex: 'name', key: 'name', width: 180, sorter: (a, b) => a.name.localeCompare(b.name) },
     {
       title: '类型',
       dataIndex: 'asset_type',
       key: 'asset_type',
       width: 100,
+      sorter: (a, b) => a.asset_type.localeCompare(b.asset_type),
       render: (t: string) => <StatusTag value={t} />,
     },
-    { title: 'IP 地址', dataIndex: 'ip_address', key: 'ip_address', width: 140 },
-    { title: '机房', dataIndex: 'site_name', key: 'site_name', width: 100 },
-    { title: '机柜', dataIndex: 'rack_name', key: 'rack_name', width: 100 },
+    { title: 'IP 地址', dataIndex: 'ip_address', key: 'ip_address', width: 140, sorter: (a, b) => ipCompare(a.ip_address, b.ip_address) },
+    { title: '机房', dataIndex: 'site_name', key: 'site_name', width: 100, sorter: (a, b) => (a.site_name ?? '').localeCompare(b.site_name ?? '') },
+    { title: '机柜', dataIndex: 'rack_name', key: 'rack_name', width: 100, sorter: (a, b) => (a.rack_name ?? '').localeCompare(b.rack_name ?? '') },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
       width: 140,
+      sorter: (a, b) => a.status.localeCompare(b.status),
       render: (s: string, r: Asset) => {
         // B4: 退役特殊显示 — 状态 + 历史 IP 提示
         if (s === 'retired') {
