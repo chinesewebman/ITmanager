@@ -302,17 +302,18 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W5-P3 命令面板 `enabled: open` | ✅ 完成 | 10 用例绿（含「未打开不发请求」「重复打开命中缓存」） |
 | W5-P2 `echarts/core` + 测试 | ✅ 完成 | 构建实测 Dashboard chunk 1,059,595→514,130（gzip 351k→176k）；3 用例绿，变异（删 LineChart）红在断言 |
 | W4-H1 命令面板资产路由 404 | ✅ 完成 | 断言 `navigate('/assets/a1/diagnostics')` |
-| W1 其余 10 页（Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
-| W2 其余 6 个调用点 | ⬜ 未开始 | `AlertTable` / `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62` |
+| W1+W2 `pages/Alerts.tsx` + `AlertTable` | ✅ 完成 | 7 用例绿；两条变异（去 isError 分支 / 去 stats 守卫）均红在断言 |
+| W1 其余 9 页（Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W2 其余 5 个调用点 | ⬜ 未开始 | `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62`（`AlertTable` 已随 Alerts 一并完成） |
 | W4 其余 9 项（H6/H8/H9/H10/M4/M5/M6/M9/M10） | ⬜ 未开始 | 见 §4.1 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 提交推送本轮已完成部分 | ⬜ 未开始 | 见「下一步」 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
-1. 提交推送当前已完成项（Dashboard + ErrorState + time.ts + W5 三项 + 文档 rev4），验证 CI 绿。
-2. W1 逐页推进，从 `pages/Alerts.tsx` 起。
-3. W2 六个调用点（可并入各页 W1 的同一小步）。
+1. ~~提交推送当前已完成项~~ → 已完成（commit `9ae6607` 已推 main）。
+2. W1 逐页推进，下一页 `pages/Assets.tsx`（含 M9 占位符、M10 副标题计数）。
+3. W2 剩余 5 个调用点（可并入各页 W1 的同一小步）。
 4. W4 批 1 剩余 9 项。
 5. W6 批 1 迁移 000016。
 

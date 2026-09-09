@@ -1,8 +1,10 @@
-// Alerts page smoke test
+// Alerts page：W1 去假数据兜底 + W2 时间格式化 + 空 data 守卫。
 import '@testing-library/jest-dom'
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import Alerts from "./Alerts";
+
+const h = vi.hoisted(() => ({ override: {} as Record<string, unknown>, refetch: vi.fn() }))
 
 const mockAlerts = [
   {
@@ -31,10 +33,22 @@ const mockResp = {
 };
 
 vi.mock("../hooks/useApiQuery", () => ({
-  useApiQuery: () => ({ data: mockResp, isLoading: false, refetch: vi.fn() }),
+  useApiQuery: () => ({
+    data: mockResp,
+    isLoading: false,
+    isError: false,
+    error: undefined,
+    refetch: h.refetch,
+    ...h.override,
+  }),
   useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
   queryKeys: { alerts: { list: () => ["alerts", "list"] } },
 }));
+
+beforeEach(() => {
+  h.override = {}
+  h.refetch.mockClear()
+})
 
 describe("Alerts page", () => {
   it("渲染告警页 + 表格（mock 数据）", () => {
@@ -43,6 +57,12 @@ describe("Alerts page", () => {
     // AlertTable 显示 mock 告警 host
     expect(screen.getByText("web-server-01")).toBeInTheDocument();
     expect(screen.getByText("db-server-02")).toBeInTheDocument();
+  });
+
+  it("W2：触发时间渲染成 YYYY-MM-DD HH:mm:ss，而非原始串", () => {
+    render(<Alerts />);
+    expect(screen.getByText("2026-02-14 10:00:00")).toBeInTheDocument();
+    expect(screen.getByText("2026-02-14 09:30:00")).toBeInTheDocument();
   });
 
   it("不 crash 渲染", () => {
@@ -59,5 +79,23 @@ describe("Alerts page", () => {
     // mock 数据中 is_false_positive 未设置 → 显示「标记误报」按钮
     const buttons = screen.getAllByText("标记误报");
     expect(buttons.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("W1：接口失败时显示错误态 + 重试，不回落假告警", () => {
+    h.override = { data: undefined, isError: true, error: { response: { status: 500 } } }
+    render(<Alerts />);
+    expect(screen.getByText("数据加载失败")).toBeInTheDocument()
+    expect(screen.queryByText("web-server-01")).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }))
+    expect(h.refetch).toHaveBeenCalled()
+  });
+
+  it("W1：200 + 空 data（stats 为 null）不白屏，统计卡显示 0", () => {
+    h.override = { data: { items: [], stats: null } }
+    render(<Alerts />);
+    expect(screen.getByText("暂无告警")).toBeInTheDocument()
+    // 统计卡四联全部回落 0（不是虚构的 15/8/3/4）
+    expect(screen.queryByText("15")).toBeNull()
+    expect(screen.getAllByText("0").length).toBe(4)
   });
 });

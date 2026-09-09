@@ -1,4 +1,4 @@
-import { Button, Modal, Progress, Select, Space, message } from "antd";
+import { Button, Modal, Progress, Select, Space, theme, message } from "antd";
 import {
   SyncOutlined,
   CheckOutlined,
@@ -8,6 +8,7 @@ import {
 import { alertApi } from "../services/api";
 import type { AlertListParams } from "../services/apiClient";
 import { PageHeader } from "../components/PageHeader";
+import { ErrorState } from "../components/ErrorState";
 import { AlertTable, type Alert } from "../components/AlertTable";
 import {
   AlertStatsCards,
@@ -17,56 +18,17 @@ import { useApiMutation, useApiQuery, queryKeys } from "../hooks/useApiQuery";
 import { useState } from "react";
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
-const MOCK_ALERTS: Alert[] = [
-  {
-    id: "1",
-    host: "web-server-01",
-    message: "CPU使用率超过90%",
-    severity: 5,
-    severity_name: "灾难",
-    status: "problem",
-    created_at: "2026-02-14 10:00:00",
-  },
-  {
-    id: "2",
-    host: "db-server-02",
-    message: "磁盘空间不足",
-    severity: 4,
-    severity_name: "严重",
-    status: "problem",
-    created_at: "2026-02-14 09:30:00",
-  },
-  {
-    id: "3",
-    host: "switch-core-01",
-    message: "端口状态异常",
-    severity: 3,
-    severity_name: "一般",
-    status: "acknowledged",
-    created_at: "2026-02-14 08:00:00",
-    ack_time: "2026-02-14 08:30:00",
-  },
-  {
-    id: "4",
-    host: "firewall-main",
-    message: "连接数超阈值",
-    severity: 3,
-    severity_name: "一般",
-    status: "resolved",
-    created_at: "2026-02-13 20:00:00",
-  },
-];
-
-const DEFAULT_STATS: AlertStats = {
-  total: 15,
-  problem: 8,
-  acknowledged: 3,
-  resolved: 4,
+// W1：假数据兜底已删除。统计卡的 0 值只是「无数据时占位」，不是虚构数字。
+const EMPTY_STATS: AlertStats = {
+  total: 0,
+  problem: 0,
+  acknowledged: 0,
+  resolved: 0,
 };
 
 interface AlertsResp {
   items: Alert[];
-  stats: AlertStats;
+  stats: AlertStats | null;
 }
 
 function Alerts() {
@@ -78,7 +40,10 @@ function Alerts() {
   const filters = { status: statusFilter, severity: severityFilter };
 
   useDocumentTitle('告警中心')
-  const { data, isLoading, refetch } = useApiQuery<AlertsResp>(
+  const { token } = theme.useToken()
+  // W1：删掉 queryFn 内的 `?? MOCK_ALERTS / ?? DEFAULT_STATS` 兜底 ——
+  // 原写法让 React Query 的 isError 恒为 false，失败被渲染成一屏假告警。
+  const { data, isLoading, isError, error, refetch } = useApiQuery<AlertsResp>(
     queryKeys.alerts.list(filters),
     async () => {
       // antd Select onChange 给 string，但 spec 要求 literal union
@@ -90,9 +55,10 @@ function Alerts() {
         ...(severityFilter && { severity: severityFilter }),
       } as AlertListParams;
       const res: any = await alertApi.list(params);
+      const items = res?.data?.data?.items;
       return {
-        items: res?.data?.data?.items ?? MOCK_ALERTS,
-        stats: res?.data?.data?.stats ?? DEFAULT_STATS,
+        items: Array.isArray(items) ? items : [],
+        stats: res?.data?.data?.stats ?? null,
       };
     },
   );
@@ -200,8 +166,9 @@ function Alerts() {
     }
   };
 
-  const list = data?.items ?? MOCK_ALERTS;
-  const stats = data?.stats ?? DEFAULT_STATS;
+  const list = data?.items ?? [];
+  // 200 + 空 data 时 stats 为 null，直接读 stats.problem 会 TypeError 白屏
+  const stats = data?.stats ?? EMPTY_STATS;
   const hasSelection = selectedIds.length > 0;
 
   return (
@@ -244,46 +211,52 @@ function Alerts() {
         }
       />
 
-      <AlertStatsCards stats={stats} />
+      {isError ? (
+        <ErrorState error={error} onRetry={refetch} />
+      ) : (
+        <>
+          <AlertStatsCards stats={stats} loading={isLoading} />
 
-      <div style={{ marginBottom: 16 }}>
-        <Space>
-          <Select
-            placeholder="状态"
-            allowClear
-            value={statusFilter || undefined}
-            onChange={(v) => setStatusFilter(v ?? "")}
-            style={{ width: 120 }}
-            options={[
-              { label: "未处理", value: "problem" },
-              { label: "已确认", value: "acknowledged" },
-              { label: "已解决", value: "resolved" },
-            ]}
-          />
-          <Select
-            placeholder="严重级别 ≥"
-            allowClear
-            value={severityFilter || undefined}
-            onChange={(v) => setSeverityFilter(v ?? "")}
-            style={{ width: 140 }}
-            options={[
-              { label: "灾难 (≥5)", value: "5" },
-              { label: "严重 (≥4)", value: "4" },
-              { label: "一般 (≥3)", value: "3" },
-            ]}
-          />
-        </Space>
-      </div>
+          <div style={{ marginBottom: 16 }}>
+            <Space>
+              <Select
+                placeholder="状态"
+                allowClear
+                value={statusFilter || undefined}
+                onChange={(v) => setStatusFilter(v ?? "")}
+                style={{ width: 120 }}
+                options={[
+                  { label: "未处理", value: "problem" },
+                  { label: "已确认", value: "acknowledged" },
+                  { label: "已解决", value: "resolved" },
+                ]}
+              />
+              <Select
+                placeholder="严重级别 ≥"
+                allowClear
+                value={severityFilter || undefined}
+                onChange={(v) => setSeverityFilter(v ?? "")}
+                style={{ width: 140 }}
+                options={[
+                  { label: "灾难 (≥5)", value: "5" },
+                  { label: "严重 (≥4)", value: "4" },
+                  { label: "一般 (≥3)", value: "3" },
+                ]}
+              />
+            </Space>
+          </div>
 
-      <AlertTable
-        data={list}
-        loading={isLoading}
-        onAck={(id) => ackMut.mutate(id)}
-        onResolve={(id) => resolveMut.mutate(id)}
-        onMarkFP={(id, isFP) => markFPMut.mutate({ id, isFP })}
-        selectedIds={selectedIds}
-        onSelectionChange={setSelectedIds}
-      />
+          <AlertTable
+            data={list}
+            loading={isLoading}
+            onAck={(id) => ackMut.mutate(id)}
+            onResolve={(id) => resolveMut.mutate(id)}
+            onMarkFP={(id, isFP) => markFPMut.mutate({ id, isFP })}
+            selectedIds={selectedIds}
+            onSelectionChange={setSelectedIds}
+          />
+        </>
+      )}
 
       {/* v1.3 批量操作进度 modal */}
       {bulkProgress && (
@@ -298,10 +271,12 @@ function Alerts() {
             percent={Math.round(((bulkProgress.done + bulkProgress.failed) / bulkProgress.total) * 100)}
             status="active"
           />
-          <div style={{ marginTop: 12, color: "var(--ant-color-text-secondary)" }}>
+          {/* H6：`var(--ant-*)` 在未开 cssVar 时全部未定义（继承属性会回落，
+              非继承属性如 color 会回落成初始值）——改用 theme token */}
+          <div style={{ marginTop: 12, color: token.colorTextSecondary }}>
             进度: {bulkProgress.done + bulkProgress.failed} / {bulkProgress.total}
             {bulkProgress.failed > 0 && (
-              <span style={{ marginLeft: 12, color: "var(--ant-color-error)" }}>
+              <span style={{ marginLeft: 12, color: token.colorError }}>
                 失败 {bulkProgress.failed} 条
               </span>
             )}

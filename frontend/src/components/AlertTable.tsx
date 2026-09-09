@@ -3,6 +3,7 @@ import type { ColumnsType } from "antd/es/table";
 import { StatusTag } from "./StatusTag";
 import { EmptyState } from "./EmptyState";
 import { SeverityTag } from "./SeverityTag";
+import { formatDateTime } from "../utils/time";
 
 export interface Alert {
   id: string;
@@ -64,7 +65,9 @@ export function AlertTable({
       title: "触发时间",
       dataIndex: "created_at",
       key: "created_at",
-      width: 160,
+      width: 180,
+      // W2：原样渲染 RFC3339（如 2026-09-09T02:09:00+08:00）既占宽又难读
+      render: (iso: string) => formatDateTime(iso),
     },
     {
       title: "操作",
