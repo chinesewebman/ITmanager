@@ -164,4 +164,15 @@ describe('AlertSuppressions', () => {
       expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/alert-suppressions/r1')
     })
   })
+
+  // M11：severity_max 配色此前自造三档（v>=4红/v>=3橙/else蓝），与 SeverityTag 权威 6 档不一致
+  // （P2 应为金，旧代码落 else 分支染蓝）。只统一颜色，label 保持纯数字（severity_max 是「≤N」阈值，非「P4 严重」标签）。
+  it('M11：severity_max 配色统一到 SeverityTag 权威 6 档（P2→金，非旧蓝）', async () => {
+    renderPage()
+    await screen.findByText('抑制 db-*')
+    // r2 severity_max=2 → SEVERITY_META[2] 金色；旧代码 v=2 落 'else' 分支染蓝
+    const tag = screen.getByText('2').closest('.ant-tag') as HTMLElement
+    expect(tag).toHaveClass('ant-tag-gold')
+    expect(tag).not.toHaveClass('ant-tag-blue')
+  })
 })

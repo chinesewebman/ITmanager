@@ -9,6 +9,7 @@ import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorState } from '../components/ErrorState'
+import { SEVERITY_META } from '../components/SeverityTag'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 const { Text } = Typography
@@ -146,7 +147,7 @@ export function AlertSuppressions() {
             columns={[
               { title: '名称', dataIndex: 'name', key: 'name' },
               { title: '主机模式', dataIndex: 'host_pattern', key: 'host_pattern', render: (v: string) => <Tag color="purple">{v}</Tag> },
-              { title: '严重级别 ≤', dataIndex: 'severity_max', key: 'severity_max', render: (v: number) => <Tag color={v >= 4 ? 'red' : v >= 3 ? 'orange' : 'blue'}>{v}</Tag> },
+              { title: '严重级别 ≤', dataIndex: 'severity_max', key: 'severity_max', render: (v: number) => <Tag color={SEVERITY_META[v]?.color ?? 'default'}>{v}</Tag> },
               { title: '时间窗口', dataIndex: 'time_window_seconds', key: 'time_window_seconds', render: (v: number) => `${v} 秒` },
               { title: 'TTL', dataIndex: 'ttl_seconds', key: 'ttl_seconds', render: (v: number) => v > 0 ? `${v} 秒` : '不过期' },
               { title: '启用', dataIndex: 'enabled', key: 'enabled', render: (v: boolean) => v ? <Tag color="green">ON</Tag> : <Tag>OFF</Tag> },
