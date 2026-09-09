@@ -1,10 +1,16 @@
 // Alerts page：W1 去假数据兜底 + W2 时间格式化 + 空 data 守卫。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import Alerts from "./Alerts";
 
-const h = vi.hoisted(() => ({ override: {} as Record<string, unknown>, refetch: vi.fn() }))
+const h = vi.hoisted(() => ({
+  override: {} as Record<string, unknown>,
+  refetch: vi.fn(),
+  // M14：共享 mutate spy —— 断言「确认后才调用」，不关心是哪个 mutation 的 mutate
+  mutate: vi.fn(),
+  mutateAsync: vi.fn(),
+}))
 
 const mockAlerts = [
   {
@@ -41,13 +47,14 @@ vi.mock("../hooks/useApiQuery", () => ({
     refetch: h.refetch,
     ...h.override,
   }),
-  useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useApiMutation: () => ({ mutate: h.mutate, mutateAsync: h.mutateAsync, isPending: false }),
   queryKeys: { alerts: { list: () => ["alerts", "list"] } },
 }));
 
 beforeEach(() => {
   h.override = {}
   h.refetch.mockClear()
+  h.mutate.mockClear()
 })
 
 describe("Alerts page", () => {
@@ -97,5 +104,28 @@ describe("Alerts page", () => {
     // 统计卡四联全部回落 0（不是虚构的 15/8/3/4）
     expect(screen.queryByText("15")).toBeNull()
     expect(screen.getAllByText("0").length).toBe(4)
+  });
+
+  it("M14：批量确认先弹确认框，确认后才执行（误点不生效）", async () => {
+    render(<Alerts />);
+    // 选中第一行告警（checkbox[0] 是表头全选，[1] 才是第一行）
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+
+    // 选中后批量按钮出现，点「批量确认」
+    fireEvent.click(await screen.findByRole("button", { name: /批量确认/ }));
+
+    // 确认框出现，但 mutate 尚未被调用（误点不生效）
+    const title = await screen.findByText(/批量确认已选的 1 条告警/);
+    expect(title).toBeInTheDocument();
+    expect(h.mutate).not.toHaveBeenCalled();
+
+    // 点 Popconfirm 里的「确认」按钮 → 才真正执行
+    const popover = title.closest(".ant-popover") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /确\s*认/ }));
+
+    await waitFor(() => {
+      expect(h.mutate).toHaveBeenCalledWith(["1"]);
+    });
   });
 });

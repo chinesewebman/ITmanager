@@ -314,6 +314,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev27 | 2026-09-10 | **W6 批 1 第 5 步 P17 完成**：metric sync 每 5min 按 `assets.name IN (...)` 关联无索引扫全表（75.3ms）→ 迁移 000020 加 `idx_assets_name (name)`。dbsmoke 形态 + EXPLAIN 断言（真实查询单条件，无其它索引竞争，直接走该索引）；Down 链七次→八次（20→19→18→17→16→15→14→13）；变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。下一 000021=P18 `audit_logs.path text_pattern_ops` |
 | rev28 | 2026-09-10 | **W6 批 1 第 6 步 P18 完成**：审计列表 `path LIKE 'x%'` 前缀匹配无可用索引（罕见过滤 455ms）→ 迁移 000021 加 `idx_audit_logs_path (path text_pattern_ops)`。**验证**：`text_pattern_ops` 可作用于 `VARCHAR(500)` 列（真 PG `CREATE INDEX` 通过），EXPLAIN 显示 `Index Only Scan using idx_audit_logs_path`（`~>=~`/`~<~` pattern 操作符）。dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链八次→九次（21→20→19→18→17→16→15→14→13）；变异（去 CREATE INDEX）红在 `NotEmpty`「索引不存在」断言。下一 P19 `ticket_service` cursor Count 3 行（无迁移） |
 | rev29 | 2026-09-10 | **W6 批 1 第 7 步 P19 完成（批 1 全部收口）**：工单 cursor 模式仍跑一次无条件 `COUNT(*)`（注释说"不跑 Count"，代码与注释不符）→ 把 `q.Count(&total)` 从 cursor 判断之前挪到 offset 分支之后（`ticket_service.go:66-74`）。cursor 模式不再白跑全表计数（每页省一次 `COUNT(*)`），offset 模式保留 total。单测 `TestTicketService_List_cursor模式不跑Count`（sqlmock 只期望一条 Find，不期望 count）；变异（把 Count 挪回 cursor 前）红在 `could not match actual sql: SELECT count(*)`。**W6 批 1（P13–P19）全部完成** |
+| rev30 | 2026-09-10 | **批 2 第 1 步 M14（批量操作确认）完成**：Alerts 页「批量确认」「批量解决」两按钮原本 `onClick` 直接对选中告警逐条生效（误点即执行，无二次确认）→ 套 Popconfirm 四件套（title 带已选数量「批量确认/解决已选的 N 条告警？」+ okText/cancelText，批量解决加 `okButtonProps danger`，范本 `Settings:503`）。1 用例绿（选中行 → 点批量确认 → 确认框出现且 mutate 未调用 → 点确认后 `mutate(['1'])`），变异（去 Popconfirm 改回直接 onClick）红在「找不到确认框文案」断言。**批 2 启动** |
 
 ---
 
@@ -364,13 +365,15 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P17 assets name 索引（迁移 000020） | ✅ 完成 | `idx_assets_name (name)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 20→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P18 audit_logs path 索引（迁移 000021） | ✅ 完成 | `idx_audit_logs_path (path text_pattern_ops)`；dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链 21→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P19 ticket_service cursor Count（3 行，无迁移） | ✅ 完成 | 把无条件 `COUNT(*)` 挪到 cursor 分支之后；cursor 模式不再跑 Count；单测 + 变异（挪回）红在 `SELECT count(*)` 未匹配 |
-| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
+| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14 已完成（rev30）；剩 M1/M2/M3+P4/P5/P6/P7/M11/M13/M15 |
+| 批 2 · M14 批量操作确认 | ✅ 完成 | Alerts「批量确认/解决」套 Popconfirm 二次确认（title 带已选数量）；1 用例绿；变异（去 Popconfirm）红在确认框缺失 |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
+5. ~~批 2 启动~~ → **M14 批量操作确认已完成（rev30）**；剩 M1 标题、M2 排序、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M11 严重度、M13 移动端、M15 空态/加载态。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 

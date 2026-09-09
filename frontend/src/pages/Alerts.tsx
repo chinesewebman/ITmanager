@@ -1,4 +1,4 @@
-import { Button, Modal, Progress, Select, Space, theme, message } from "antd";
+import { Button, Modal, Popconfirm, Progress, Select, Space, theme, message } from "antd";
 import {
   SyncOutlined,
   CheckOutlined,
@@ -180,21 +180,35 @@ function Alerts() {
           <Space>
             {hasSelection && (
               <>
-                <Button
-                  icon={<CheckOutlined />}
-                  onClick={() => bulkAckMut.mutate(selectedIds)}
-                  loading={bulkAckMut.isPending}
+                {/* M14：批量操作误点立即生效 → 套 Popconfirm 二次确认（范本 Settings:503） */}
+                <Popconfirm
+                  title={`批量确认已选的 ${selectedIds.length} 条告警？`}
+                  okText="确认"
+                  cancelText="取消"
+                  onConfirm={() => bulkAckMut.mutate(selectedIds)}
                 >
-                  批量确认
-                </Button>
-                <Button
-                  type="primary"
-                  icon={<CheckCircleOutlined />}
-                  onClick={() => bulkResolveMut.mutate(selectedIds)}
-                  loading={bulkResolveMut.isPending}
+                  <Button
+                    icon={<CheckOutlined />}
+                    loading={bulkAckMut.isPending}
+                  >
+                    批量确认
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title={`批量解决已选的 ${selectedIds.length} 条告警？`}
+                  okText="解决"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => bulkResolveMut.mutate(selectedIds)}
                 >
-                  批量解决
-                </Button>
+                  <Button
+                    type="primary"
+                    icon={<CheckCircleOutlined />}
+                    loading={bulkResolveMut.isPending}
+                  >
+                    批量解决
+                  </Button>
+                </Popconfirm>
               </>
             )}
             <Button
