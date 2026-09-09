@@ -47,10 +47,6 @@ func (s *ticketService) List(ctx context.Context, f TicketFilter) ([]models.Tick
 	if f.Priority != "" {
 		q = q.Where("priority = ?", f.Priority)
 	}
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
 	page := f.Page
 	if page < 1 {
 		page = 1
@@ -73,7 +69,11 @@ func (s *ticketService) List(ctx context.Context, f TicketFilter) ([]models.Tick
 		}
 		return items, 0, nil
 	}
-	// v1.x 兼容: page/size offset 翻页
+	// v1.x 兼容: page/size offset 翻页 —— 只有这条路径需要 total（cursor 模式已提前 return）
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 	if err := q.Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}

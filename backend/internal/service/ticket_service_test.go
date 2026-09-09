@@ -83,6 +83,30 @@ func TestTicketService_List_空filter返列表(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestTicketService_List_cursor模式不跑Count(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewTicketService(gormDB)
+	ctx := context.Background()
+
+	cursorTS := time.Now()
+	cursorID := uuid.New()
+
+	rows := sqlmock.NewRows([]string{"id", "title", "status"}).
+		AddRow(uuid.NewString(), "t-1", "open")
+
+	// cursor 模式只跑一条 Find，不跑 count(*)（P19 修复点：Count 已挪到 offset 分支）。
+	// 若 cursor 模式仍跑 Count，其 SQL `SELECT count(*) FROM "tickets"` 不匹配此期望，
+	// sqlmock 会报 "not expected"，List 返回 err → 本用例红。
+	mock.ExpectQuery(`SELECT \* FROM "tickets"`).
+		WillReturnRows(rows)
+
+	list, total, err := svc.List(ctx, TicketFilter{CursorTS: cursorTS, CursorID: cursorID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total) // cursor 模式 total 恒 0（hasMore 检测在调用方）
+	assert.Len(t, list, 1)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestTicketService_Update_空updates返当前(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	svc := NewTicketService(gormDB)
