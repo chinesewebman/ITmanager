@@ -2,7 +2,7 @@
 
 **最后更新**: 2026-09-09（本次只增量更新本节与下方「2026-09-09 增量」；其余章节仍是 2026-06-16 快照）
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
-**状态**: ✅ 939 backend 测试函数全过（`go test ./... -count=1`，26 个包）+ `db_smoke.sh` 两条真 PG 路径绿
+**状态**: ✅ 959 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ `db_smoke.sh` 两条真 PG 路径绿
 
 ---
 
@@ -10,15 +10,17 @@
 
 | 维度 | 数值 / 说明 |
 |---|---|
-| Backend 测试函数 | **955**（+16；`grep -c "^func Test"`，含 12 个 `dbsmoke` 标签用例；第二轮 +3：V-13 `httpx` 两条出错路径、V-14 `SyncAll` 日志出口、V-15 `markFailed` 非法 UTF-8） |
+| Backend 测试函数 | **959**（+20；`grep -rh "^func Test"`，含 12 个 `dbsmoke` 标签用例；第二轮 +3：V-13 `httpx` 两条出错路径、V-14 `SyncAll` 日志出口、V-15 `markFailed` 非法 UTF-8；第三轮 +4：webhook parse 失败路径、NetBox/GLPI 400 回显、resolver 日志、`urlErrCause` depth=4） |
 | 新增守门测试 | `internal/redact/redact_test.go`（V-4 `URL` 表驱动 10 例 / V-5 `Text` 12 例 + 6 例不误伤）、`notification_test.go` V-1/V-2（只 bind 不 Accept + 200ms ctx）、V-3（`url.Parse` 失败路径）、V-6（**真 sqlite 写+读回**，脱敏 + rune 截断 + UPDATE 真生效）、V-9（`log.SetOutput` 捕获失败日志）、V-11（`urlErrCause` 剥壳与 nil/超限兜底）、V-12（写库失败必须留痕）、`apierr_test.go` V-7（5xx 内部日志）、`integration_handler_test.go` V-10（真 `IntegrationService`，query token 与 userinfo 两条路径） |
-| 关键函数覆盖 | `redact.URL` / `redact.Text` / `urlErrCause` / `markFailed` **各 100%**（语句）；包级：`redact` **100%**、`apierr` **88.5%**、`notification` **72.2%**、`httpx` 88.1%、`integration` 84.6%（其余为未改动的 email / tick 路径） |
+| 关键函数覆盖 | `redact.URL` / `redact.Text` / `urlErrCause` / `markFailed` **各 100%**（语句）；包级：`redact` **100%**、`apierr` **88.5%**、`notification` **73.0%**（第三轮实测）、`httpx` 88.1%、`integration` 84.6%（其余为未改动的 email / tick 路径） |
 | 变异反证 | **首轮 9 项 + 第二轮 6 项，全部红在断言上**（首轮 M1 退回裸 `err`、M2 `URL` 返回原串、M3 `Text` 恒等、M4 `markFailed` 去脱敏、M6 `apierr` 去脱敏、M7 `urlErrCause` 恒等、M8 日志去脱敏、M9 去掉 URL 塌缩、M10 退回字节截断；第二轮 M11 `httpx` 三处 return 退回裸 `fmt.Errorf`、M12 去掉 scheme-relative 分支、M13 值类恢复排除 `'`、M14 值类恢复排除 `}` `]` `<` `>`、M15 规则 2 恢复排除 `,`、M16 `ToValidUTF8`→`strings.Clone`）。审查建议的 **M5「先截断后脱敏」经四组构造实测不可观测**，已移除并写明依据（顺序不是安全边界）——见 `docs/FIX-PLAN-ERROR-REDACT.md` §4/§7.2/§9 |
 | 新增 trap | `docs/TRAPS.md` **T-34**（凭据藏在错误文本里：`*url.Error` 带完整 URL 走遍四个出口；脱敏必须结构性、顺序不是边界、截断按 rune；**第二轮补**：源头收口优先于出口兜底、正则排除集要按语义最小化、`scheme://` 不是 URL 唯一形状、错误文本可能是非法 UTF-8） |
 | 为什么加 | G-16 堵了 SQL 参数，**错误文本**是另一条路：钉钉/飞书/Slack 的 token 在 query/path、集成 URL 可能在 userinfo，失败时 `*url.Error.Error()` 原文连凭据一起落进应用日志、`notification_logs.error_msg`、`gin.DefaultErrorWriter`、HTTP 400 body 四处；`markFailed` 还按字节截断（切断 UTF-8 → PG 22021 拒收 → 行永远 pending 被无限重发）且丢弃 UPDATE 错误（无声无息） |
 
 > **第二轮（审计回执，2026-09-09 晚）**：安全审计 H-1（集成 4 处日志未脱敏 → 改在 `httpx` 出口收口）、M-2/M-3（scheme-relative、`'`/`\`、`https://user:`），正确性审计 P1（值类边界漏尾/整条不匹配）、P4（非法 UTF-8 写库 → PG 22021 → 行永远 pending）全部修复并各配变异；P3（过度脱敏不泄漏）与「值以分隔符开头」的窄形态登记 **G-34/G-35**。处置明细见 `docs/FIX-PLAN-ERROR-REDACT.md` §9。
 
+> **第三轮（测试有效性审计，2026-09-09 深夜）**：审计员在 `/tmp` 隔离快照独立复现 9 项变异**全部红在断言上**、无假绿、无 `NotContains` 空转，同时指出 4 处覆盖空洞并全部闭合：webhook parse 失败 return（HIGH-1）、NetBox/GLPI 400 回显脱敏（HIGH-2）、resolver 日志（MED-1）、`urlErrCause` depth=4 丢 cause（MED-2）。新增变异 U1/U2/U4 单层即红、U3′ 组合红。**一条值得记住的结论**：双层防御下「单层变异不红」不等于用例失效——httpx 的源头收口已经把 URL 塌缩，handler 层的 `redact.Text` 是兜底；要证明用例有效必须做组合变异（见 `docs/TRAPS.md` **T-35**）。
+>
 > 本轮的构造经验（写进 T-34）：① 失败要**确定性**——`net.Listen` 只 bind 不 Accept + 短 ctx，比 `connection refused` 的文案稳；② 正向断言必须成对（先 `Contains("scheme://host")` 证明脱敏函数真被调用，再 `NotContains(SECRET)`），否则「错误被吞成空串」也会绿；③ 入库断言用**真 sqlite**（sqlmock 断不了 map 更新的参数值）；④ 值类以定界符/串尾为界 —— 测试里密钥后面必须加空格，否则后续汉字会被一并吞掉（过度脱敏，测的就不是截断了）；⑤ **PG 侧的编码行为 sqlite 测不出来**——P4 的「非法 UTF-8 被 22021 拒收」用一次性 `postgres:18-alpine` 容器实测（`convert_from('\x…fffe','UTF8')` → exit 1，替换后 exit 0），sqlite 只用于钉 `utf8.ValidString`。
 
 ---

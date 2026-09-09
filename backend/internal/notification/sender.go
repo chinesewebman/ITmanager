@@ -38,18 +38,21 @@ import (
 // redact.URL 缩成 scheme://host。
 // 重定向链可能嵌套，故递归剥；上限 4 层，内层为 nil 或超限一律返回固定文案 ——
 // 宁可丢诊断信息，也不回传带 URL 的原串。
+//
+// 循环条件写在**解包前**：`for i := 0; i < 4` 只解 4 次却把第 5 层的判定留给兜底，
+// 等于「4 层嵌套也丢 cause」（审计 MED-2，实测 depth=4 → 未知错误）。现在深度 4 能
+// 拿到 cause，深度 ≥5 仍走安全兜底，且循环仍是有界 4 次解包（防御自引用链）。
 func urlErrCause(err error) error {
-	for i := 0; i < 4; i++ {
+	for i := 0; ; i++ {
 		var ue *url.Error
 		if !errors.As(err, &ue) {
 			return err
 		}
-		if ue.Err == nil {
-			break
+		if ue.Err == nil || i >= 4 {
+			return errors.New("未知错误")
 		}
 		err = ue.Err
 	}
-	return errors.New("未知错误")
 }
 
 // Sender 单一渠道发送器接口

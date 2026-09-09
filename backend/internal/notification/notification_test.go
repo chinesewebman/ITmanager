@@ -409,6 +409,21 @@ func TestDingTalkSender_非法URL不泄漏原串(t *testing.T) {
 	assert.NotContains(t, err.Error(), bad)
 }
 
+// 审计 HIGH-1：webhook 的 parse 失败 return 点是独立一处（sender.go 的
+// 「webhook: 无效的 url」），与钉钉那条同型却零覆盖 —— 变异退回裸 err 不被捕获。
+// 用 Slack 形态（token 在 path）钉住：泄漏时 SECRETPATH 会原样出现在错误里。
+func TestWebhookSender_非法URL不泄漏原串(t *testing.T) {
+	const bad = "http://[::1/services/T000/B000/SECRETPATH"
+	s, err := NewWebhookSender(&models.NotificationChannel{Config: `{"url":"` + bad + `"}`})
+	require.NoError(t, err)
+
+	err = s.Send(context.Background(), "", "内容")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing ']' in host", "保留 parse 原因，便于排障")
+	assert.NotContains(t, err.Error(), bad)
+	assert.NotContains(t, err.Error(), "SECRETPATH")
+}
+
 // TestMarkFailed_脱敏且按rune截断 同时钉三件事：
 //  1. 凭据被 redact.Text 抹掉（变异：去掉脱敏 → SUPERSECRET 泄漏）
 //  2. 按 rune 截断（变异：errMsg[:500] 字节截断 → 切断汉字 → ValidString 红）
@@ -462,6 +477,12 @@ func TestURLErrCause_剥壳与兜底(t *testing.T) {
 	assert.Equal(t, inner, urlErrCause(inner))
 	// Err 为 nil → 固定文案，绝不回传带 URL 的原串
 	assert.EqualError(t, urlErrCause(&url.Error{Op: "Post", URL: "http://h/p?token=SECRET", Err: nil}), "未知错误")
+	// 恰好 4 层嵌套 → 仍能拿到底层 cause（审计 MED-2：旧循环把第 4 层丢进兜底）
+	var deep4 error = inner
+	for i := 0; i < 4; i++ {
+		deep4 = &url.Error{Op: "Post", URL: "http://h/p?token=SECRET", Err: deep4}
+	}
+	assert.Equal(t, inner, urlErrCause(deep4), "4 层嵌套不该丢 cause")
 	// 嵌套超过 4 层 → 固定文案
 	var deep error = inner
 	for i := 0; i < 5; i++ {
@@ -521,4 +542,35 @@ func TestHandleAlertEvent_发送失败日志不泄漏URL凭据(t *testing.T) {
 	assert.NotContains(t, logged, "SUPERSECRET")
 	assert.NotContains(t, logged, "TOPLEVELSECRET")
 	assert.NotContains(t, logged, "access_token")
+}
+
+// 审计 MED-1：resolver 失败日志（worker.go 的「resolver err for channel」）零覆盖。
+// 内置 Resolver 的错误不含 URL，但 RegisterSender 注册的第三方构造器可以任意返回 ——
+// 用 WorkerConfig.Resolver 注入一个带凭据的错误，钉住这一行确实过了 redact.Text。
+func TestHandleAlertEvent_resolver错误日志不泄漏URL凭据(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	db, mock := newMockDB(t)
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(uuid.New().String(), "自定义", "custom",
+				`{"url":"https://hooks.slack.com/services/T000/B000/SECRETPATH"}`, true))
+
+	w := NewWorker(db, WorkerConfig{
+		Tick: time.Hour, MaxBatch: 10,
+		Resolver: func(*models.NotificationChannel) (Sender, error) {
+			return nil, errors.New(`Post "https://hooks.slack.com/services/T000/B000/SECRETPATH": dial tcp: refused`)
+		},
+	})
+	require.NoError(t, w.handleAlertEvent(context.Background(),
+		eventbus.Event{Payload: []byte(`{"event_type":"created","trigger":"t","host_name":"h"}`)}))
+
+	logged := buf.String()
+	require.Contains(t, logged, "resolver err for channel", "必须走到 resolver 失败日志这一行")
+	require.Contains(t, logged, "https://hooks.slack.com", "URL 塌缩成 scheme://host")
+	assert.NotContains(t, logged, "SECRETPATH")
+	assert.NotContains(t, logged, "services")
 }

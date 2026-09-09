@@ -258,7 +258,7 @@ if err != nil {
 |---|---|
 | 新增 `internal/redact/redact.go` | `URL`（scheme://host，丢 userinfo/path/query；解析失败或无 host → `<invalid-url>`）+ `Text`（规则 1 URL 塌缩 / 规则 2 Authorization 头 / 规则 3 键值形态，保留键名与定界符） |
 | 新增 `internal/redact/redact_test.go` | V-4 / V-5（含 6 类绕过 + 3 类不误伤） |
-| `notification/sender.go` | 新增 `urlErrCause`（剥 `*url.Error`，上限 4 层，nil/超限 → `"未知错误"`）；`DingTalkSender.Send` 与 `WebhookSender.Send` 各 2 处 return（parse 失败不包原 err、Do 失败只留 host + cause） |
+| `notification/sender.go` | 新增 `urlErrCause`（剥 `*url.Error`，上限 4 层，nil/超限 → `"未知错误"`；**第三轮修正为真正处理到深度 4，见 §9.5 MED-2**）；`DingTalkSender.Send` 与 `WebhookSender.Send` 各 2 处 return（parse 失败不包原 err、Do 失败只留 host + cause） |
 | `notification/worker.go` | `:149`/`:156` 两行日志过 `redact.Text`；`markFailed` 先脱敏、按 rune 截断到 500、UPDATE 错误记日志 |
 | `apierr/apierr.go` | 5xx 内部日志过 `redact.Text` |
 | `api/handlers/integration_handler.go` | 三处连通测试 400 文案过 `redact.Text` |
@@ -289,7 +289,7 @@ if err != nil {
 ## 9. 第二轮：审计回执与处置（2026-09-09 晚）
 
 第一轮三份只读审计（正确性 / 安全 / 测试有效性）在实现落盘后复查，安全与正确性两份先回。
-本节记录这一轮的发现、修法与反证；**测试有效性审计尚未回**，回后并入本节。
+本节记录这一轮的发现、修法与反证；测试有效性审计在 §9.5（第三轮）。
 
 ### 9.1 安全审计：H-1（高，已修）
 
@@ -325,3 +325,26 @@ if err != nil {
 - 覆盖率：`redact` **100%**、`URL` **100%**、`markFailed` **100%**、`httpx` 88.1%、`integration` 84.6%、`notification` 72.2%。
 - 变异：第二轮 M11–M16 六项**全部红在断言上**（M11 曾以「删 import」形态红在编译上，已改为「三处 return 退回裸 `fmt.Errorf`」）。
 - 推送前由**单一进程**复跑（审计员观察到本轮变异脚本并发改写工作树，期间任何测试结论不作数）——工作树已确认是修复版（`git status` 无临时探针文件）。
+
+### 9.5 第三轮：测试有效性审计（2026-09-09 深夜）
+
+审计基线：审计员在 `/tmp` 隔离快照上独立复现（S1 = 交付态、S2 = 含 §9.2/§9.3 修复的当前态），**未改动仓库任何文件**。
+结论先行：**9/9 首轮+第二轮变异独立复现全部红在断言上、无一红在编译上**，`NotContains` 无空转（除 LOW-1），确定性与 `-race` 干净——§4/§8.2 的实质性声明成立。以下是它发现的**覆盖空洞**与处置。
+
+| 发现 | 级别 | 处置与反证 |
+|---|---|---|
+| **HIGH-1** `sender.go` webhook 的 parse 失败 return（「webhook: 无效的 url」）**零覆盖**：V-2 只测有效 URL 的 `Do` 失败、V-3 只测钉钉的 parse 路径；变异退回裸 `err` **不被捕获** | 高 | 新增 `TestWebhookSender_非法URL不泄漏原串`（Slack 形态：token 在 path）。**U1** 该 return 退回裸 `err` → 红在断言，泄漏原文实测 `…parse "http://[::1/services/T000/B000/SECRETPATH": missing ']' in host` |
+| **HIGH-2** NetBox / GLPI 的 400 回显脱敏**零覆盖**（只有 Zabbix 被 V-10 钉住） | 高 | 新增 `TestTestNetBox_失败回显不泄漏URL凭据` / `TestTestGLPI_失败回显不泄漏URL凭据`；测试 router 补两条路由、helper 泛化为 `integrationTestMessage(t, r, path)`。**组合变异 U3′**（同时去掉 handler 层 `redact.Text` 与 httpx `redactedErr` 的脱敏）→ 红在断言，泄漏原文实测含 `?token=SUPERSECRET` |
+| **MED-1** `worker.go` 的 resolver 失败日志零覆盖（内置 `Resolver` 的错误不含 URL，故一直没测） | 中 | 新增 `TestHandleAlertEvent_resolver错误日志不泄漏URL凭据`：用 `WorkerConfig.Resolver` 注入带凭据错误（第三方 `RegisterSender` 构造器的真实形态）。**U2** 去掉该行 `redact.Text` → 红在断言 |
+| **MED-2** `urlErrCause` 深度 4 丢 cause（`for i := 0; i < 4` 解 4 次却把第 5 层判定留给兜底 → 实际只处理 3 层），与文档「上限 4 层」不符 | 中 | 修：把有界判定移到**解包前**（`if ue.Err == nil \|\| i >= 4`），深度 ≤4 拿到底层 cause、≥5 仍走安全兜底，解包次数仍**有界 4 次**（防自引用链）。V-11 补 depth=4 用例；**U4** 退回旧循环 → 红 |
+| **LOW-1** V-2 的 `NotContains("S3CR3THDR")` 在当前实现下恒真（header 值不会进 `*url.Error`） | 低 | **保留为哨兵**：若将来有人把请求 dump 进错误文本，它会红。已标注它不构成本轮屏障 |
+| **LOW-2** V-6 与规则 3 值类隐式耦合（改值类会让它红在「截断」断言上，指向误导） | 低 | 保留；用例注释已写明依赖「空格定界」 |
+| **LOW-3** 文档包级数字小幅偏差（audit 实测 `notification` 71.7% vs §9.4 记 72.2%） | 低 | 包级覆盖率随用例增删浮动，已按第三轮实测统一口径（下方） |
+
+**一处必须说清的事**：HIGH-2 的用例**单独去掉 handler 层脱敏时仍绿**——因为 httpx 的 `redactedErr`（§9.1 源头收口）已经把 URL 塌缩了。这不是测试失效，而是**双层防御**：用例钉住的是「出口不泄漏」这一**事实**，不区分由哪一层实现；只有组合变异（两层同时去掉）才红。登记为 **T-35**。
+
+**第三轮验证**：
+- `go test ./... -count=1`：**27 包全绿、0 FAIL**；`go vet ./...` 干净；`gofmt -l` 无输出。
+- 覆盖率（语句）：`redact` **100%**、`redact.URL` **100%**、`urlErrCause` **100%**、`markFailed` **100%**、`httpx` 88.1%、`integration` 84.6%、`apierr` 88.5%、`notification` **73.0%**（较第二轮 +0.8pt）。
+- 新增变异 U1/U2/U4 单层即红、U3′ 组合红，全部红在断言上。
+- 测试函数 959（`grep -rh "^func Test"`，含 12 个 `dbsmoke` 标签用例）。
