@@ -158,6 +158,9 @@ func Load(path string) (*Config, error) {
 	// AllKeys 的键」做 env 覆盖，而 AllKeys 由 yaml + SetDefault 构成：升级时挂载的
 	// 旧 config.yaml 若没有 trusted_proxies 键，NMP_SERVER_TRUSTED_PROXIES 会被静默忽略。
 	viper.SetDefault("server.trusted_proxies", []string{})
+	// G-13：同上。shipped config.yaml 里补了 api_key_pepper 空占位，但生产常按文档挂载
+	// 自定义/旧的 config.yaml —— 那种文件没有这个键，只有 SetDefault 才能让 env 生效。
+	viper.SetDefault("auth.api_key_pepper", "")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("auth.jwt.expire", 86400)
@@ -207,7 +210,9 @@ func (c *Config) Validate() error {
 
 	// API Key pepper（C-F6 防离线彩虹表）
 	if c.Auth.APIKeyPepper == "" {
-		errs = append(errs, "auth.api_key_pepper 不能为空（通过 NMP_API_KEY_PEPPER 注入）")
+		// G-13b: 变量名必须与 viper 实际键一致（NMP_ + auth.api_key_pepper 的 . → _）。
+		// 原先写 NMP_API_KEY_PEPPER，运维照提示注入仍然起不来。
+		errs = append(errs, "auth.api_key_pepper 不能为空（通过 NMP_AUTH_API_KEY_PEPPER 注入）")
 	} else if len(c.Auth.APIKeyPepper) < 32 {
 		errs = append(errs, fmt.Sprintf("auth.api_key_pepper 长度 %d < 32 位最低要求", len(c.Auth.APIKeyPepper)))
 	}

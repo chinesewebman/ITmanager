@@ -521,6 +521,83 @@ log:
 		"旧 config.yaml 缺 trusted_proxies 键时 env 也必须生效（否则升级后静默不信任任何来源）")
 }
 
+// TestLoad_ShippedConfigYAML_必填Env齐备时成功 直接读仓库里随镜像发布的
+// backend/config.yaml（不是临时构造的 yaml），钉住「文档化的部署路径真的能用」。
+//
+// 为什么必须用 shipped 文件：G-13 的根因是 shipped yaml 缺 auth.api_key_pepper 键，
+// 而 viper 只对 AllKeys（yaml 键 + SetDefault 键）做 env 覆盖。其余测试都用临时 yaml
+// （都带这个键），于是全绿而真实部署必挂。以后谁新增「必须 env 注入」的字段却忘加
+// yaml 占位，这条测试会红。
+func TestLoad_ShippedConfigYAML_必填Env齐备时成功(t *testing.T) {
+	path := filepath.Join("..", "..", "config.yaml")
+	require.FileExists(t, path, "随仓库发布的 backend/config.yaml 必须在，测试才有意义")
+
+	t.Setenv("NMP_AUTH_JWT_SECRET", validSecret)
+	t.Setenv("NMP_DATABASE_PASSWORD", "shipped-yaml-probe-password")
+	t.Setenv("NMP_AUTH_API_KEY_PEPPER", validPepper)
+
+	cfg, err := Load(path)
+	require.NoError(t, err, "shipped config.yaml + 三个必需 env 必须能启动（否则文档化部署路径是死的）")
+	assert.Equal(t, validSecret, cfg.Auth.JWT.Secret)
+	assert.Equal(t, "shipped-yaml-probe-password", cfg.Database.Password)
+	assert.Equal(t, validPepper, cfg.Auth.APIKeyPepper)
+}
+
+// 升级场景：挂载的旧 config.yaml 没有 api_key_pepper 键时，env 也必须生效。
+// 与 TestLoad_TrustedProxiesEnvOverride_YAML无键时仍生效 同款，依赖
+// Load() 里的 viper.SetDefault("auth.api_key_pepper", "")（G-13 + 审查 S-1）。
+func TestLoad_APIKeyPepperEnvOverride_YAML无键时仍生效(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	t.Setenv("NMP_AUTH_API_KEY_PEPPER", validPepper)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, validPepper, cfg.Auth.APIKeyPepper,
+		"旧 config.yaml 缺 api_key_pepper 键时 env 也必须生效（否则升级后服务起不来）")
+}
+
+// 报错文案必须写 viper 真正认的变量名（G-13b）：NMP_API_KEY_PEPPER 是错的，
+// 运维照提示注入会继续起不来。
+func TestLoad_缺少Pepper时报错文案指向正确的环境变量名(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+	t.Setenv("NMP_AUTH_API_KEY_PEPPER", "")
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NMP_AUTH_API_KEY_PEPPER",
+		"报错文案必须给出 viper 真正认的变量名")
+	assert.NotContains(t, err.Error(), "NMP_API_KEY_PEPPER",
+		"不能继续提示这个不存在的变量名")
+}
+
 // ==================== Load 集成测试 ====================
 
 func TestLoad_FileNotFound_ReturnsError(t *testing.T) {
