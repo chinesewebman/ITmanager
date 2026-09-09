@@ -2,7 +2,7 @@
 // 修前：列表回落 MOCK_TICKETS；统计卡无条件渲染写死的 DEFAULT_STATS（与接口无关）。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import Tickets from './Tickets'
 
 // vi.hoisted：mock 工厂在 import 期就会被调用，共享状态必须在提升块里创建
@@ -126,6 +126,26 @@ describe('Tickets page', () => {
     fireEvent.mouseDown(screen.getAllByRole('combobox')[0])
     fireEvent.click(await screen.findByTitle('新建'))
     expect(screen.getByText('共 2 个工单（已筛选）')).toBeInTheDocument()
+  })
+
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // TicketTable 给标题/优先级/状态/请求人/处理人/创建时间加前端本地排序；这里验证最核心的时间排序行为。
+  it('M2：创建时间列可排序（点击表头后按时间升序重排）', async () => {
+    const { container } = render(<Tickets />)
+    // 整行 textContent（无 rowSelection，但统一用 data-row-key 选行，避免列位置耦合）
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：服务器磁盘空间不足（02-14）在前
+    expect(rowTexts()[0]).toContain('服务器磁盘空间不足')
+
+    // 点击「创建时间」表头，antd 默认第一次点击为升序 → 02-13 的网络延迟过高排前
+    fireEvent.click(screen.getAllByText('创建时间')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('网络延迟过高')
+    })
   })
 
   it('W2：创建时间走 utils/time 统一格式（T 分隔 → 空格）', () => {

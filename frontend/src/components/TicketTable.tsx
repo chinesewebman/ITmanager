@@ -25,6 +25,15 @@ const PRIORITY_LABEL: Record<string, string> = {
   low: '低',
 }
 
+// M2：优先级按严重度权重排序（critical 最高）。medium 与 normal 同权（见 M16 域不一致）。
+const PRIORITY_WEIGHT: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  normal: 2,
+  medium: 2,
+  low: 1,
+}
+
 export interface TicketTableProps {
   data: Ticket[]
   loading: boolean
@@ -33,12 +42,15 @@ export interface TicketTableProps {
 
 export function TicketTable({ data, loading, onView }: TicketTableProps) {
   const columns: ColumnsType<Ticket> = [
-    { title: '工单标题', dataIndex: 'title', key: 'title' },
+    // M2：加前端本地排序。优先级按严重度权重；创建时间按 Date 解析（RFC3339 字符串
+    // 字典序会因时区偏移错序）；其余字符串列 localeCompare（assignee 可能为空）。
+    { title: '工单标题', dataIndex: 'title', key: 'title', sorter: (a, b) => a.title.localeCompare(b.title) },
     {
       title: '优先级',
       dataIndex: 'priority',
       key: 'priority',
       width: 80,
+      sorter: (a, b) => (PRIORITY_WEIGHT[a.priority] ?? 0) - (PRIORITY_WEIGHT[b.priority] ?? 0),
       render: (p: string) => (
         <StatusTag value={p} label={PRIORITY_LABEL[p] || p} />
       ),
@@ -48,14 +60,16 @@ export function TicketTable({ data, loading, onView }: TicketTableProps) {
       dataIndex: 'status',
       key: 'status',
       width: 80,
+      sorter: (a, b) => a.status.localeCompare(b.status),
       render: (s: string) => <StatusTag value={s} />,
     },
-    { title: '请求人', dataIndex: 'requester', key: 'requester', width: 100 },
+    { title: '请求人', dataIndex: 'requester', key: 'requester', width: 100, sorter: (a, b) => a.requester.localeCompare(b.requester) },
     {
       title: '处理人',
       dataIndex: 'assignee',
       key: 'assignee',
       width: 100,
+      sorter: (a, b) => (a.assignee ?? '').localeCompare(b.assignee ?? ''),
       render: (a?: string) => a || '-',
     },
     {
@@ -63,6 +77,7 @@ export function TicketTable({ data, loading, onView }: TicketTableProps) {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 180,
+      sorter: (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
       // W2：原样渲染后端时间串，与其它页口径不一致
       render: (iso: string) => formatDateTime(iso),
     },
