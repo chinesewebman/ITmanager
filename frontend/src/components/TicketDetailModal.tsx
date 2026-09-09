@@ -1,11 +1,13 @@
 import { Button, Col, Modal, Row } from 'antd'
 import { StatusTag } from './StatusTag'
+import { formatDateTime } from '../utils/time'
 import type { Ticket } from './TicketTable'
 
 const PRIORITY_LABEL: Record<string, string> = {
   critical: '紧急',
   high: '高',
   normal: '普通',
+  medium: '普通', // GLPI 同步值，见 TicketTable.tsx 同名字典注释
   low: '低',
 }
 
@@ -67,11 +69,12 @@ export function TicketDetailModal({ ticket, onClose }: TicketDetailModalProps) {
           <Row gutter={16}>
             <Col span={12}>
               <strong>创建时间：</strong>
-              {ticket.created_at}
+              {/* W2：与列表页统一走 utils/time 出口 */}
+              {formatDateTime(ticket.created_at)}
             </Col>
             <Col span={12}>
               <strong>更新时间：</strong>
-              {ticket.updated_at}
+              {formatDateTime(ticket.updated_at)}
             </Col>
           </Row>
         </>

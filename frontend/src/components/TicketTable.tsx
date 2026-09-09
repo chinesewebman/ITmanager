@@ -2,6 +2,7 @@ import { Button, Space, Table } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { StatusTag } from './StatusTag'
 import { EmptyState } from './EmptyState'
+import { formatDateTime } from '../utils/time'
 
 export interface Ticket {
   id: string
@@ -18,6 +19,9 @@ const PRIORITY_LABEL: Record<string, string> = {
   critical: '紧急',
   high: '高',
   normal: '普通',
+  // 契约（openapi.yaml:2368）写 normal，但 GLPI 同步写入 medium（integration/glpi.go:158）
+  // —— 见 §4.1 M16，这里是显示兜底，避免把英文原值直接怼给用户
+  medium: '普通',
   low: '低',
 }
 
@@ -54,7 +58,14 @@ export function TicketTable({ data, loading, onView }: TicketTableProps) {
       width: 100,
       render: (a?: string) => a || '-',
     },
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160 },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 180,
+      // W2：原样渲染后端时间串，与其它页口径不一致
+      render: (iso: string) => formatDateTime(iso),
+    },
     {
       title: '操作',
       key: 'action',

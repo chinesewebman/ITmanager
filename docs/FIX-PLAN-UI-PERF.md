@@ -59,7 +59,7 @@
 | 4 | **错误态按「区块」而非整页**：Dashboard 的 KPI（独立 queryKey `['dashboard','kpis']`）与 Racks 的 sites 下拉不得被主列表错误态一起替换 |
 | 5 | **补空态**（审查指出这 4 处当前没有 `EmptyState`）：Dashboard 最近告警、Oncall 的 schedules/policies、MetricSnapshot（已查询但 0 行）、Racks（`RackGrid` 空数组渲染空 `Row`，整屏空白） |
 | 6 | **补 undefined 守卫**：删兜底后「200 + 空 data」会 TypeError 白屏，而不是走 isError。逐点加固：`Alerts.tsx:211` `stats.problem`、`:247` `AlertStatsCards` 的 `stats[c.key]`、`Topology.tsx:94` `graph.nodes.length`、`AssetTimeline.tsx:176` `asset.name` / `:184` `summary.window_days`、`Assets.tsx:238` `(data ?? MOCK_DATA).length` |
-| 7 | **两个缺数据源的点**（审查发现，rev1 自相矛盾）：<br>① Dashboard「最近告警」——后端 `/dashboard/*` 只有 stats/trends/kpis（`routes.go:351-355`），**无 recent 接口**；复用既有 `GET /alerts?limit=5`（`routes.go:316`，服务端已按 `created_at DESC, id DESC` 排序，`alert_service.go:134`），字段映射 `RecentAlert{host,message,severity,time}` → `Alert{host,message,severity_name,created_at}`。<br>② Tickets 统计卡——后端**无 `/tickets/stats`**（`routes.go:335-340` 只有 list/get/create/update），`queryKeys.tickets.stats()`（`useApiQuery.ts:28`）定义了但无调用方；改为从**未筛选**的列表推导，并把四档从「pending/inProgress/waiting/resolved」（后端域里只有 `open/in_progress/resolved/closed`，`models/ticket.go:18`）改成真实四档。`TicketStatsCards.tsx:33` 的 `stats.pending` 需加守卫（否则 undefined 直接崩） |
+| 7 | **两个缺数据源的点**（审查发现，rev1 自相矛盾）：<br>① Dashboard「最近告警」——后端 `/dashboard/*` 只有 stats/trends/kpis（`routes.go:351-355`），**无 recent 接口**；复用既有 `GET /alerts?limit=5`（`routes.go:316`，服务端已按 `created_at DESC, id DESC` 排序，`alert_service.go:134`），字段映射 `RecentAlert{host,message,severity,time}` → `Alert{host,message,severity_name,created_at}`。<br>② Tickets 统计卡——后端**无 `/tickets/stats`**（`routes.go:335-340` 只有 list/get/create/update），`queryKeys.tickets.stats()`（`useApiQuery.ts:28`）定义了但无调用方；改为从**未筛选**的列表推导（`ticketApi.list({page_size:500})`），并把档位从「pending/inProgress/waiting/resolved」（`TicketStatsCards.tsx:21` 的写死 `DEFAULT_STATS`）改成契约状态域。**rev4 修正**：原定「四档 open/in_progress/resolved/closed」的依据是 `models/ticket.go:18` 注释，该注释漏了 `pending` —— 契约 `openapi.yaml:2371` 的 status enum 是 **5 档**（含 `pending`），且 `integration/glpi.go:157` 会把 GLPI 状态 3 映射成 `pending`。按四档做会**静默漏掉 GLPI 同步的待定工单**，故实际实现为 5 档。`TicketStatsCards.tsx` 的取值需加守卫（否则 undefined 直接崩） |
 
 **不做**：不改后端接口；不加「演示模式」开关（演示用 `cmd/seed` 数据）。
 
@@ -175,6 +175,8 @@ formatRelativeTime(iso?: string | null): string   // '3 分钟前'，空/非法 
 ### 4.2 批 2（下一轮，不在本轮范围）
 
 M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（全站零 `sorter`）、M3 分页口径、M7 升级策略 JSON textarea（先改异常文案，结构化编辑器属新功能）、M11 严重度配色两套、M12 已并入 W2、M13 移动端（Sider `breakpoint` + `AlertTable` 双渲染）、M14 批量操作确认与取消、M15 空态/加载态统一。
+
+**M16（rev4 新增，待决策，不在本轮范围）**：工单**优先级域跨层不一致**。契约 `openapi.yaml:2368` 的 priority enum 是 `[critical, high, normal, low]`，前端表单默认值/筛选/标签都按 `normal`；但 `cmd/seed/main.go:264` 与 `integration/glpi.go:158` 写入的是 `medium`（`models/ticket.go:20` 注释也是 medium）。后果：GLPI/seed 工单在列表里显示英文原值、用「普通」筛选筛不到。本轮只加了显示兜底（`medium: '普通'`），**未改域** —— 改哪边涉及存量数据与后端校验，需先定契约。同一类问题还有 `TicketStatsCards` 的档位（已在 W1 按契约修正为 5 档）。
 
 ---
 
@@ -304,17 +306,18 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-H1 命令面板资产路由 404 | ✅ 完成 | 断言 `navigate('/assets/a1/diagnostics')` |
 | W1+W2 `pages/Alerts.tsx` + `AlertTable` | ✅ 完成 | 7 用例绿；两条变异（去 isError 分支 / 去 stats 守卫）均红在断言 |
 | W1+M9+M10 `pages/Assets.tsx` + `AssetFilterBar` | ✅ 完成 | 11 用例绿；三条变异（去 isError 分支 / 副标题回落未过滤计数 / 去 ip_address 守卫）均红在断言 |
-| W1 其余 8 页（Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
-| W2 其余 5 个调用点 | ⬜ 未开始 | `TicketTable` / `TicketDetailModal` / `Settings:923` / `AssetTimeline:122` / `Oncall:62`（`AlertTable` 已随 Alerts 一并完成） |
-| W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets 完成） |
+| W1+M10+W2 `pages/Tickets.tsx` + `TicketTable`/`TicketDetailModal`/`TicketStatsCards` | ✅ 完成 | 8 用例绿；四条变异（去列表错误分支 / 统计写死 / 去统计错误分支 / 列表时间原样）均红在断言。统计卡改 5 档真实推导（含 `pending`，见 §1.3-7② rev4 修正） |
+| W1 其余 7 页（Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline） | ⬜ 未开始 | 每页一个小步：去兜底 → 区块错误态 → 空态 → undefined 守卫 → 单测 |
+| W2 其余 3 个调用点 | ⬜ 未开始 | `Settings:923` / `AssetTimeline:122` / `Oncall:62`（`AlertTable`、`TicketTable`、`TicketDetailModal` 已完成） |
+| W4 其余 7 项（H6/H8/H9/H10/M4/M5/M6） | ⬜ 未开始 | 见 §4.1（M9/M10 已随 Assets/Tickets 完成） |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 
 **下一步（按顺序）**：
-1. ~~提交推送当前已完成项~~ → 已完成（commit `9ae6607`、`0868117` 已推 main）。
-2. W1 逐页推进，下一页 `pages/Tickets.tsx`（含 M10 副标题计数 `Tickets.tsx:64`、W2 `TicketTable`/`TicketDetailModal` 时间格式化）。
-3. W2 剩余 5 个调用点（可并入各页 W1 的同一小步）。
+1. ~~提交推送当前已完成项~~ → 已完成（`9ae6607`、`0868117`、`f836f94` 已推 main）。
+2. W1 逐页推进，下一页 `pages/Oncall.tsx`（含 W2 `Oncall:62` 时间格式化；该页是 `queryFn` 内 `catch { return MOCK_* }` 三重兜底 + 解构兜底，见 §1.1）。
+3. W2 剩余 3 个调用点（可并入各页 W1 的同一小步）。
 4. W4 批 1 剩余 7 项（H6 需先做 `cssVar` 实测）。
 5. W6 批 1 迁移 000016。
 
-**已知阻塞/待确认**：无。
+**已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
