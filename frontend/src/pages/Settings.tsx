@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin, Alert } from 'antd'
+import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin, Alert } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
 import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -35,10 +35,11 @@ function Settings() {
       setChannels(res?.data?.data || [])
     } catch (error) {
       console.error('获取通知渠道失败:', error)
+      // G-33 M1：键名与后端 channelConfig 的 JSON tag 对齐（原来用 smtp/webhook/wechat，全是坏样本）
       setChannels([
-        { id: '1', name: '邮件通知', type: 'email', config: { smtp: 'smtp.example.com' }, is_enabled: true },
-        { id: '2', name: '钉钉 webhook', type: 'dingtalk', config: { webhook: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' }, is_enabled: true },
-        { id: '3', name: '企业微信', type: 'wechat', config: { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' }, is_enabled: false },
+        { id: '1', name: '邮件通知', type: 'email', config: { smtp_host: 'smtp.example.com', smtp_port: 587, smtp_user: 'nmp@example.com', from: 'nmp@example.com', to: ['ops@example.com'] }, is_enabled: true },
+        { id: '2', name: '钉钉群通知', type: 'dingtalk', config: { webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' }, is_enabled: true },
+        { id: '3', name: 'Webhook', type: 'webhook', config: { url: 'https://example.com/hook' }, is_enabled: false },
       ])
     } finally {
       setLoading(false)
@@ -375,18 +376,27 @@ function Settings() {
     fetchApiKeys()
   }, [])
 
+  // Form 的 initialValues 只在挂载时自动应用一次；resetFields() 会把 store 重置到
+  // **当前**的 initialValues（prop 每次渲染都更新）。缺了这一步，连续编辑两条渠道会
+  // 显示上一条的数据并把上一条写进当前记录（正确性审计 H-2）。
+  useEffect(() => {
+    if (channelModal.open) form.resetFields()
+  }, [channelModal.open, channelModal.data, form])
+
   // B1-2: 接 createChannel / updateChannel（之前只 message.success 不调 API）
   const handleSaveChannel = async () => {
     try {
       const values = await form.validateFields()
       const configObj = values.config || {}
-      // 后端 NotificationChannel.Config 是 JSON 字符串，前端表单是嵌套对象
-      // → stringify 后发；后端 Service.Update/Create 应当接受字符串或对象（看 service 实现）
+      // 后端 NotificationChannel.Config 是 JSON 字符串，前端表单是嵌套对象 → stringify 后发。
+      // G-33 M1：键名必须与 backend/internal/notification/sender.go 的 channelConfig tag 一致，
+      // 契约样本见 __fixtures__/channelConfigSamples.json（前端单测 deep-equal 同一文件）。
       const payload = {
         name: values.name,
         type: values.type,
         config: JSON.stringify(configObj),
-        is_enabled: true,
+        // 不再硬编码 true：编辑一个已停用的渠道会把它静默启用（列表页开关才是 SoT）
+        is_enabled: channelModal.data ? channelModal.data.is_enabled : true,
       }
       const res: any = channelModal.data
         ? await notificationApi.updateChannel(channelModal.data.id, payload)
@@ -761,7 +771,9 @@ function Settings() {
                   options={[
                     { label: '邮件', value: 'email' },
                     { label: '钉钉', value: 'dingtalk' },
-                    { label: '企业微信', value: 'wechat' },
+                    // 企业微信（wechat）后端未实现 sender（G-36 / M3），暂不提供。
+                    // 保留禁用项：存量 wechat 行否则会显示裸值 wechat 而不是可读标签。
+                    { label: '企业微信（暂不支持）', value: 'wechat', disabled: true },
                     { label: 'Webhook', value: 'webhook' },
                   ]}
                 />
@@ -775,25 +787,62 @@ function Settings() {
                   if (type === 'email') {
                     return (
                       <>
-                        <Form.Item name={['config', 'smtp']} label="SMTP服务器">
+                        <Form.Item name={['config', 'smtp_host']} label="SMTP服务器" rules={[{ required: true }]}>
                           <Input />
                         </Form.Item>
-                        <Form.Item name={['config', 'port']} label="端口">
-                          <Input type="number" />
+                        <Form.Item name={['config', 'smtp_port']} label="端口" rules={[{ required: true }]}>
+                          {/* 必须用 InputNumber：<Input type="number"> 的 value 是字符串，
+                              后端 channelConfig.SMTPPort 是 int → 反序列化失败（G-33 B-1） */}
+                          <InputNumber style={{ width: '100%' }} />
                         </Form.Item>
-                        <Form.Item name={['config', 'username']} label="用户名">
+                        <Form.Item name={['config', 'smtp_user']} label="用户名" rules={[{ required: true }]}>
                           <Input />
                         </Form.Item>
-                        <Form.Item name={['config', 'password']} label="密码">
+                        <Form.Item name={['config', 'smtp_password']} label="密码">
+                          <Input.Password />
+                        </Form.Item>
+                        <Form.Item name={['config', 'from']} label="发件人" rules={[{ required: true }]}>
+                          <Input placeholder="nmp@example.com" />
+                        </Form.Item>
+                        <Form.Item name={['config', 'to']} label="收件人" rules={[{ required: true }]}>
+                          <Select mode="tags" placeholder="输入邮箱后回车，可多个" tokenSeparators={[',', ' ']} />
+                        </Form.Item>
+                      </>
+                    )
+                  }
+                  if (type === 'dingtalk') {
+                    return (
+                      <>
+                        <Form.Item name={['config', 'webhook_url']} label="Webhook URL" rules={[{ required: true }]}>
+                          <Input />
+                        </Form.Item>
+                        <Form.Item name={['config', 'sign_secret']} label="加签密钥（可选）">
                           <Input.Password />
                         </Form.Item>
                       </>
                     )
                   }
+                  if (type === 'wechat') {
+                    // 存量数据：wechat sender 未实现（G-36），下拉已禁用该选项。
+                    // 不能按 Webhook 渲染（键名对不上，且必填项永远过不了），给显式指引。
+                    return (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message="企业微信通知暂不支持"
+                        description="后端尚无 wechat sender（G-36）。请改选「邮件 / 钉钉 / Webhook」并重新填写配置后保存。"
+                      />
+                    )
+                  }
                   return (
-                    <Form.Item name={['config', 'webhook']} label="Webhook URL">
-                      <Input />
-                    </Form.Item>
+                    <>
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true }]}>
+                        <Input />
+                      </Form.Item>
+                      <Form.Item name={['config', 'secret']} label="签名密钥（可选）">
+                        <Input.Password />
+                      </Form.Item>
+                    </>
                   )
                 }}
               </Form.Item>

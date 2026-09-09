@@ -41,7 +41,8 @@ func (h *ChannelHandler) CreateChannel(c *gin.Context) {
 			return
 		}
 		if errors.Is(err, service.ErrInvalidInput) {
-			apierr.BadRequest(c, "渠道名称不能为空")
+			// G-33 M1：回显 service 侧原因（名称/配置校验失败），原因已在 service 过 redact.Text
+			apierr.BadRequest(c, err.Error())
 			return
 		}
 		apierr.Internal(c, "创建通知渠道失败", err)
@@ -60,6 +61,11 @@ func (h *ChannelHandler) UpdateChannel(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "通知渠道不存在")
+			return
+		}
+		if errors.Is(err, service.ErrInvalidInput) {
+			// G-33 M1：局部更新改了 type/config 但构造不出 Sender → 400（原因已脱敏）
+			apierr.BadRequest(c, err.Error())
 			return
 		}
 		apierr.Internal(c, "更新通知渠道失败", err)

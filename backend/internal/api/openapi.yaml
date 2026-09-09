@@ -2430,8 +2430,10 @@ components:
         type:
           type: string
           enum: [email, dingtalk, wechat, webhook]
+          description: 响应模型。wechat 仅存在于存量数据（sender 未实现，G-36），输入侧不再接受
         config:
-          type: object
+          type: string
+          description: JSON 字符串，键名见 internal/notification/channelConfig 的 json tag
         is_enabled:
           type: boolean
 
@@ -2445,8 +2447,14 @@ components:
           type: string
         type:
           type: string
+          enum: [email, dingtalk, webhook]
+          description: 输入侧不接受 wechat（sender 未实现，G-36）
         config:
-          type: object
+          type: string
+          description: JSON 字符串，键名见 internal/notification/channelConfig 的 json tag
+        is_enabled:
+          type: boolean
+          description: 省略时后端按 true 处理（新建）
 
     ChannelList:
       type: object

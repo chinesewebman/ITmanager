@@ -1,0 +1,18 @@
+{
+  "email": {
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "smtp_user": "nmp@example.com",
+    "smtp_password": "pw-secret",
+    "from": "nmp@example.com",
+    "to": ["ops@example.com"]
+  },
+  "dingtalk": {
+    "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx",
+    "sign_secret": "SECdingtalk"
+  },
+  "webhook": {
+    "url": "https://example.com/hook",
+    "secret": "SECwebhook"
+  }
+}

@@ -3274,12 +3274,12 @@ CREATE TABLE notify_channels (
     channel_type    VARCHAR(20) NOT NULL,          -- dingtalk/wechat/email/voice/webhook
     name            VARCHAR(100) NOT NULL,
     
-    config          JSONB NOT NULL,                -- 渠道配置
-    -- dingtalk: {webhook, secret, keyword}
-    -- wechat: {webhook, agentid}
-    -- email: {smtp_host, smtp_port, username, password, from, to}
-    -- voice: {provider, api_key, phone}
-    -- webhook: {url, method, headers}
+    config          JSONB NOT NULL,                -- 渠道配置（键名以 backend/internal/notification/sender.go 的 channelConfig json tag 为准）
+    -- dingtalk: {webhook_url, sign_secret}
+    -- email:    {smtp_host, smtp_port, smtp_user, smtp_password, from, to}
+    -- webhook:  {url, method, secret}
+    -- wechat / voice: 未实现（wechat 登记 G-36；voice 无实现）
+    -- 跨语言契约样本：frontend/src/pages/__fixtures__/channelConfigSamples.json
     
     enabled         BOOLEAN DEFAULT TRUE,
     created_at      TIMESTAMP DEFAULT NOW(),

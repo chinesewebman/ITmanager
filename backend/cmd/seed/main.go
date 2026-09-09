@@ -242,10 +242,14 @@ func seedData(db *gorm.DB) int {
 	log.Printf("创建 %d 条告警规则", len(rules))
 
 	// ========== 创建通知渠道 ==========
+	// G-33 M1：键名必须与 notification.channelConfig 的 JSON tag 一致
+	// （smtp_host/smtp_port/smtp_user/from/to、webhook_url/sign_secret、url）。
+	// 企业微信行键名已对齐为 url，但 body 形状仍不兼容（WebhookSender 发 {"content":…}，
+	// 企微要 {"msgtype":"text",…}）→ 保持 IsEnabled: false，端到端在 M3 修（G-36）。
 	channels := []models.NotificationChannel{
-		{Name: "邮件通知", Type: "email", Config: `{"smtp_host": "smtp.company.com", "smtp_port": 587, "smtp_user": "nmp@company.com", "from": "nmp@company.com"}`, IsEnabled: true, IsDefault: true},
-		{Name: "钉钉群通知", Type: "dingtalk", Config: `{"webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx", "secret": ""}`, IsEnabled: true, IsDefault: false},
-		{Name: "企业微信通知", Type: "webhook", Config: `{"webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"}`, IsEnabled: false, IsDefault: false},
+		{Name: "邮件通知", Type: "email", Config: `{"smtp_host": "smtp.company.com", "smtp_port": 587, "smtp_user": "nmp@company.com", "from": "nmp@company.com", "to": ["ops@company.com"]}`, IsEnabled: true, IsDefault: true},
+		{Name: "钉钉群通知", Type: "dingtalk", Config: `{"webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx", "sign_secret": ""}`, IsEnabled: true, IsDefault: false},
+		{Name: "企业微信通知", Type: "webhook", Config: `{"url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"}`, IsEnabled: false, IsDefault: false},
 	}
 	for _, ch := range channels {
 		if err := db.Create(&ch).Error; err != nil {

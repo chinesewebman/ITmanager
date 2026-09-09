@@ -1385,15 +1385,26 @@ export interface components {
             /** Format: uuid */
             id?: string;
             name?: string;
-            /** @enum {string} */
+            /**
+             * @description 响应模型。wechat 仅存在于存量数据（sender 未实现，G-36），输入侧不再接受
+             * @enum {string}
+             */
             type?: "email" | "dingtalk" | "wechat" | "webhook";
-            config?: Record<string, never>;
+            /** @description JSON 字符串，键名见 internal/notification/channelConfig 的 json tag */
+            config?: string;
             is_enabled?: boolean;
         };
         ChannelInput: {
             name: string;
-            type: string;
-            config?: Record<string, never>;
+            /**
+             * @description 输入侧不接受 wechat（sender 未实现，G-36）
+             * @enum {string}
+             */
+            type: "email" | "dingtalk" | "webhook";
+            /** @description JSON 字符串，键名见 internal/notification/channelConfig 的 json tag */
+            config?: string;
+            /** @description 省略时后端按 true 处理（新建） */
+            is_enabled?: boolean;
         };
         ChannelList: {
             code?: number;

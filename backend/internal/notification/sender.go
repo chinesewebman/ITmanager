@@ -76,7 +76,10 @@ func NewSender(ch *models.NotificationChannel) (Sender, error) {
 	case "webhook":
 		return NewWebhookSender(ch)
 	default:
-		return nil, fmt.Errorf("unsupported channel type: %s", ch.Type)
+		// 不回显 ch.Type：该错误经 service 脱敏后回显到 400 body，而 redact.Text 只挡
+		// URL / 键值形态，裸 token、JWT、percent 编码、无 scheme URL、多行文本都能穿过
+		// （安全审计 M-1）。支持的类型是静态信息，写死即可。
+		return nil, errors.New("unsupported channel type (支持: email/dingtalk/webhook)")
 	}
 }
 

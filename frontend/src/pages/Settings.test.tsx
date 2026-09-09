@@ -5,8 +5,10 @@
 //   - list 返 403 时 catch 里只 console.error + 置空数组 → 非 admin 看到静默空白。
 import "@testing-library/jest-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import Settings from "./Settings";
+// G-33 M1：跨语言配置契约样本（后端 internal/service/channel_service_test.go 读同一文件）
+import channelConfigSamples from "./__fixtures__/channelConfigSamples.json";
 
 // Mock antd message（避免 jsdom 副作用）
 vi.mock("antd", async () => {
@@ -183,5 +185,190 @@ describe("Settings 密钥管理区块 (D-B)", () => {
     expect(
       screen.queryByText("当前账号无密钥管理权限"),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ==================== G-33 M1：通知渠道配置契约 ====================
+// 样本文件是跨语言契约的单一事实来源（后端 channel_service_test.go 读同一文件喂
+// notification.NewSender）。改表单键名/改类型时这里先红。
+describe("通知渠道配置契约 (G-33 M1)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(notificationApi.createChannel).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+  });
+
+  // 页面里还有 Zabbix 表单的「用户名」等同名 label → 所有字段查询都限定在渠道弹窗内
+  async function openChannelForm(typeLabel: string) {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    const nameInput = await screen.findByLabelText("渠道名称");
+    fireEvent.change(nameInput, { target: { value: "契约样本" } });
+    // antd Select：mouseDown 打开下拉，再点选项（选项带 title=label）
+    fireEvent.mouseDown(screen.getByLabelText("渠道类型"));
+    fireEvent.click(await screen.findByTitle(typeLabel));
+
+    return within(nameInput.closest(".ant-modal") as HTMLElement);
+  }
+
+  function savedConfig(): any {
+    const payload: any = vi.mocked(notificationApi.createChannel).mock.calls[0][0];
+    return { type: payload.type, config: JSON.parse(payload.config) };
+  }
+
+  it("email 表单产出与样本一致（端口必须是数字）", async () => {
+    const modal = await openChannelForm("邮件");
+
+    fireEvent.change(await modal.findByLabelText("SMTP服务器"), {
+      target: { value: channelConfigSamples.email.smtp_host },
+    });
+    fireEvent.change(modal.getByLabelText("端口"), {
+      target: { value: String(channelConfigSamples.email.smtp_port) },
+    });
+    fireEvent.change(modal.getByLabelText("用户名"), {
+      target: { value: channelConfigSamples.email.smtp_user },
+    });
+    fireEvent.change(modal.getByLabelText("密码"), {
+      target: { value: channelConfigSamples.email.smtp_password },
+    });
+    fireEvent.change(modal.getByLabelText("发件人"), {
+      target: { value: channelConfigSamples.email.from },
+    });
+    const toInput = modal.getByLabelText("收件人");
+    fireEvent.change(toInput, {
+      target: { value: channelConfigSamples.email.to[0] },
+    });
+    fireEvent.keyDown(toInput, { key: "Enter", code: "Enter", keyCode: 13 });
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+    await waitFor(() => expect(notificationApi.createChannel).toHaveBeenCalled());
+
+    const saved = savedConfig();
+    expect(saved.type).toBe("email");
+    expect(saved.config).toEqual(channelConfigSamples.email);
+  });
+
+  it("dingtalk 表单产出与样本一致", async () => {
+    const modal = await openChannelForm("钉钉");
+
+    fireEvent.change(await modal.findByLabelText("Webhook URL"), {
+      target: { value: channelConfigSamples.dingtalk.webhook_url },
+    });
+    fireEvent.change(modal.getByLabelText("加签密钥（可选）"), {
+      target: { value: channelConfigSamples.dingtalk.sign_secret },
+    });
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+    await waitFor(() => expect(notificationApi.createChannel).toHaveBeenCalled());
+
+    const saved = savedConfig();
+    expect(saved.type).toBe("dingtalk");
+    expect(saved.config).toEqual(channelConfigSamples.dingtalk);
+  });
+
+  it("webhook 表单产出与样本一致", async () => {
+    const modal = await openChannelForm("Webhook");
+
+    fireEvent.change(await modal.findByLabelText("Webhook URL"), {
+      target: { value: channelConfigSamples.webhook.url },
+    });
+    fireEvent.change(modal.getByLabelText("签名密钥（可选）"), {
+      target: { value: channelConfigSamples.webhook.secret },
+    });
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+    await waitFor(() => expect(notificationApi.createChannel).toHaveBeenCalled());
+
+    const saved = savedConfig();
+    expect(saved.type).toBe("webhook");
+    expect(saved.config).toEqual(channelConfigSamples.webhook);
+  });
+
+  // H-2：Modal 不销毁重建时 Form.initialValues 只在挂载时生效，连续编辑两条渠道
+  // 会把上一条的 name/type/config 写进当前记录（正确性审计 H-2）。
+  it("连续编辑两条渠道：表单显示当前记录", async () => {
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: {
+        code: 0,
+        data: [
+          {
+            id: "1",
+            name: "渠道A",
+            type: "webhook",
+            config: JSON.stringify(channelConfigSamples.webhook),
+            is_enabled: true,
+          },
+          {
+            id: "2",
+            name: "渠道B",
+            type: "dingtalk",
+            config: JSON.stringify(channelConfigSamples.dingtalk),
+            is_enabled: true,
+          },
+        ],
+      },
+    } as any);
+    vi.mocked(notificationApi.updateChannel).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    const editButtons = await screen.findAllByRole("button", { name: "编辑" });
+
+    fireEvent.click(editButtons[0]);
+    const modalA = within(
+      (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement
+    );
+    expect(modalA.getByLabelText("渠道名称")).toHaveValue("渠道A");
+    fireEvent.click(modalA.getByRole("button", { name: "取 消" }));
+
+    fireEvent.click(editButtons[1]);
+    const modalB = within(
+      (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement
+    );
+    expect(modalB.getByLabelText("渠道名称")).toHaveValue("渠道B");
+    expect(modalB.getByLabelText("Webhook URL")).toHaveValue(
+      channelConfigSamples.dingtalk.webhook_url
+    );
+  });
+
+  // 正确性 M-1：存量 wechat 行既不能被当成 Webhook 渲染（键名对不上、必填永远过不了），
+  // 也不能显示裸值 wechat —— 类型框要显示可读标签 + 下线提示。
+  it("存量 wechat 行：可读标签 + 下线提示，不按 Webhook 渲染", async () => {
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: {
+        code: 0,
+        data: [
+          {
+            id: "9",
+            name: "企微",
+            type: "wechat",
+            config: `{"webhook_url":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"}`,
+            is_enabled: false,
+          },
+        ],
+      },
+    } as any);
+
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+
+    const modal = within(
+      (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement
+    );
+    expect(modal.getByText("企业微信（暂不支持）")).toBeInTheDocument();
+    expect(modal.getByText("企业微信通知暂不支持")).toBeInTheDocument();
+    expect(modal.queryByLabelText("Webhook URL")).not.toBeInTheDocument();
   });
 });

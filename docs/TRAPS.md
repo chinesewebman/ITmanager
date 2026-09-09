@@ -215,6 +215,24 @@
 
 ---
 
+### T-36. `if s, ok := v.(string); ok { 校验 }` 是 **fail-open** —— 类型断言顺手写成的静默放行
+**状态**: FIXED | **类别**: 输入校验 / fail-closed (G-33 M1) | **修复日期**: 2026-09-09
+**现象**：`ChannelService.Update` 收的是 `map[string]any`（来自 JSON body）。最自然的写法是「含 `config` 就取字符串校验」，即 `if s, ok := updates["config"].(string); ok { validate(s) }`。但这样**非字符串值直接绕过校验**，还会被 gorm 落库：实测 `float64(12345)` → `config="12345.0"`、`true` → `config="1"`（`Updates(map)` 把值交给 `clause.Assignment` 原样下传，`field.Set` 的类型错误被丢弃）。对象/数组则更晚才炸（`unsupported type map[string]interface{}` → 500）。
+**根因**：`ok` 分支写了「合法时要做什么」，却没写「不合法时要做什么」——类型断言把「不是我要的类型」和「我没检查」合并成了同一条静默路径。这类写法在**校验**语境里是 fail-open，在**取值**语境里才是合理的。
+**检测方法**：凡是 `x, ok := v.(T)` 出现在**校验/授权/脱敏**函数里，问一句「`!ok` 时发生了什么？」。若答案是「继续往下走」，就是本 trap。变体：`if v != nil { 校验 }`（nil 放行）、`switch` 缺 `default` 分支。
+**修法**：`!ok` 一律显式拒绝（`ErrInvalidInput`），并给每个非期望类型各留一条用例（对象/数组/数字/布尔/null）。M1 的 V-4 就是这么钉的。
+**推广**：fail-closed 的验收标准不是「坏输入被拒」，而是「**每个**非法形态都有确定的拒绝路径」——审查时列输入形态清单，比读代码更容易发现漏网的那一个。
+
+### T-37. 校验用的键 ≠ 落库用的键 —— gorm `Updates(map)` 会把 Go 字段名解析到同一列
+**状态**: FIXED | **类别**: 输入校验 / ORM 语义 (G-33 M1 rev3) | **修复日期**: 2026-09-09
+**现象**：`ChannelService.Update` 的 fail-closed 校验只认小写键 `updates["config"]` / `updates["type"]`，但落库走的是 gorm 的 `Updates(map)`。gorm 对每个键调 `Schema.LookUpField(k)`（先 `FieldsByDBName`、再 `FieldsByName`，**均大小写敏感**），于是 `{"Config": …}` / `{"Type": …}` 完全跳过校验照样写列，`{"id": …}` 还能改主键。真 PG 18 实测：修复前这些请求全部 **HTTP 200** 且坏值落库（`{"Config":12345}` → `config="12345.0"`；`{"Type":"dingtalk"}` + 存量 `{"url":…}` → 坏组合；`{"id":<新uuid>}` → 主键被改，引用它的 `notification_logs.channel_id` 悬空，本仓库无外键约束）。
+**根因**：校验层与写入层**各自解析同一份输入**，且解析规则不同（精确小写键 vs ORM 的名字解析）。安全审计与正确性审计独立命中同一处——说明这是「防御建在约定上」的典型形态，不是笔误。
+**检测方法**：任何「先校验 map/对象、再把同一个 map/对象交给 ORM」的路径，问两句：① 校验的键集合是否等于落库的键集合？② 有没有大小写变体、Go 字段名、别名能到达同一列？写一条 `{"Config": …}` 的请求打过去看状态码。
+**修法**：入口处**键归一化到小写 + 白名单**（`name/type/config/is_enabled/is_default`，其余 → 400），保证「校验的键 == 落库的键」；白名单同时挡掉 `id`/`created_at`。`Update` 还额外把校验后的 `(type, config)` 写回 map（写入值 == 校验值），消除并发交错的坏组合。
+**推广**：`Create` 走结构体绑定（JSON 解码大小写不敏感）时没有这个问题——**同一个 API 的读写两条路径可以有完全不同的键解析规则**，只测一条不足以证明契约成立。
+
+---
+
 ## 二、前端陷阱
 
 ### T-16. Settings.tsx 死表单 (B1-1/B1-2 修复中)
@@ -343,6 +361,8 @@
 | — (G-16 轮) | T-33 | FIXED |
 | — (G-28 轮) | T-34 | FIXED |
 | — (G-28 轮) | T-35 | FIXED |
+| — (G-33 M1 轮) | T-36 | FIXED |
+| — (G-33 M1 rev3) | T-37 | FIXED |
 
 ---
 

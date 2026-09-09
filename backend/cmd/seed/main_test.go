@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/notification"
 
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
@@ -391,6 +392,10 @@ func TestSeed_空DB_创建通知渠道(t *testing.T) {
 	types := map[string]bool{}
 	for _, c := range channels {
 		types[c.Type] = true
+		// G-33 M1：seed 用 db.Create 直写，绕过 ChannelService 的配置校验 →
+		// 这里独立断言每行都能构造出 Sender（键名/必填项与 channelConfig 对齐）。
+		_, err := notification.NewSender(&c)
+		assert.NoError(t, err, "seed 渠道 %q(type=%s) 必须能构造出 Sender", c.Name, c.Type)
 	}
 	assert.True(t, types["email"])
 	assert.True(t, types["dingtalk"])
