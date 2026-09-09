@@ -317,6 +317,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev30 | 2026-09-10 | **批 2 第 1 步 M14（批量操作确认）完成**：Alerts 页「批量确认」「批量解决」两按钮原本 `onClick` 直接对选中告警逐条生效（误点即执行，无二次确认）→ 套 Popconfirm 四件套（title 带已选数量「批量确认/解决已选的 N 条告警？」+ okText/cancelText，批量解决加 `okButtonProps danger`，范本 `Settings:503`）。1 用例绿（选中行 → 点批量确认 → 确认框出现且 mutate 未调用 → 点确认后 `mutate(['1'])`），变异（去 Popconfirm 改回直接 onClick）红在「找不到确认框文案」断言。**批 2 启动** |
 | rev31 | 2026-09-10 | **批 2 第 2 步 M7（升级策略 JSON 异常文案）完成**：Oncall 升级策略 Levels 是 JSON textarea，`JSON.parse` 抛 `SyntaxError` 时原 catch 直接 `message.error(e?.message)` → 英文技术报错（"Unexpected token..."）。改为 `e instanceof SyntaxError` 时给友好中文「Levels JSON 格式错误，请检查后重试」。1 用例绿（新建 → 输非法 JSON → 保存 → 断言 message.error 友好文案 + apiSend 未调用），变异（去 SyntaxError 判断）红在 `toHaveBeenCalledWith` 断言。结构化编辑器属新功能，登记不做 |
 | rev32 | 2026-09-10 | **批 2 第 3 步 M11（严重度配色统一）第 1 处 AssetTimeline 完成**：`severityColor()` 自造一套（5红/4橙/3黄/2蓝/1绿/0灰），与告警中心 `SeverityTag` 权威 6 档（P5紫红/P4红/P3橙/P2黄/P1蓝/P0灰）不一致，P3/P4/P5 颜色全错。改为复用 `SEVERITY_META[sev]?.color ?? 'default'`（删掉 6 行 if-else）。1 用例绿（severity=4 alert 事件 Tag 断言 `ant-tag-red` 且非 `ant-tag-orange`），变异（改回 `sev>=4?'orange'`）红在 `toHaveClass('ant-tag-red')` 断言。**剩 Runbook 两处 + AlertSuppressions 一处** |
+| rev33 | 2026-09-10 | **批 2 第 4 步 M11（严重度配色统一）第 2 处 Runbook 完成**：Drawer 详情 + 推荐面板两处 `Tag color={severity>=4?'red':'orange'}>P{severity}` 两档，与列表列 `SeverityTag` 权威 6 档不一致 → 统一改 `<SeverityTag severity={...} />`（P5 紫红「灾难」/P4 红「严重」，与列表列一致）。2 用例绿（Drawer 打开后「P5 灾难」×2 且 `ant-tag-magenta`；推荐面板「P4 严重」且 `ant-tag-red`），变异（两处改回旧 Tag）均红在断言。**剩 AlertSuppressions 一处** |
 
 ---
 
@@ -367,17 +368,17 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W6 批 1 · P17 assets name 索引（迁移 000020） | ✅ 完成 | `idx_assets_name (name)`；dbsmoke 形态 + EXPLAIN 断言（真实查询单条件）；Down 链 20→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P18 audit_logs path 索引（迁移 000021） | ✅ 完成 | `idx_audit_logs_path (path text_pattern_ops)`；dbsmoke 形态（path + text_pattern_ops）+ EXPLAIN 断言；Down 链 21→13；变异红在 `NotEmpty` 断言 |
 | W6 批 1 · P19 ticket_service cursor Count（3 行，无迁移） | ✅ 完成 | 把无条件 `COUNT(*)` 挪到 cursor 分支之后；cursor 模式不再跑 Count；单测 + 变异（挪回）红在 `SELECT count(*)` 未匹配 |
-| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11-AssetTimeline 已完成（rev30/31/32）；剩 M1/M2/M3+P4/P5/P6/P7/M11(Runbook+AlertSuppressions)/M13/M15 |
+| 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | 🔄 进行中 | M14、M7、M11(AssetTimeline+Runbook) 已完成（rev30/31/32/33）；剩 M1/M2/M3+P4/P5/P6/P7/M11(AlertSuppressions)/M13/M15 |
 | 批 2 · M14 批量操作确认 | ✅ 完成 | Alerts「批量确认/解决」套 Popconfirm 二次确认（title 带已选数量）；1 用例绿；变异（去 Popconfirm）红在确认框缺失 |
 | 批 2 · M7 升级策略 JSON 异常文案 | ✅ 完成 | Oncall 升级策略 Levels 非法 JSON 给友好中文（结构化编辑器登记不做）；1 用例绿；变异（去 SyntaxError 判断）红在 toHaveBeenCalledWith |
-| 批 2 · M11 严重度配色统一（AssetTimeline） | ✅ 完成 | severityColor 自造一套（5红/4橙/3黄/2蓝/1绿/0灰）→ 复用 SEVERITY_META 权威 6 档；1 用例绿；变异（改回橙）红在 ant-tag-red 断言。**剩 Runbook 两处 + AlertSuppressions 一处** |
+| 批 2 · M11 严重度配色统一（AssetTimeline + Runbook） | 🔄 进行中 | AssetTimeline severityColor → SEVERITY_META（1 用例绿）；Runbook Drawer+推荐面板 → SeverityTag（2 用例绿）。**剩 AlertSuppressions 一处** |
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
-5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11-AssetTimeline（rev32）已完成**；剩 M1 标题、M2 排序、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M11 剩余（Runbook 两处 + AlertSuppressions 一处）、M13 移动端、M15 空态/加载态。
+5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 AssetTimeline（rev32）+ M11 Runbook（rev33）已完成**；剩 M1 标题、M2 排序、M3 分页+P4 表格 memo（同批）+P5 服务端分页+P6 进度节流、M11 剩余（AlertSuppressions 一处）、M13 移动端、M15 空态/加载态。
 
 **已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。
 

@@ -235,7 +235,7 @@ function RunbookList() {
         {viewing && (
           <>
             <Tag color="blue">{viewing.asset_type}</Tag>
-            {viewing.severity > 0 && <Tag color={viewing.severity >= 4 ? 'red' : 'orange'}>P{viewing.severity}</Tag>}
+            {viewing.severity > 0 && <SeverityTag severity={viewing.severity} />}
             {viewing.tags?.split(',').map(t => <Tag key={t}>{t}</Tag>)}
             <Paragraph style={{ marginTop: 16 }}>{viewing.summary}</Paragraph>
             <pre style={{ whiteSpace: 'pre-wrap', background: '#f5f5f5', padding: 12, borderRadius: 4 }}>
@@ -264,7 +264,7 @@ function RunbookRecommend({ assetType, severity }: { assetType: string; severity
         <Card key={rb.id} size="small" title={rb.title}>
           <Paragraph style={{ marginBottom: 4 }}>{rb.summary}</Paragraph>
           <Tag color="blue">{rb.asset_type}</Tag>
-          {rb.severity > 0 && <Tag color={rb.severity >= 4 ? 'red' : 'orange'}>P{rb.severity}</Tag>}
+          {rb.severity > 0 && <SeverityTag severity={rb.severity} />}
         </Card>
       ))}
     </Space>

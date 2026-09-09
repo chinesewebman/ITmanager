@@ -196,4 +196,26 @@ describe('Runbook', () => {
       expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/runbooks/r1')
     })
   })
+
+  // M11：Drawer/推荐面板严重度此前用 Tag color={severity>=4?'red':'orange'} 两档，
+  // 与列表列 SeverityTag 权威 6 档不一致。统一到 SeverityTag（P5→紫红「灾难」、P4→红「严重」）。
+  it('M11：Drawer 严重度统一到 SeverityTag（P5 紫红「灾难」，非旧「P5」红）', () => {
+    renderList()
+    // 第二行（接入交换机端口 down，severity=5）的「查看」打开 Drawer
+    fireEvent.click(screen.getAllByRole('button', { name: /查\s*看/ })[1])
+    // 列表列 + Drawer 各一个「P5 灾难」（旧代码 Drawer 是纯「P5」，列表是「P5 灾难」→ 只有 1 个）
+    const tags = screen.getAllByText('P5 灾难')
+    expect(tags.length).toBe(2)
+    tags.forEach((t) => expect(t.closest('.ant-tag')).toHaveClass('ant-tag-magenta'))
+  })
+
+  it('M11：推荐面板严重度统一到 SeverityTag（「P4 严重」，非旧「P4」）', () => {
+    render(
+      <MemoryRouter>
+        <RunbookRecommend assetType="server" severity={4} />
+      </MemoryRouter>,
+    )
+    const tag = screen.getByText('P4 严重')
+    expect(tag.closest('.ant-tag')).toHaveClass('ant-tag-red')
+  })
 })
