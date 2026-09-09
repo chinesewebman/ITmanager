@@ -126,7 +126,7 @@ function SchedulesTab() {
       )}
       <Modal title="新建值班组" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
-          <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="名称" name="name" rules={[{ required: true, message: '请输入名称' }]}><Input /></Form.Item>
           <Form.Item label="时区" name="timezone" initialValue="Asia/Shanghai"><Input /></Form.Item>
           <Form.Item label="启用" name="enabled" valuePropName="checked" initialValue={true}><Switch /></Form.Item>
           <Form.Item label="说明" name="description"><Input.TextArea rows={2} /></Form.Item>
@@ -203,7 +203,7 @@ function PoliciesTab() {
       )}
       <Modal title="新建升级策略" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
-          <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item label="名称" name="name" rules={[{ required: true, message: '请输入名称' }]}><Input /></Form.Item>
           <Form.Item label="启用" name="enabled" valuePropName="checked" initialValue={true}><Switch /></Form.Item>
           <Form.Item label="Levels (JSON 数组)" name="levelsJson" initialValue='[{"level":1,"target_type":"user","target_id":"u1","wait_minutes":5,"notify_methods":"email"}]'>
             <Input.TextArea rows={6} placeholder='[{"level":1,"target_type":"user","target_id":"u1","wait_minutes":5,"notify_methods":"email"}]' />

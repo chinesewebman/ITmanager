@@ -305,6 +305,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | rev18 | 2026-09-10 | **W4-M5（第 2 步 Runbook）完成**：删除 Runbook Popconfirm `title="确定删除?"`（无对象名、无 danger）→ 四件套 `title={`确认删除 Runbook「${rb.title}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。1 用例绿（确认框 title 带对象名 + 确认按钮 `ant-btn-dangerous` + 确认后 DELETE `/runbooks/r1`），变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言。M5 剩 Oncall 2 处待续 |
 | rev19 | 2026-09-10 | **W4-M5（第 3 步 Oncall）完成，M5 全部 4 处收口**：值班组（`SchedulesTab`）+ 升级策略（`PoliciesTab`）两处 Popconfirm `title="删除？"`（无对象名、无 danger）→ 四件套 `title={`确认删除值班组/升级策略「${r.name}」？`}` + `okText="删除"` + `cancelText="取消"` + `okButtonProps={{ danger: true }}`。2 用例绿（两处确认框 title 带对象名 + `ant-btn-dangerous` + 确认后 DELETE `/oncall/schedules/s1`、`/oncall/policies/p1`），变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处完成（AlertSuppressions/Runbook/Oncall×2）** |
 | rev20 | 2026-09-10 | **W4-M6（第 1 步 Settings）完成**：渠道 Modal 10 处 `required: true` 无 message（antd 默认英文「${label} is required」语气不一致）→ 统一句式：name「请输入渠道名称」、type「请选择渠道类型」、smtp_host/port/user/from「请输入SMTP服务器/端口/用户名/发件人」、to「请输入收件人」、dingtalk/wechat/webhook 的 url「请输入Webhook URL」。3 用例绿（顶层不填保存断言 name+type 中文提示；email 条件字段 5 处；dingtalk URL），变异（去 smtp_host message）红在「找不到『请输入SMTP服务器』」断言。M6 剩 Oncall 2 处 + TicketFormModal 1 处 + AssetFormModal 1 处待续 |
+| rev21 | 2026-09-10 | **W4-M6（第 2 步 Oncall）完成**：值班组（SchedulesTab）+ 升级策略（PoliciesTab）两个「名称」`required: true` 无 message → `message: '请输入名称'`。2 用例绿（两处不填名称保存断言「请输入名称」），变异（去值班组名称 message）红在「找不到『请输入名称』」断言。M6 剩 TicketFormModal 1 处 + AssetFormModal 1 处待续 |
 
 ---
 
@@ -346,7 +347,8 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | W4-M5 危险操作确认 · Runbook.tsx | ✅ 完成 | 删除 Runbook Popconfirm 四件套（title 带 `rb.title` + `okButtonProps danger`）；1 用例绿，变异（去 `okButtonProps`）红在 `toHaveClass('ant-btn-dangerous')` 断言 |
 | W4-M5 危险操作确认 · Oncall.tsx（2 处） | ✅ 完成 | 值班组（SchedulesTab）+ 升级策略（PoliciesTab）两处 Popconfirm 四件套（title 带 `r.name` + `okButtonProps danger`）；2 用例绿，变异（去两处 `okButtonProps`）两用例均红在 `toHaveClass('ant-btn-dangerous')` 断言。**M5 全部 4 处收口** |
 | W4-M6 required 无 message · Settings.tsx（10 处） | ✅ 完成 | 渠道 Modal name/type/smtp_host/smtp_port/smtp_user/from/to/dingtalk-url/wechat-url/webhook-url 统一「请输入/请选择 XXX」；3 用例绿，变异（去 smtp_host message）红在「请输入SMTP服务器」断言 |
-| W4-M6 required 无 message · Oncall/TicketFormModal/AssetFormModal（4 处） | ⬜ 未开始 | Oncall.tsx 值班组「名称」+ 升级策略「名称」、TicketFormModal.tsx:56、AssetFormModal.tsx:100 统一「请输入/请选择 XXX」 |
+| W4-M6 required 无 message · Oncall.tsx（2 处） | ✅ 完成 | 值班组 + 升级策略「名称」→ `message: '请输入名称'`；2 用例绿，变异（去值班组名称 message）红在「请输入名称」断言 |
+| W4-M6 required 无 message · TicketFormModal/AssetFormModal（2 处） | ⬜ 未开始 | TicketFormModal.tsx:56「优先级」、AssetFormModal.tsx:100「状态」统一「请选择 XXX」 |
 | W6 批 1（P13–P19：迁移 000016 + 索引 + ticket_service 3 行） | ⬜ 未开始 | 后端；需 `EXPLAIN` 断言走索引 |
 | 批 2（M1/M2/M3+P4/P5/P6/P7/M11/M13/M14/M15） | ⬜ 未开始 | 下一轮 |
 

@@ -246,4 +246,23 @@ describe('Oncall', () => {
       expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/oncall/policies/p1')
     })
   })
+
+  // M6：required 无 message → 统一「请输入/请选择 XXX」。此前「名称」required 无 message，
+  // antd 默认英文「${label} is required」，语气不一致。
+  it('M6：值班组名称必填带中文提示', async () => {
+    renderOncall()
+    openTab('值班组')
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    // 不填名称直接保存 → 触发校验
+    fireEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
+    expect(await screen.findByText('请输入名称')).toBeInTheDocument()
+  })
+
+  it('M6：升级策略名称必填带中文提示', async () => {
+    renderOncall()
+    openTab('升级策略')
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    fireEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
+    expect(await screen.findByText('请输入名称')).toBeInTheDocument()
+  })
 })
