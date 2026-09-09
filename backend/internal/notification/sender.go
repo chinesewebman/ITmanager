@@ -107,7 +107,6 @@ func Resolver(ch *models.NotificationChannel) (Sender, error) {
 type channelConfig struct {
 	// webhook
 	URL    string `json:"url"`
-	Method string `json:"method,omitempty"` // 默认 POST
 	Secret string `json:"secret,omitempty"`
 
 	// dingtalk
@@ -439,10 +438,6 @@ func NewWebhookSender(ch *models.NotificationChannel) (*WebhookSender, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("webhook: url is required")
 	}
-	method := cfg.Method
-	if method == "" {
-		method = http.MethodPost
-	}
 	return &WebhookSender{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 10 * time.Second},
@@ -451,7 +446,12 @@ func NewWebhookSender(ch *models.NotificationChannel) (*WebhookSender, error) {
 
 func (w *WebhookSender) Type() string { return "webhook" }
 
-// Send 发自定义 webhook, body 是 JSON { content: "..." }
+// Send 发自定义 webhook, body 是 JSON { content: "..." }。
+// 只支持 POST：`channelConfig` 曾有一个 `method` 字段（`json:"method,omitempty"`），
+// 但 `Send` 一直硬编码 POST、构造器算出的局部变量也被丢弃 → 配了不生效的死键
+// （契约样本/前端表单/OpenAPI 都没有它）。已删除，避免"配了以为生效"的陷阱；
+// 将来要支持别的动词，需同时加进跨语言契约样本与前端表单。
+
 func (w *WebhookSender) Send(ctx context.Context, _, content string) error {
 	body, _ := json.Marshal(map[string]string{"content": content})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.cfg.URL, bytes.NewReader(body))
