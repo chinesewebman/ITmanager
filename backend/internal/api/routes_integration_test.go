@@ -43,6 +43,11 @@ import (
 // 同包用例串行执行，配 t.Cleanup 复位即可。
 var integrationTestBaseURL string
 
+// integrationTestTrustedProxies 非空时由 loadTestConfigForRoutes 注入
+// cfg.Server.TrustedProxies（G-7 用例）。格式校验在 config 包单测覆盖，
+// 这里只关心 SetupRouter 如何消费它。同包用例串行，配 t.Cleanup 复位即可。
+var integrationTestTrustedProxies []string
+
 // rateLimitProbeSeq 让每次运行（含 `go test -count=N`）拿到不同的限流桶。
 // 限流桶是进程级缓存，键 = `ClientIP()|FullPath`（middleware/rate_limit.go）；
 // 固定源 IP 会让第二次运行从满桶开始，5×401 变成 429（一致性审计 F7）。
@@ -206,6 +211,8 @@ log:
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
 	cfg, err := config.Load(path)
 	require.NoError(t, err)
+	// G-7：受信代理由用例注入（见 integrationTestTrustedProxies）
+	cfg.Server.TrustedProxies = integrationTestTrustedProxies
 	return cfg
 }
 
@@ -612,7 +619,9 @@ func doJSONAsRaw(t *testing.T, r *gin.Engine, method, path, authHeader string, b
 // doJSONAsRawFrom 同上，但可指定 RemoteAddr。
 // 登录限流的桶键是 `ClientIP()|FullPath`，同包用例共用默认 RemoteAddr 会互相消耗额度；
 // 需要独立额度的用例（如 429 断言）用它固定自己的 IP。
-func doJSONAsRawFrom(t *testing.T, r *gin.Engine, method, path, authHeader string, body any, remoteAddr string) *httptest.ResponseRecorder {
+//
+// 可选 xff 参数（G-7 用例）：设置 X-Forwarded-For 头，用于验证「受信代理」语义。
+func doJSONAsRawFrom(t *testing.T, r *gin.Engine, method, path, authHeader string, body any, remoteAddr string, xff ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rdr io.Reader
 	if body != nil {
@@ -623,6 +632,9 @@ func doJSONAsRawFrom(t *testing.T, r *gin.Engine, method, path, authHeader strin
 	req := httptest.NewRequest(method, path, rdr)
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
+	}
+	if len(xff) > 0 && xff[0] != "" {
+		req.Header.Set("X-Forwarded-For", xff[0])
 	}
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
@@ -1130,4 +1142,143 @@ func TestRoutes_AuthMe下发capabilities(t *testing.T) {
 			assert.Equal(t, want, resp.Data.Capabilities)
 		})
 	}
+}
+
+// ==================== G-7：受信代理（X-Forwarded-For 可信边界） ====================
+//
+// 修复前：gin 默认信任 0.0.0.0/0，ClientIP() 取 XFF 最左值 —— 攻击者每请求换一个
+// XFF 即可绕过登录限流、伪造审计 IP、绕过 API Key 的 IP 白名单（安全审计 F1①）。
+// 见 docs/FIX-PLAN-TRUSTED-PROXY.md。
+
+// mintWriteKeyWithWhitelist 铸一把带 IP 白名单的 write scope Key（G-7 V-8 用）。
+func mintWriteKeyWithWhitelist(t *testing.T, r *gin.Engine, sessionToken, name string, whitelist []string) string {
+	t.Helper()
+	w := doJSONAs(t, r, http.MethodPost, "/api/auth/api-keys", sessionToken, map[string]any{
+		"name": name, "permissions": []string{"write"}, "ip_whitelist": whitelist,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, "会话铸造带白名单的 Key 应 201: %s", w.Body.String())
+	var created struct {
+		Data struct {
+			APIKey string `json:"api_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Data.APIKey, "响应必须回传一次性明文 Key")
+	return "X-API-Key " + created.Data.APIKey
+}
+
+// TestRoutes_未配受信代理时忽略XFF — G-7 V-1
+//
+// trusted_proxies 为空 = 不信任任何来源，ClientIP() 取直连对端。
+// 断言方式：同一 RemoteAddr + 每次不同的 XFF，打满 5 次登录额度后第 6 次必须 429。
+// 若 XFF 被采信（修复前的 gin 默认行为），每个 XFF 各自成桶，第 6 次不会 429。
+func TestRoutes_未配受信代理时忽略XFF(t *testing.T) {
+	integrationTestTrustedProxies = nil
+	t.Cleanup(func() { integrationTestTrustedProxies = nil })
+	r := setupTestRouter(t)
+
+	srcIP := probeIP() // 直连对端；每次运行独立，避免 -count=N 复用满桶
+	for i := 0; i < 5; i++ {
+		w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+			"username": "xff-probe", "password": "wrong",
+		}, srcIP, fmt.Sprintf("198.51.100.%d", i))
+		require.NotEqual(t, http.StatusTooManyRequests, w.Code,
+			"第 %d 次应在额度内（XFF 必须被忽略）", i+1)
+	}
+	w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": "xff-probe", "password": "wrong",
+	}, srcIP, "198.51.100.99")
+	assert.Equal(t, http.StatusTooManyRequests, w.Code,
+		"第 6 次必须 429：桶键用的是直连对端，不是攻击者可控的 XFF")
+}
+
+// TestRoutes_受信代理下审计IP取最右不可信跳 — G-7 V-2 / V-5
+//
+// 受信代理语义（gin validateHeader）：从 XFF 最右往左跳过受信代理，取第一个不可信 IP。
+// 攻击者伪造最左值 + nginx 追加真实 $remote_addr → 必须落到真实客户端。
+func TestRoutes_受信代理下审计IP取最右不可信跳(t *testing.T) {
+	integrationTestTrustedProxies = []string{"203.0.113.0/24"}
+	t.Cleanup(func() { integrationTestTrustedProxies = nil })
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	// 用户名/IP 每次运行独立，避免 -count=N 时查询命中上一轮的审计行
+	seq := int(rateLimitProbeSeq.Add(1))
+	username := fmt.Sprintf("xff-audit-%d", seq)
+	realClient := fmt.Sprintf("198.51.100.%d", seq%250+1) // 不在受信网段内
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct-pass-123"), bcrypt.MinCost)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, ?, ?, 'admin', 'active', 0, 0, datetime('now'), datetime('now'))`,
+		uuid.NewString(), username, string(hash)).Error)
+
+	w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": username, "password": "wrong-pass",
+	}, "203.0.113.7:5000", "1.2.3.4, "+realClient) // 直连对端 = 受信代理；左值由攻击者伪造
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body=%s", w.Body.String())
+
+	var entry models.AuditLog
+	require.NoError(t, db.Where("path = ? AND username = ?", "/api/auth/login", username).First(&entry).Error)
+	assert.Equal(t, realClient, entry.IP,
+		"审计 IP 必须是 XFF 最右不可信跳（真实客户端），不是最左伪造值，也不是代理地址")
+}
+
+// TestRoutes_受信代理配置非法时failClosed — G-7 R-2
+//
+// SetTrustedProxies 出错时 gin 仍会把**已解析成功的部分** CIDR 写进 engine
+// （/tmp 探针实测：["203.0.113.0/24","bogus"] → err 非 nil，但 203.0.113.0/24 已生效，
+// ClientIP() 采信 XFF）。不 fail-closed 的话，这份「半截信任表」会让该网段的对端
+// 可以伪造 XFF —— 比完全不配更危险。断言：配了非法条目时行为必须与空配置一致。
+func TestRoutes_受信代理配置非法时failClosed(t *testing.T) {
+	// 每次运行用不同网段/对端，避免 -count=N 复用上一轮已打满的限流桶
+	seq := int(rateLimitProbeSeq.Add(1)) % 200
+	proxyNet := fmt.Sprintf("203.0.%d.0/24", seq+50)
+	srcIP := fmt.Sprintf("203.0.%d.7:5000", seq+50)
+	integrationTestTrustedProxies = []string{proxyNet, "bogus"}
+	t.Cleanup(func() { integrationTestTrustedProxies = nil })
+	r := setupTestRouter(t)
+
+	for i := 0; i < 5; i++ {
+		w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+			"username": "xff-failclosed", "password": "wrong",
+		}, srcIP, fmt.Sprintf("198.51.100.%d", i))
+		require.NotEqual(t, http.StatusTooManyRequests, w.Code,
+			"第 %d 次应在额度内（配置非法 → 降级为不信任任何来源，XFF 必须被忽略）", i+1)
+	}
+	w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": "xff-failclosed", "password": "wrong",
+	}, srcIP, "198.51.100.99")
+	assert.Equal(t, http.StatusTooManyRequests, w.Code,
+		"第 6 次必须 429：半截信任表不得生效（否则该网段对端可伪造 XFF 逐请求换桶）")
+}
+
+// TestRoutes_APIKey白名单按真实客户端IP判定 — G-7 V-8
+//
+// IP 白名单是安全控制而非仅日志字段：修复前伪造 XFF 即可从任意 IP 使用持白名单的 Key。
+// 配好受信代理后，白名单必须按**真实客户端**判定。
+func TestRoutes_APIKey白名单按真实客户端IP判定(t *testing.T) {
+	integrationTestTrustedProxies = []string{"203.0.113.0/24"}
+	t.Cleanup(func() { integrationTestTrustedProxies = nil })
+	r := setupTestRouter(t)
+
+	uid := seedAPIKeyOwner(t, "xff-key-owner")
+	session := genTokenForUser(t, uid, "admin")
+	realClient := fmt.Sprintf("198.51.100.%d", int(rateLimitProbeSeq.Add(1))%250+1)
+	const proxyAddr = "203.0.113.7:5000" // 受信代理
+	// 攻击者伪造最左值 + nginx 追加真实 $remote_addr（frontend/nginx.conf:19-20）。
+	// 带伪造值才能区分「取最左」与「取最右不可信跳」——只发真实 IP 时两者恰好相同。
+	spoofedXFF := "1.2.3.4, " + realClient
+
+	// 白名单 = 真实客户端 → 放行（证明 ClientIP 采信了 XFF 最右不可信跳）
+	keyForClient := mintWriteKeyWithWhitelist(t, r, session, "wl-client", []string{realClient})
+	w := doJSONAsRawFrom(t, r, http.MethodGet, "/api/assets", keyForClient, nil, proxyAddr, spoofedXFF)
+	assert.Equal(t, http.StatusOK, w.Code,
+		"白名单命中真实客户端 IP 应放行，实际: %s", w.Body.String())
+
+	// 白名单 = 代理地址 → 403（证明 ClientIP 不是代理地址，白名单没被架空）
+	keyForProxy := mintWriteKeyWithWhitelist(t, r, session, "wl-proxy", []string{"203.0.113.7"})
+	w = doJSONAsRawFrom(t, r, http.MethodGet, "/api/assets", keyForProxy, nil, proxyAddr, spoofedXFF)
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"ClientIP 应是真实客户端而非代理地址，白名单只含代理时必须 403")
 }

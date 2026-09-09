@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -115,6 +116,25 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 	}
 
 	r := gin.Default()
+	// G-7：受信代理必须显式配置。gin 默认信任 0.0.0.0/0，会让 ClientIP() 取
+	// X-Forwarded-For 的**最左值**（攻击者可控）——登录限流可被逐请求换 XFF 绕过、
+	// 审计 IP 可伪造、API Key 的 IP 白名单可绕过。见 docs/FIX-PLAN-TRUSTED-PROXY.md。
+	if err := r.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		// fail-closed：gin 出错时可能已把部分 CIDR 写进 engine（gin.go:438-441），
+		// 继续跑等于装了半截信任表。降级为「不信任任何来源」并大声报错。
+		slog.Error("SetTrustedProxies 失败，已降级为不信任任何来源", slog.String("err", err.Error()))
+		_ = r.SetTrustedProxies(nil)
+	}
+	if len(cfg.Server.TrustedProxies) == 0 {
+		slog.Warn("server.trusted_proxies 未配置：忽略 X-Forwarded-For，ClientIP() 取直连对端。" +
+			"若部署在反向代理后，登录限流会退化为全站单桶（一个攻击者可耗尽所有人的配额）、" +
+			"审计 IP 变成代理地址、配了 IP 白名单的 API Key 将一律 403")
+	} else {
+		slog.Info("受信代理已配置：ClientIP() 会采信这些来源追加的 X-Forwarded-For",
+			slog.Any("trusted_proxies", cfg.Server.TrustedProxies))
+	}
+	// 无论「没配」还是「配错」：只要 XFF 来自未受信来源就告警一次（G-7）。
+	r.Use(middleware.WarnUntrustedForwardedFor(cfg.Server.TrustedProxies))
 	r.Use(middleware.CORS(cfg))
 	// C-P5: HTTP metrics 中间件（仅在 metrics 启用时挂载，避免无意义开销）
 	if platformMetrics != nil {

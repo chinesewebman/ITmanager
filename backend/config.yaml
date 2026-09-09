@@ -4,6 +4,13 @@ server:
   mode: debug
   # C-P5: 是否暴露 /metrics 端点（生产环境建议开启供 Prometheus 抓取）
   metrics_enabled: true
+  # G-7: 反向代理来源（CIDR 或裸 IP）。空 = 不信任任何来源，ClientIP() 取直连对端、
+  # 忽略 X-Forwarded-For —— 直连部署下这是正确值。
+  # 部署在反向代理后**必须**填代理的 IP/CIDR（如容器化部署填 nginx 容器 IP），否则：
+  # 登录限流退化为全站单桶（一个攻击者可耗尽所有人的配额）、审计 IP 变成代理地址、
+  # 配了 IP 白名单的 API Key 一律 403。详见 docs/FIX-PLAN-TRUSTED-PROXY.md。
+  # 环境变量覆盖：NMP_SERVER_TRUSTED_PROXIES=172.28.0.10,10.0.1.5
+  trusted_proxies: []
 
 database:
   host: "localhost"

@@ -335,6 +335,192 @@ func TestValidate_MultipleErrors_AggregatedInOneError(t *testing.T) {
 	assert.Equal(t, 2, strings.Count(msg, "; "), "三个错误应被 ;  串起来")
 }
 
+// ==================== 受信代理校验（G-7） ====================
+
+func TestValidate_TrustedProxies_合法(t *testing.T) {
+	for _, entry := range []string{
+		"172.28.0.10",            // 裸 IPv4（gin 等价 /32）
+		"172.28.0.10/32",         // 单机
+		"172.28.0.0/24",          // 一个网段
+		"10.0.0.0/8",             // 私有段（合法但过宽，见文档「信任的是代理本身」）
+		"::1",                    // 裸 IPv6（gin 等价 /128）
+		"fd00:1234::/64",         // IPv6 网段
+		"2001:db8::1/128",        // IPv6 单机
+		"::ffff:172.28.0.10/128", // IPv4-mapped 单机（等效 /32）
+		"::ffff:10.0.0.0/104",    // IPv4-mapped 网段（等效 IPv4 /8，与 10.0.0.0/8 同宽）
+		" 172.28.0.10 ",          // 带空白 → 规整后合法
+	} {
+		cfg := minimalValidConfig()
+		cfg.Server.TrustedProxies = []string{entry}
+		assert.NoError(t, cfg.Validate(), "条目 %q 应合法", entry)
+	}
+}
+
+func TestValidate_TrustedProxies_非法(t *testing.T) {
+	for _, entry := range []string{
+		"not-a-cidr",
+		"300.1.1.1",
+		"172.28.0.10/33",
+		"172.28.0.10/24", // 主机位非零 → 会被静默归一为整个 /24
+		"",
+		"  ", // 仅空白
+	} {
+		cfg := minimalValidConfig()
+		cfg.Server.TrustedProxies = []string{entry}
+		err := cfg.Validate()
+		require.Error(t, err, "条目 %q 应被拒", entry)
+		assert.Contains(t, err.Error(), "trusted_proxies")
+	}
+}
+
+// 主机位非零必须单独报错（不是「过宽」也不是「非法 CIDR」）：运维要能看懂该改成什么。
+func TestValidate_TrustedProxies_主机位非零被拒(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.TrustedProxies = []string{"172.28.0.10/24"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "主机位非零")
+	assert.Contains(t, err.Error(), `"172.28.0.0/24"`, "提示里应给出归一后的网段写法")
+	assert.Contains(t, err.Error(), `"172.28.0.10/32"`, "提示里应给出单机写法")
+}
+
+// IPv6 的主机位非零同样要拒，提示里给 /128 写法。
+func TestValidate_TrustedProxies_IPv6主机位非零被拒(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.TrustedProxies = []string{"2001:db8::1/64"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "主机位非零")
+	assert.Contains(t, err.Error(), `"2001:db8::/64"`)
+	assert.Contains(t, err.Error(), `"2001:db8::1/128"`)
+}
+
+// 空白规整：校验值与运行期交给 gin 的值必须是同一个（安全审计发现的不一致）。
+func TestValidate_TrustedProxies_空白被规整回写(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.TrustedProxies = []string{" 172.28.0.10 "}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, []string{"172.28.0.10"}, cfg.Server.TrustedProxies,
+		"Validate 必须把 trim 后的值写回 cfg，否则 gin 侧会拿到带空白的串而报错")
+}
+
+// IPv4-mapped IPv6 段必须按「等效 IPv4 前缀」判定（安全审计实测绕过：
+// ::ffff:0:0/96 只过 /16 的 v6 门槛，实际覆盖全部 IPv4）。
+func TestValidate_TrustedProxies_IPv4Mapped段过宽被拒(t *testing.T) {
+	for _, entry := range []string{
+		"::ffff:0:0/96",         // 等效 IPv4 /0 = 全部 IPv4
+		"::ffff:0.0.0.0/96",     // 同上，点分写法
+		"0:0:0:0:0:ffff:0:0/96", // 同上，全展开写法
+		"::ffff:128.0.0.0/97",   // 等效 IPv4 /1 = 半个 IPv4
+	} {
+		cfg := minimalValidConfig()
+		cfg.Server.TrustedProxies = []string{entry}
+		err := cfg.Validate()
+		require.Error(t, err, "条目 %q 应被拒", entry)
+		assert.Contains(t, err.Error(), "过宽", "条目 %q 的错误信息应说明过宽", entry)
+	}
+}
+
+// 不误拒：基址不再是 v4-mapped 的更宽 v6 网段（如 ::fffe:0:0/95）在 gin 侧
+// 匹配不上 IPv4 客户端（IPNet.Contains 会把参数转成 4 字节，长度不匹配），
+// 不构成「等效 IPv4」绕过，按普通 v6 规则（≥ /16）处理即可。
+func TestValidate_TrustedProxies_宽v6网段不误拒(t *testing.T) {
+	for _, entry := range []string{"::fffe:0:0/95", "::/64"} {
+		cfg := minimalValidConfig()
+		cfg.Server.TrustedProxies = []string{entry}
+		assert.NoError(t, cfg.Validate(), "条目 %q 不应被误拒", entry)
+	}
+}
+
+// 过宽前缀必须硬拒：安全审查实测 `0.0.0.0/1` + `128.0.0.0/1` 就能覆盖全部 IPv4，
+// 只拒 `/0` 的护栏会被这种写法绕过；而这两个条目覆盖全网 = gin 默认的不安全配置。
+func TestValidate_TrustedProxies_过宽被拒(t *testing.T) {
+	for _, entry := range []string{
+		"0.0.0.0/0",
+		"0.0.0.0/1",
+		"128.0.0.0/1",
+		"::/0",
+		"::/1",
+	} {
+		cfg := minimalValidConfig()
+		cfg.Server.TrustedProxies = []string{entry}
+		err := cfg.Validate()
+		require.Error(t, err, "过宽条目 %q 应被拒", entry)
+		assert.Contains(t, err.Error(), "过宽")
+	}
+}
+
+// 多项里只要有一个非法就要拒（防止「配了一堆、坏的那个被忽略」）。
+func TestValidate_TrustedProxies_多项含非法则整体拒(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Server.TrustedProxies = []string{"172.28.0.10/32", "bogus"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bogus")
+}
+
+// V-6：env 覆盖依赖 viper 的 AllKeys 机制（纯 env 键不进 AllKeys），
+// 所以 yaml 里必须有 `trusted_proxies: []` 占位。这条测试同时钉住「占位存在时覆盖生效」。
+func TestLoad_TrustedProxiesEnvOverride(t *testing.T) {
+	yaml := `server:
+  mode: debug
+  trusted_proxies: []
+database:
+  password: real-password
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+  api_key_pepper: "` + validPepper + `"
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	// 无 env → 空（不信任任何来源）
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Server.TrustedProxies, "未设 env 时应为空")
+
+	// 有 env → 逗号分隔覆盖
+	t.Setenv("NMP_SERVER_TRUSTED_PROXIES", "172.28.0.10,10.0.1.5/32")
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"172.28.0.10", "10.0.1.5/32"}, cfg.Server.TrustedProxies,
+		"env 必须能覆盖 yaml 的空列表（否则部署漏配且无报错）")
+}
+
+// 升级场景：挂载的旧 config.yaml 没有 trusted_proxies 键时，env 也必须生效。
+// 依赖 Load() 里的 viper.SetDefault("server.trusted_proxies", []string{})
+// （viper 只对 AllKeys 里的键做 env 覆盖，缺键会静默忽略 env）。
+func TestLoad_TrustedProxiesEnvOverride_YAML无键时仍生效(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+  api_key_pepper: "` + validPepper + `"
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	t.Setenv("NMP_SERVER_TRUSTED_PROXIES", "172.28.0.10")
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"172.28.0.10"}, cfg.Server.TrustedProxies,
+		"旧 config.yaml 缺 trusted_proxies 键时 env 也必须生效（否则升级后静默不信任任何来源）")
+}
+
 // ==================== Load 集成测试 ====================
 
 func TestLoad_FileNotFound_ReturnsError(t *testing.T) {

@@ -48,6 +48,10 @@ services:
       - NETBOX_URL=http://netbox:8000
       - ZABBIX_URL=http://zabbix:8080
       - GLPI_URL=http://glpi:80
+      # G-7: 只信任前端容器（下方 web 的静态 IP）。缺了它 ClientIP() 取直连对端
+      # （即 nginx 容器 IP）→ 登录限流退化为全站单桶、审计 IP 失真、
+      # IP 白名单 API Key 一律 403。见 docs/FIX-PLAN-TRUSTED-PROXY.md。
+      - NMP_SERVER_TRUSTED_PROXIES=172.28.0.10
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,6 +66,11 @@ services:
     container_name: nmp-web
     ports:
       - "3000:80"
+    # G-7: 固定 IP，供 api 的 NMP_SERVER_TRUSTED_PROXIES 精确指向（只信任这一个容器，
+    # 不信任整个子网 —— 同网段还有 postgres/redis/netbox，任一被攻陷即可伪造 XFF）。
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
     depends_on:
       api:
         condition: service_started
@@ -201,6 +210,18 @@ services:
   #   depends_on:
   #     - web
   #     - api
+
+networks:
+  # G-7: 固定子网，让 web 容器拿到可预期的静态 IP（172.28.0.10）。
+  # 选 172.28.0.0/24 是为了避开 AWS 默认 VPC 的 172.31.0.0/16。
+  # 注意：① 若该网络已存在且未带 ipam 配置，需先 `docker compose down` 再起；
+  # ② 宿主机若已有其它网络占用 172.28.0.0/24（`docker network ls` 自查），
+  #    会以「Pool overlaps」直接起不来，换一个冷门网段即可；
+  # ③ 静态 IP 与 `--scale web=2` 互斥（第二个副本地址冲突）。
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   postgres_data:
