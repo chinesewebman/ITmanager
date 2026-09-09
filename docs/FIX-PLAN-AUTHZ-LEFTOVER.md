@@ -114,8 +114,8 @@ API Key 自身的 scope 只拦 HTTP 方法（`middleware/auth.go:166` → `apiKe
 | 编号 | 缺口 | 证据 | 处置 |
 | --- | --- | --- | --- |
 | G-1 | `must_change_password=true` 在服务端**不阻断**其它端点（登录后拿 JWT 即可调任意 API） | `AuthMiddleware`（`middleware/auth.go:77-126`）不读该 flag；非测试代码读取点：`auth_handler.go:133/251/300`、`api_key_handler.go:126`、`cmd/seed/main.go:52/73`、`cmd/admin-bootstrap/main.go:93` | 见 §6.1（**铸 Key 一条已在 §8.1 F-1 收窄**），其余另立任务 |
-| G-2 | API Key 路径不检查 `LockedUntil`（登录路径检查） | `auth_handler.go:58` vs `middleware/auth.go:187-191` | 见 §6.2 |
-| G-3 | 前端密钥管理打的是 `/api/api-keys`，后端在 `/api/auth/api-keys` → 落到 NoRoute 返 index.html | `frontend/src/services/api.ts:12` + `:197-202` vs `routes.go:221-228` | 见 §6.4 |
+| G-2 | API Key 路径不检查 `LockedUntil`（登录路径检查） | `auth_handler.go:58` vs `middleware/auth.go:187-191` | 见 §6.2。**2026-09-09 结案为「不修」**（CLOSURE §2 D-A） |
+| G-3 | 前端密钥管理打的是 `/api/api-keys`，后端在 `/api/auth/api-keys` → 落到 NoRoute 返 index.html | `frontend/src/services/api.ts:12` + `:197-202` vs `routes.go:221-228` | 见 §6.4。**2026-09-09 已修复**（CLOSURE §2 D-B） |
 
 ---
 
@@ -341,13 +341,17 @@ read 是地板、write 是唯一实用的写权限，把门槛提到 admin 只�
 **未采纳 3 条（记入后续任务，不在本轮）**：F-3 `notification-channels` 凭据可被 write Key 读取、
 F-4 `GET /auth/me` 缺 openapi、F-5 `cmd/set-role` TOCTOU。理由：均与本缺陷正交，且 F-3/F-5 需要独立决策。
 
+> **后续（2026-09-09 同日）**：**F-3 已结案**——审计实测发现同类更重的 `F-5`（`PUT /integrations/*` 可用
+> write Key 把**已存凭据外泄**），两者一并收口于 `docs/FIX-PLAN-AUTHZ-CLOSURE.md` §2 D-C
+> （渠道整组 + 三条 integrations PUT 挂 `RejectAPIKeyAuth`）。F-4 仍为 TODO。
+
 ### §8.2 遗留 G 清单（本轮不修，已记 TODO.md）
 
 | ID | 内容 | 为何不在本轮 |
 | --- | --- | --- |
 | G-1 | 全局强制强改密（`AuthMiddleware` 查库） | 每请求一次 DB 查询，性能/架构独立决策；本轮只收窄 `CreateAPIKey` |
-| G-2 | API Key 路径不查 `LockedUntil` | 会改变锁定期内自动化行为 |
-| G-3 | 前端密钥管理路径与后端不匹配（`Settings` 页打不到后端） | 与本缺陷正交；因 R-4 无人受影响 |
+| G-2 | API Key 路径不查 `LockedUntil` | **结案为「不修」**（2026-09-09，见 CLOSURE §2 D-A）：因果错位、耦合会阻断受害者自救；改为补登录审计 |
+| G-3 | 前端密钥管理路径与后端不匹配（`Settings` 页打不到后端） | **已修复**（2026-09-09，见 CLOSURE §2 D-B）：路径 + 字段名 + 格式提示 + 403 Alert |
 
 ### §8.3 测试与一致性审计处置（同日）
 

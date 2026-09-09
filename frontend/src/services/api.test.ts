@@ -108,6 +108,20 @@ describe("api.ts response interceptor", () => {
     expect(message.error).toHaveBeenCalledWith("没有权限访问")
   })
 
+  // 一致性审计 F8：Settings.tsx 用 `error?.response?.status === 403` 决定是否渲染
+  // 「无密钥管理权限」。若拦截器改成抛裸 Error，权限提示会失效，而上面那条只断言
+  // `rejects.toBeTruthy()` 的用例照样绿——契约必须单独钉住。
+  it("reject 保留 error.response（页面靠它判 403）", async () => {
+    (mockAdapter as unknown as ReturnType<typeof vi.fn>).mockRejectedValue({
+      response: { status: 403, data: {} },
+    })
+    const { default: api } = await loadApi()
+    api.defaults.adapter = mockAdapter
+    await expect(api.get("/test")).rejects.toMatchObject({
+      response: { status: 403 },
+    })
+  })
+
   it("404 错误 message.error('请求的资源不存在')", async () => {
     (mockAdapter as unknown as ReturnType<typeof vi.fn>).mockRejectedValue({
       response: { status: 404, data: {} },
@@ -189,6 +203,38 @@ describe("api.ts response interceptor", () => {
     expect(resp.data).toBe(blob)
     const { message } = await import("antd")
     expect(message.error).not.toHaveBeenCalled()
+  })
+
+  // FIX-PLAN-AUTHZ-CLOSURE.md §1 S-2a / AV-4：apiKeyApi 曾漏掉 /auth 前缀
+  // （baseURL 已是 "/api"）→ 实际打 /api/api-keys，落 NoRoute 返 index.html，
+  // 密钥管理整块失效。用 adapter 断言真实 URL —— vi.mock 整个模块观测不到。
+  it("apiKeyApi 四条请求都打 /api/auth/api-keys*", async () => {
+    const adapter = mockAdapter as unknown as ReturnType<typeof vi.fn>
+    adapter.mockResolvedValue({ data: { code: 0, data: {} }, status: 200 })
+    const { default: api, apiKeyApi } = await loadApi()
+    api.defaults.adapter = mockAdapter
+
+    await apiKeyApi.list()
+    await apiKeyApi.create({ name: "ci", permissions: ["read"] })
+    await apiKeyApi.revoke("id-1")
+    await apiKeyApi.delete("id-1")
+
+    const calls = adapter.mock.calls
+    // 拼串相等还不足以钉住契约：把 baseURL 改成 "/api/v1"、url 改成 "/auth/..." 之类
+    // 的漂移仍可能拼出同一串（一致性审计 F4）。基址单独断言。
+    expect(api.defaults.baseURL).toBe("/api")
+    expect(calls.map(([c]: any) => c.baseURL + c.url)).toEqual([
+      "/api/auth/api-keys",
+      "/api/auth/api-keys",
+      "/api/auth/api-keys/id-1/revoke",
+      "/api/auth/api-keys/id-1",
+    ])
+    expect(calls.map(([c]: any) => c.method)).toEqual([
+      "get",
+      "post",
+      "put",
+      "delete",
+    ])
   })
 
   // FV-5：页面改用共享 helper 后，请求必须走 cookie（withCredentials）

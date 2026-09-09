@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin } from 'antd'
+import { Card, Tabs, Form, Input, Button, Switch, Select, Table, Tag, Space, Modal, message, Spin, Alert } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
 import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -274,14 +274,25 @@ function Settings() {
   const [apiKeyModal, setApiKeyModal] = useState<{ open: boolean }>({ open: false })
   const [apiKeyForm] = Form.useForm()
   const [generatedKey, setGeneratedKey] = useState<string | null>(null)
+  // 403 = 当前账号无密钥管理权限（/auth/api-keys 限 admin）。拦截器已弹一次
+  // 「没有权限访问」，这里只记状态渲染区块内 Alert —— 再 toast 一次是重复噪音，
+  // 且会让区块看起来像「加载失败」而不是「无权限」（FIX-PLAN-AUTHZ-CLOSURE.md §2 D-B）
+  const [apiKeysForbidden, setApiKeysForbidden] = useState(false)
 
   const fetchApiKeys = async () => {
     setApiKeyLoading(true)
     try {
       const res: any = await apiKeyApi.list()
       setApiKeys(res?.data?.data || [])
-    } catch (error) {
-      console.error('获取 API 密钥失败:', error)
+      setApiKeysForbidden(false)
+    } catch (error: any) {
+      // 置位与复位必须同源：只置不清会让「先 403、后 500」的界面一直挂着
+      // 「无密钥管理权限」，把真实故障伪装成权限问题（一致性审计 F3）。
+      const forbidden = error?.response?.status === 403
+      setApiKeysForbidden(forbidden)
+      if (!forbidden) {
+        console.error('获取 API 密钥失败:', error)
+      }
       setApiKeys([])
     } finally {
       setApiKeyLoading(false)
@@ -297,7 +308,9 @@ function Settings() {
       }
       if (values.expires_at) payload.expires_at = values.expires_at
       const res: any = await apiKeyApi.create(payload)
-      const key = res?.data?.data?.key
+      // 后端字段名是 api_key（api_key_handler.go:200）；曾写成 key，导致一次性
+      // 明文 Key 永远不显示（FIX-PLAN-AUTHZ-CLOSURE.md §1 S-2b）
+      const key = res?.data?.data?.api_key
       if (res?.data?.code === 0) {
         message.success('API 密钥已生成')
         if (key) setGeneratedKey(key) // 只展示一次
@@ -809,6 +822,16 @@ function Settings() {
             </Button>
           </div>
 
+          {apiKeysForbidden && (
+            <Alert
+              type="warning"
+              showIcon
+              message="当前账号无密钥管理权限"
+              description="API 密钥管理仅限 admin 角色。如需签发或吊销密钥，请联系管理员。"
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
           <Table
             rowKey="id"
             loading={apiKeyLoading}
@@ -882,6 +905,9 @@ function Settings() {
             open={apiKeyModal.open}
             onCancel={() => {
               setApiKeyModal({ open: false })
+              // 明文 Key 只应展示一次：X / 遮罩 / ESC 关闭时也要清，否则再次打开
+              // 「生成密钥」会重新显示上一把 Key（安全审计 F5）
+              setGeneratedKey(null)
               apiKeyForm.resetFields()
             }}
             footer={null}
@@ -911,7 +937,8 @@ function Settings() {
                 />
               </Form.Item>
               <Form.Item label="过期时间（可选）" name="expires_at">
-                <Input placeholder="RFC3339，如 2027-01-01T00:00:00Z（留空永不过期）" />
+                {/* 后端 time.Parse("2006-01-02")，只收 YYYY-MM-DD；旧提示写 RFC3339，按提示输入必 400 */}
+                <Input placeholder="YYYY-MM-DD，如 2027-01-01（留空永不过期）" />
               </Form.Item>
 
               {generatedKey && (

@@ -19,7 +19,8 @@ type AuditConfig struct {
 	SkipPaths map[string]bool
 	// ActionFunc 从 context 推断 Action (默认用 HTTP method)
 	ActionFunc func(c *gin.Context) string
-	// Async 是否异步写入 (默认 true — 不阻塞请求)
+	// Async 是否异步写入（零值 false = 同步写，响应返回时审计行已落库；
+	// 登录路由依赖这一点做测试断言，见 docs/FIX-PLAN-AUTHZ-CLOSURE.md §2 D-E）
 	Async bool
 }
 

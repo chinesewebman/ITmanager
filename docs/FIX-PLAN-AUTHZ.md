@@ -141,6 +141,12 @@
 | `/api/metric-snapshots` | POST | `write` |
 | `/api/diagnostics/ping`、`/traceroute` | GET | `write`（服务端外连，只读身份不应触发） |
 
+**后续修订（2026-09-09，见 `docs/FIX-PLAN-AUTHZ-CLOSURE.md` §2 D-C）**：本表的 `manage` 只解决「哪个**角色**能碰」，
+不解决「哪种**身份**能碰」——API Key 的 role 取自关联用户，故 admin 名下的 write Key 同样过 `manage`。
+以下端点因此**额外**挂 `middleware.RejectAPIKeyAuth`（只拒 API Key，不拒会话；能力要求不变）：
+`/api/notification-channels*`（整组，响应体含明文凭据）、`PUT /api/integrations/{zabbix,netbox,glpi}`（可改出站地址外泄已存凭据）。
+`POST /api/integrations/*/test` 与 `/sync` **不拦**——堵住 PUT 后它们只能打管理员配置过的地址，是自动化该用的能力。
+
 **不挂**（保持现状）：
 
 - 所有未列入上表的 `GET` 列表/详情、`/api/dashboard/*`、`/api/topology`、`/api/postmortem/*`、`/api/diagnostics/assets/:id/timeline`、`/api/health`、`/healthz`、`/readyz`、`/metrics`。

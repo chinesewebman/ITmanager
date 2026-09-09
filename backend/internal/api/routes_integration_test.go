@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"network-monitor-platform/internal/api"
 	"network-monitor-platform/internal/config"
@@ -29,9 +31,27 @@ import (
 	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+// integrationTestBaseURL 非空时，loadTestConfigForRoutes 把 netbox/zabbix/glpi
+// 三个地址全部指向它。「未拦」用例用它指向本进程的假服务——原用例会真实外连
+// localhost:8000/8080/443，开发机/CI 上若恰好跑着 Zabbix、NetBox 或 443 服务，
+// 测试会真的发起登录/同步并可能改写对方数据（一致性审计 F6）。
+// 同包用例串行执行，配 t.Cleanup 复位即可。
+var integrationTestBaseURL string
+
+// rateLimitProbeSeq 让每次运行（含 `go test -count=N`）拿到不同的限流桶。
+// 限流桶是进程级缓存，键 = `ClientIP()|FullPath`（middleware/rate_limit.go）；
+// 固定源 IP 会让第二次运行从满桶开始，5×401 变成 429（一致性审计 F7）。
+var rateLimitProbeSeq atomic.Int64
+
+// probeIP 返回本次调用专属的源 IP（RFC 5737 文档段，端口不参与桶键）。
+func probeIP() string {
+	return fmt.Sprintf("203.0.113.%d:5000", int(rateLimitProbeSeq.Add(1))%250+1)
+}
 
 // genUUID 返回 v4 UUID 字符串（用于 gen_random_uuid() 替身）
 func genUUID() string {
@@ -134,14 +154,14 @@ redis:
 
 integrations:
   netbox:
-    url: "http://localhost:8000"
+    url: "%s"
     token: ""
   zabbix:
-    url: "http://localhost:8080"
+    url: "%s"
     user: "Admin"
     password: "zabbix"
   glpi:
-    url: "http://localhost"
+    url: "%s"
     app_token: ""
     user_token: ""
 
@@ -173,6 +193,14 @@ log:
   level: "info"
   format: "json"
 `
+	// 三个集成地址由 integrationTestBaseURL 决定：空 = 历史默认（localhost 各端口），
+	// 非空 = 指向本进程假服务，避免真实外连（一致性审计 F6）。
+	base := integrationTestBaseURL
+	if base == "" {
+		yaml = fmt.Sprintf(yaml, "http://localhost:8000", "http://localhost:8080", "http://localhost")
+	} else {
+		yaml = fmt.Sprintf(yaml, base, base, base)
+	}
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
@@ -578,6 +606,14 @@ func genTokenForUser(t *testing.T, userID, role string) string {
 // doJSONAsRaw 以指定 Authorization 头发一次请求（body=nil 时不带 body）
 func doJSONAsRaw(t *testing.T, r *gin.Engine, method, path, authHeader string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	return doJSONAsRawFrom(t, r, method, path, authHeader, body, "")
+}
+
+// doJSONAsRawFrom 同上，但可指定 RemoteAddr。
+// 登录限流的桶键是 `ClientIP()|FullPath`，同包用例共用默认 RemoteAddr 会互相消耗额度；
+// 需要独立额度的用例（如 429 断言）用它固定自己的 IP。
+func doJSONAsRawFrom(t *testing.T, r *gin.Engine, method, path, authHeader string, body any, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -585,6 +621,9 @@ func doJSONAsRaw(t *testing.T, r *gin.Engine, method, path, authHeader string, b
 		rdr = bytes.NewReader(b)
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
@@ -652,28 +691,29 @@ func TestRoutes_能力矩阵_有权限放行(t *testing.T) {
 	}
 }
 
-// TestRoutes_APIKey不能管理APIKey — AUTHZ 遗留缺陷 S-2（长期凭据不得自我复制）
+// seedAPIKeyOwner 插一个可铸造 API Key 的 admin 用户，返回 user_id。
 //
-// 必须用 **write scope** 的 Key 才复现攻击前提：read Key 打 POST/DELETE 会被
-// apiKeyAllows 先挡下（403 "API Key 权限不足"），测不出新中间件。
-// GET /api/auth/api-keys 是唯一「apiKeyAllows 会放行」的判别用例，必须覆盖。
-// PUT /api/auth/password 同理：泄露的 write Key 可直接改掉所属账号的密码。
-func TestRoutes_APIKey不能管理APIKey(t *testing.T) {
-	r := setupTestRouter(t)
-	db := database.GetDB()
-
-	uid := uuid.NewString()
-	// must_change_password=0：本用例测的是「Key 不能自我复制」，不是强改密收窄；
-	// 默认值 TRUE（migration 000012）会让 CreateAPIKey 提前 403，测不出新中间件
-	require.NoError(t, db.Exec(`INSERT INTO users
+// must_change_password 必须显式为 0：默认值 TRUE（migration 000012）会让
+// CreateAPIKey 提前 403，测不出目标中间件（强改密收窄另有专门用例覆盖）。
+func seedAPIKeyOwner(t *testing.T, username string) string {
+	t.Helper()
+	id := uuid.NewString()
+	require.NoError(t, database.GetDB().Exec(`INSERT INTO users
 		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
-		VALUES (?, 'key-owner', 'x', 'admin', 'active', 0, 0, datetime('now'), datetime('now'))`,
-		uid).Error)
-	adminToken := genTokenForUser(t, uid, "admin")
+		VALUES (?, ?, 'x', 'admin', 'active', 0, 0, datetime('now'), datetime('now'))`,
+		id, username).Error)
+	return id
+}
 
-	// 会话铸造 write scope Key（这一步本身必须继续可用，否则测不出攻击前提）
-	w := doJSONAs(t, r, http.MethodPost, "/api/auth/api-keys", adminToken, map[string]any{
-		"name": "leaked", "permissions": []string{"write"},
+// mintWriteKeyViaSession 用登录会话铸一把 write scope Key，返回可直接用作
+// Authorization 头的字符串（"X-API-Key <明文>"）。
+//
+// 铸造这一步本身必须成功——它是所有「Key 越权」用例的攻击前提，失败说明
+// 测试环境而非被测中间件有问题，故用 require 而非 assert。
+func mintWriteKeyViaSession(t *testing.T, r *gin.Engine, sessionToken, name string) string {
+	t.Helper()
+	w := doJSONAs(t, r, http.MethodPost, "/api/auth/api-keys", sessionToken, map[string]any{
+		"name": name, "permissions": []string{"write"},
 	})
 	require.Equal(t, http.StatusCreated, w.Code, "会话铸造 Key 应 201: %s", w.Body.String())
 	var created struct {
@@ -683,8 +723,21 @@ func TestRoutes_APIKey不能管理APIKey(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
 	require.NotEmpty(t, created.Data.APIKey, "响应必须回传一次性明文 Key")
+	return "X-API-Key " + created.Data.APIKey
+}
 
-	keyAuth := "X-API-Key " + created.Data.APIKey
+// TestRoutes_APIKey不能管理APIKey — AUTHZ 遗留缺陷 S-2（长期凭据不得自我复制）
+//
+// 必须用 **write scope** 的 Key 才复现攻击前提：read Key 打 POST/DELETE 会被
+// apiKeyAllows 先挡下（403 "API Key 权限不足"），测不出新中间件。
+// GET /api/auth/api-keys 是唯一「apiKeyAllows 会放行」的判别用例，必须覆盖。
+// PUT /api/auth/password 同理：泄露的 write Key 可直接改掉所属账号的密码。
+func TestRoutes_APIKey不能管理APIKey(t *testing.T) {
+	r := setupTestRouter(t)
+
+	uid := seedAPIKeyOwner(t, "key-owner")
+	keyAuth := mintWriteKeyViaSession(t, r, genTokenForUser(t, uid, "admin"), "leaked")
+
 	for _, c := range []struct{ name, method, path string }{
 		{"GET 列举", http.MethodGet, "/api/auth/api-keys"},
 		{"POST 铸造", http.MethodPost, "/api/auth/api-keys"},
@@ -767,6 +820,210 @@ func TestRoutes_跳过强改密留审计(t *testing.T) {
 		"/api/auth/skip-password-change", http.MethodPost).Find(&logs).Error)
 	require.Len(t, logs, 1, "强改密绕过尝试必须留审计（AuditLog 中间件）")
 	assert.Equal(t, http.StatusBadRequest, logs[0].Status)
+}
+
+// TestRoutes_APIKey不能读写信道与集成凭据 — FIX-PLAN-AUTHZ-CLOSURE.md §2 D-C（AV-1/AV-2/AV-3）
+//
+// 攻击前提：admin 会话铸的 write scope Key 继承所属用户的能力（middleware/auth.go:196），
+// 于是这把「长期凭据」可以读走通知渠道里的明文 webhook token / SMTP 密码，
+// 或把集成出站地址改指攻击者（F-3 / F-5）。
+// 修复方式：这些端点额外挂 RejectAPIKeyAuth（只拒 API Key，不拒会话）。
+func TestRoutes_APIKey不能读写信道与集成凭据(t *testing.T) {
+	// 集成端点（/test、/sync）必须真的走到 handler 才能证明「没被新中间件拦」，
+	// 而 handler 会外连集成地址。指向本进程假服务：既避免真实外连的副作用，
+	// 也去掉网络环境带来的耗时抖动（一致性审计 F6）。
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"fake integration"}`))
+	}))
+	defer fake.Close()
+	integrationTestBaseURL = fake.URL
+	t.Cleanup(func() { integrationTestBaseURL = "" })
+
+	r := setupTestRouter(t)
+	uid := seedAPIKeyOwner(t, "closure-owner")
+	keyAuth := mintWriteKeyViaSession(t, r, genTokenForUser(t, uid, "admin"), "leaked-write")
+
+	// F-3：通知渠道整组（读也在内——响应体含明文凭据）
+	for _, c := range []struct{ name, method, path string }{
+		{"GET 列举渠道", http.MethodGet, "/api/notification-channels"},
+		{"POST 建渠道", http.MethodPost, "/api/notification-channels"},
+		{"PUT 改渠道", http.MethodPut, "/api/notification-channels/" + uuid.NewString()},
+		{"DELETE 删渠道", http.MethodDelete, "/api/notification-channels/" + uuid.NewString()},
+		{"PUT 测试渠道", http.MethodPut, "/api/notification-channels/" + uuid.NewString() + "/test"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res := doJSONAsRaw(t, r, c.method, c.path, keyAuth, nil)
+			assert.Equal(t, http.StatusForbidden, res.Code, "API Key 不得触碰通知渠道")
+			assert.Contains(t, res.Body.String(), "登录会话",
+				"应命中 RejectAPIKeyAuth 的文案，而不是能力矩阵的「权限不足」")
+		})
+	}
+
+	// F-5：集成凭据的写端点（PUT 空字段会保留旧值 → 只改 URL 即可外带凭据）
+	for _, path := range []string{
+		"/api/integrations/zabbix", "/api/integrations/netbox", "/api/integrations/glpi",
+	} {
+		t.Run("PUT "+path, func(t *testing.T) {
+			res := doJSONAsRaw(t, r, http.MethodPut, path, keyAuth,
+				map[string]any{"url": "http://attacker.example"})
+			assert.Equal(t, http.StatusForbidden, res.Code, "API Key 不得改集成出站地址")
+			assert.Contains(t, res.Body.String(), "登录会话")
+		})
+	}
+
+	// 防过度收紧：/test 与 /sync 不拦——堵住 PUT 后它们只能打管理员配置过的地址，
+	// 是自动化该有的能力。不假设外连成败（无真实 Zabbix/NetBox，返回 5xx 也算通过）。
+	//
+	// 只断言「body 不含『登录会话』」是空转：路径拼错时 404 的 body 同样不含该文案
+	// （一致性审计 F2）。故同时钉住状态码——既不是 403（被拦），也不是 404/405
+	// （路由不存在/方法不对），保证请求真的走到了 handler。
+	for _, path := range []string{
+		"/api/integrations/zabbix/test", "/api/integrations/netbox/test",
+		"/api/integrations/glpi/test", "/api/integrations/sync",
+	} {
+		t.Run("未拦 "+path, func(t *testing.T) {
+			res := doJSONAsRaw(t, r, http.MethodPost, path, keyAuth, nil)
+			assert.NotEqual(t, http.StatusForbidden, res.Code,
+				"该端点不在本轮收紧范围，不应被 RejectAPIKeyAuth 拦下: %s", res.Body.String())
+			assert.NotEqual(t, http.StatusNotFound, res.Code,
+				"路由必须存在，否则「未拦」断言空转: %s", res.Body.String())
+			assert.NotEqual(t, http.StatusMethodNotAllowed, res.Code,
+				"方法必须匹配，否则「未拦」断言空转: %s", res.Body.String())
+			assert.NotContains(t, res.Body.String(), "登录会话")
+		})
+	}
+
+	// AV-3：会话身份行为不变（同一个 admin，同一批端点，不得被新中间件误伤）。
+	// 断言 200 而不是「非 403」：401/404/405 也能通过 NotEqual 403，那样中间件被误挂
+	// 到会话路由或路由改名时用例仍绿（一致性审计 F5）。
+	token := genTokenForUser(t, uid, "admin")
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/notification-channels"},
+		{http.MethodGet, "/api/integrations/status"},
+	} {
+		res := doJSONAs(t, r, c.method, c.path, token, nil)
+		assert.Equal(t, http.StatusOK, res.Code,
+			"会话访问 %s %s 应正常放行: %s", c.method, c.path, res.Body.String())
+	}
+}
+
+// TestRoutes_登录尝试留审计 — FIX-PLAN-AUTHZ-CLOSURE.md §2 D-E（AV-7）
+//
+// 登录路由此前完全无留痕：既分不清爆破还是忘密码，也看不出谁在制造账户锁定。
+// AuditLog 在未认证路由上只能拿到 IP，故 Login handler 把**尝试的用户名**放进 context。
+// 同时断言密码绝不进审计——审计写的是元数据，任何形式的请求体都不落库。
+func TestRoutes_登录尝试留审计(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	const (
+		username      = "audit-login"
+		correctPasswd = "correct-pass-123"
+		wrongPasswd   = "wrong-pass-456"
+	)
+	hash, err := bcrypt.GenerateFromPassword([]byte(correctPasswd), bcrypt.MinCost)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, ?, ?, 'admin', 'active', 0, 0, datetime('now'), datetime('now'))`,
+		uuid.NewString(), username, string(hash)).Error)
+
+	// 失败在前：AuditLog 默认同步写（AuditConfig.Async=false），响应返回时行已落库。
+	// 源 IP 每次运行独立，避免 -count=N 时第二次已无登录额度（一致性审计 F7）。
+	srcIP := probeIP()
+	fail := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": username, "password": wrongPasswd,
+	}, srcIP)
+	require.Equal(t, http.StatusUnauthorized, fail.Code, "body=%s", fail.Body.String())
+
+	ok := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": username, "password": correctPasswd,
+	}, srcIP)
+	require.Equal(t, http.StatusOK, ok.Code, "body=%s", ok.Body.String())
+
+	// 按 username 过滤：同包其他用例也会打 /api/auth/login，只认本用例的两条
+	var logs []models.AuditLog
+	require.NoError(t, db.Where("path = ? AND method = ? AND username = ?",
+		"/api/auth/login", http.MethodPost, username).Order("created_at").Find(&logs).Error)
+	require.Len(t, logs, 2, "登录成功与失败必须各留一条审计")
+
+	assert.Equal(t, http.StatusUnauthorized, logs[0].Status, "第一条是失败尝试")
+	assert.Equal(t, http.StatusOK, logs[1].Status, "第二条是成功登录")
+	for i, l := range logs {
+		assert.Equal(t, username, l.Username, "第 %d 条审计必须带尝试的用户名", i)
+		// 扫描**整行**而不是 ErrorMsg：`error_msg` 全仓没有写入者，只查它等于恒真
+		// （安全审计 F4）。审计模型里根本没有 body 字段，这是「请求体不落库」的机制保证。
+		row := fmt.Sprintf("%+v", l)
+		assert.NotContains(t, row, wrongPasswd, "密码不得进审计")
+		assert.NotContains(t, row, correctPasswd, "密码不得进审计")
+	}
+}
+
+// TestRoutes_限流的登录请求不写审计 — 安全审计 F1
+//
+// AuditLog 在 c.Next() 之后**无条件**写库，若排在 RateLimit 之前，被 429 拒掉的
+// 请求照样 INSERT：未认证请求即可无限写库（实测 10 次请求 → 5×401 + 5×429，
+// 但审计 10 行）。这里断言「第 6 次起不再落库」——顺序换回去即红。
+func TestRoutes_限流的登录请求不写审计(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	attackerIP := probeIP() // 每次运行独立的桶，避免 -count=N 复用满桶
+	before := auditLoginCount(t, db)
+
+	codes := map[int]int{}
+	for i := 0; i < 7; i++ {
+		w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+			"username": "rate-limit-probe", "password": "x",
+		}, attackerIP)
+		codes[w.Code]++
+	}
+	require.Equal(t, 5, codes[http.StatusUnauthorized], "前 5 次应被处理（401）")
+	require.Equal(t, 2, codes[http.StatusTooManyRequests], "第 6、7 次应被限流")
+
+	after := auditLoginCount(t, db)
+	assert.Equal(t, 5, after-before,
+		"只有被处理的 5 次该落库；429 也落库 = 未认证请求可无限写库（审计 F1）")
+}
+
+// auditLoginCount 统计登录路径的审计行数（用整表计数做增量，避免依赖 username）
+func auditLoginCount(t *testing.T, db *gorm.DB) int {
+	t.Helper()
+	var n int64
+	require.NoError(t, db.Model(&models.AuditLog{}).
+		Where("path = ? AND method = ?", "/api/auth/login", http.MethodPost).Count(&n).Error)
+	return int(n)
+}
+
+// TestRoutes_登录审计用户名被净化 — 安全审计 F3
+//
+// 审计行是行式消费的（SIEM / 导出 CSV），请求体里的换行/控制字符能把一行伪造成
+// 多条记录。这里用真实请求走完整链路，断言落库值不含控制字符、且超长值被按 rune 截断。
+func TestRoutes_登录审计用户名被净化(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+
+	injected := "evil\n[OK] LOGIN SUCCESS user=root\x00" + strings.Repeat("A", 300)
+	srcIP := probeIP()
+	w := doJSONAsRawFrom(t, r, http.MethodPost, "/api/auth/login", "", map[string]string{
+		"username": injected, "password": "x",
+	}, srcIP)
+	require.Equal(t, http.StatusUnauthorized, w.Code, "body=%s", w.Body.String())
+
+	var log models.AuditLog
+	require.NoError(t, db.Where("path = ? AND ip = ?", "/api/auth/login", strings.Split(srcIP, ":")[0]).
+		First(&log).Error, "该请求必须留痕（否则本用例空转）")
+
+	assert.NotContains(t, log.Username, "\n", "换行不得入库（可伪造多条记录）")
+	assert.NotContains(t, log.Username, "\x00", "NUL 不得入库")
+	for _, r := range log.Username {
+		require.GreaterOrEqual(t, r, rune(0x20), "不得含控制字符: %q", log.Username)
+	}
+	assert.LessOrEqual(t, len(log.Username), 96, "须在 audit.go 的 100 字节截断之前收敛")
+	assert.True(t, utf8.ValidString(log.Username), "不得切出非法 UTF-8: %q", log.Username)
+	assert.Contains(t, log.Username, "[OK] LOGIN SUCCESS", "可打印内容应保留，只剥控制字符")
 }
 
 // TestRoutes_所有路由都已分类 反向兜底（Risk#7）：枚举注册的**全部**路由，

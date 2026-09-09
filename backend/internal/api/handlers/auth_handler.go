@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
@@ -31,6 +32,31 @@ type ChangePasswordRequest struct {
 // 登录失败锁定阈值
 const maxFailedLoginAttempts = 5
 
+// sanitizeAuditUsername 净化「登录尝试的用户名」再放进审计 context。
+//
+// 审计行是行式消费的（SIEM / 日志导出 / CSV），请求体里的换行或控制字符能把一行
+// 伪造成多条记录（安全审计 F3 实测：username 里带 \n 与 \0 原样入库）。
+// 按**字节**预算截断并留出余量：audit.go 还会按 100 字节硬截，若这里不先压到
+// 100 字节以内，中文/emoji 会在那里被切成非法 UTF-8。
+// 只影响审计展示值，不参与任何鉴权判定。
+func sanitizeAuditUsername(s string) string {
+	const maxBytes = 96 // < audit.go 的 100 字节截断，保证不触发二次截断
+	out := make([]rune, 0, maxBytes/3)
+	n := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		size := utf8.RuneLen(r)
+		if n+size > maxBytes {
+			break
+		}
+		out = append(out, r)
+		n += size
+	}
+	return string(out)
+}
+
 // Login 登录
 func Login(c *gin.Context) {
 	var req LoginRequest
@@ -38,6 +64,11 @@ func Login(c *gin.Context) {
 		apierr.BadRequest(c, "请输入用户名和密码")
 		return
 	}
+
+	// 审计留痕：未认证请求的 AuditLog 只能拿到 IP，这里把**尝试的用户名**放进
+	// context，让爆破/锁定可被追溯（FIX-PLAN-AUTHZ-CLOSURE.md §2 D-E）。
+	// 含不存在的用户名——枚举尝试同样需要可见。密码绝不入 context/审计。
+	c.Set("username", sanitizeAuditUsername(req.Username))
 
 	// 查找用户
 	var user models.User

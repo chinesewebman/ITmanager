@@ -188,7 +188,17 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 		auth := api.Group("/auth")
 		{
 			// v1.4 (ADR-001): login 严限 — 防爆破 5 req/min per IP
-			auth.POST("/login", middleware.RateLimit(middleware.DefaultRateLimitConfig(5)), handlers.Login)
+			// AuditLog：登录失败/锁定此前完全无留痕（既分不清爆破还是忘密码，也看不出谁在
+			// 制造锁定）。handler 会把尝试的用户名放进 context，故审计行带用户名。
+			// 见 docs/FIX-PLAN-AUTHZ-CLOSURE.md §2 D-E。
+			//
+			// 顺序必须是 RateLimit 在前：AuditLog 在 c.Next() 之后**无条件**写库，
+			// 若排在限流之前，被 429 拒掉的请求照样 INSERT —— 未认证请求即可无限写库
+			// （安全审计 F1 实测：10 次请求 → 5×401 + 5×429，但审计 10 行）。
+			auth.POST("/login",
+				middleware.RateLimit(middleware.DefaultRateLimitConfig(5)),
+				middleware.AuditLog(middleware.AuditConfig{DB: database.GetDB()}),
+				handlers.Login)
 			auth.POST("/logout", handlers.Logout)
 			auth.GET("/me", middleware.AuthMiddleware(), handlers.GetCurrentUser)
 			// 注：改密 / 跳过改密均已移入下方 protected 组 —— 挂在 auth 组时没有
@@ -231,12 +241,17 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			protected.POST("/integrations/sync", canManage, integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
 			// v2.2: 三个集成的运行时配置管理（UI Settings 保存按钮 + 测试连通）
+			//
+			// PUT 额外拒绝 API Key：更新时空 token/password 会**保留旧值**，只改 URL ——
+			// 于是 write Key 可以「把出站地址改指攻击者 + 触发 /test」，让平台把已存凭据
+			// 发给攻击者（安全审查实测复现，docs/FIX-PLAN-AUTHZ-CLOSURE.md §1 S-4）。
+			// /test 与 /sync 不拦：堵住 PUT 后它们只能打管理员配置过的地址，是自动化该用的能力。
 			protected.POST("/integrations/zabbix/test", canManage, integrationH.TestZabbix)
-			protected.PUT("/integrations/zabbix", canManage, integrationH.UpdateZabbix)
+			protected.PUT("/integrations/zabbix", middleware.RejectAPIKeyAuth(), canManage, integrationH.UpdateZabbix)
 			protected.POST("/integrations/netbox/test", canManage, integrationH.TestNetBox)
-			protected.PUT("/integrations/netbox", canManage, integrationH.UpdateNetBox)
+			protected.PUT("/integrations/netbox", middleware.RejectAPIKeyAuth(), canManage, integrationH.UpdateNetBox)
 			protected.POST("/integrations/glpi/test", canManage, integrationH.TestGLPI)
-			protected.PUT("/integrations/glpi", canManage, integrationH.UpdateGLPI)
+			protected.PUT("/integrations/glpi", middleware.RejectAPIKeyAuth(), canManage, integrationH.UpdateGLPI)
 
 			// v2.0: 审计日志查询端点
 			// 审计日志含用户名/IP/操作轨迹 → audit 能力（admin/ops_admin/auditor）。
@@ -315,8 +330,12 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 
 			// 通知渠道配置含 webhook token / SMTP 凭据（响应体不脱敏），且 /:id/test
 			// 由服务端主动外连 —— 整组限 manage（docs/FIX-PLAN-AUTHZ.md §3.2 凭据例外）。
+			// 再叠一层 RejectAPIKeyAuth：长期凭据不得读取/改写其它凭据（F-3）。
+			// API Key 的 role 取自关联用户（auth.go:196），admin 名下的 write Key
+			// 原本能直接读到 config 明文（docs/FIX-PLAN-AUTHZ-CLOSURE.md §1 S-3）。
 			channels := protected.Group("/notification-channels")
 			channels.Use(canManage)
+			channels.Use(middleware.RejectAPIKeyAuth())
 			{
 				channels.GET("", channelH.ListChannels)
 				channels.POST("", channelH.CreateChannel)

@@ -180,7 +180,9 @@ export const userApi = {
 
 // ==================== API 密钥（B1-1） ====================
 // P1 修复：Settings.tsx 之前是死表单（"重新生成"/"生成" 按钮零 onClick）
-// 后端已经有 POST/GET/DELETE/PUT /api-keys/* 四个端点，缺的只是前端 client
+// 后端有 POST/GET/DELETE/PUT /auth/api-keys/* 四个端点，缺的只是前端 client。
+// 路径前缀必须是 /auth/api-keys：baseURL 已是 "/api"，写成 "/api-keys" 会请求
+// /api/api-keys → 落到 NoRoute 返回 index.html（FIX-PLAN-AUTHZ-CLOSURE.md §1 S-2a）。
 export interface APIKey {
   id: string
   name: string
@@ -195,11 +197,11 @@ export interface APIKey {
 }
 
 export const apiKeyApi = {
-  list: () => api.get("/api-keys"),
+  list: () => api.get("/auth/api-keys"),
   create: (data: { name: string; permissions?: string[]; expires_at?: string }) =>
-    api.post("/api-keys", data),
-  revoke: (id: string) => api.put(`/api-keys/${id}/revoke`),
-  delete: (id: string) => api.delete(`/api-keys/${id}`),
+    api.post("/auth/api-keys", data),
+  revoke: (id: string) => api.put(`/auth/api-keys/${id}/revoke`),
+  delete: (id: string) => api.delete(`/auth/api-keys/${id}`),
 }
 
 // ==================== 通知渠道 ====================
