@@ -436,6 +436,15 @@ func TestLogin_并发失败_原子自增不会丢失计数(t *testing.T) {
 	db := setupAuthTestDB(t)
 	uid := seedActiveUser(t, db, "raceuser", "correct-pwd")
 
+	// sqlite 的 `file::memory:?cache=shared` 是**表级**共享锁：多连接并发写同一张表会
+	// 直接返回 SQLITE_LOCKED（不是 busy，重试无效），而 handler 对计数更新是 `_ = ...Error`
+	// 静默吞错 → 计数随机少加（CI 上实测 10 并发只 +2，锁定断言随之 nil 解引用 panic）。
+	// 把连接池压到 1 条：语句串行化后不再有锁冲突，但"读-改-写"仍是三条独立语句、
+	// 并发交错窗口依旧存在 —— 足以证伪 in-memory++ 的丢更新（那才是本测试要抓的 bug）。
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+
 	r := gin.New()
 	r.POST("/login", handlers.Login)
 
@@ -455,10 +464,11 @@ func TestLogin_并发失败_原子自增不会丢失计数(t *testing.T) {
 
 	var updated models.User
 	db.First(&updated, "id = ?", uid)
-	// 关键断言：原子自增不能丢数（之前 in-memory++ 实际只 +1）
-	// sqlite 共享 cache 在高并发下会报 "table is locked"（测试环境限制），
-	// 所以断言 >= 5（达到锁定阈值）即可，handler 行为是：能 +1 就 +1，锁了就跳过。
-	assert.GreaterOrEqual(t, updated.FailedLogin, 5, "5 并发失败必须能原子 +5（实际可能因 sqlite 锁丢几个）")
+	// 关键断言：原子自增不能丢数（之前 in-memory++ 实际只 +1）。
+	// 为什么是 >= 5 而不是 == 10：计数到 5 会写 locked_until，之后才读到该行的请求会
+	// 在锁检查处提前返回、不再计数。反过来，计数 < 5 就意味着有更新丢了（只有发生 5 次
+	// 自增才可能置锁），所以 >= 5 是确定的、能证伪 in-memory++ 的下界。
+	assert.GreaterOrEqual(t, updated.FailedLogin, 5, "10 并发失败必须能原子加到阈值 5")
 	assert.NotNil(t, updated.LockedUntil, "达到 5 次阈值必须锁定")
 	assert.True(t, updated.LockedUntil.After(time.Now()), "锁定时间在未来")
 }
