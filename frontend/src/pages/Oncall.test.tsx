@@ -4,13 +4,20 @@
 // W2：当前值班时间此前用无 locale 的 toLocaleString('zh-CN')。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
 const h = vi.hoisted(() => ({
   overrides: {} as Record<string, Record<string, unknown>>,
   refetch: {} as Record<string, ReturnType<typeof vi.fn>>,
+  apiSend: vi.fn(),
+}))
+
+// M4：mock apiSend 以断言提交按钮 loading（防连点）。apiGet 由 useApiQuery mock 短路，不触发。
+vi.mock('../services/api', () => ({
+  apiGet: vi.fn().mockResolvedValue([]),
+  apiSend: (...args: unknown[]) => h.apiSend(...args),
 }))
 
 // 时间串不带时区偏移 → dayjs 按本地解析，断言与 CI 时区无关
@@ -61,6 +68,7 @@ function openTab(label: string) {
 beforeEach(() => {
   h.overrides = {}
   for (const k of ['current', 'schedules', 'policies']) h.refetch[k]?.mockClear()
+  h.apiSend.mockReset()
 })
 
 describe('Oncall', () => {
@@ -144,5 +152,54 @@ describe('Oncall', () => {
     expect(screen.getByText('critical')).toBeInTheDocument()
     expect(screen.getByText('1 级')).toBeInTheDocument()
     expect(screen.getByText('L1 user/alice 5m email')).toBeInTheDocument()
+  })
+
+  // M4：提交按钮 loading（范本 AssetFormModal confirmLoading）。此前两个 tab 的 onOk={onSubmit}
+  // 均无 loading，接口慢时连点「保存」会重复创建值班组/升级策略。
+  it('M4：值班组提交中保存按钮 loading 且防连点（apiSend 只调一次）', async () => {
+    let resolveSend!: (v: unknown) => void
+    h.apiSend.mockImplementationOnce(() => new Promise((resolve) => { resolveSend = resolve }))
+    renderOncall()
+    openTab('值班组')
+
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'team-a' } })
+
+    const saveBtn = screen.getByRole('button', { name: /保\s*存/ })
+    fireEvent.click(saveBtn)
+
+    // 请求 pending → 按钮进入 loading
+    await waitFor(() => {
+      expect(saveBtn).toHaveClass('ant-btn-loading')
+    })
+
+    // loading 期间连点不应触发第二次提交
+    fireEvent.click(saveBtn)
+    fireEvent.click(saveBtn)
+    expect(h.apiSend).toHaveBeenCalledTimes(1)
+
+    resolveSend(undefined)
+  })
+
+  it('M4：升级策略提交中保存按钮 loading 且防连点', async () => {
+    let resolveSend!: (v: unknown) => void
+    h.apiSend.mockImplementationOnce(() => new Promise((resolve) => { resolveSend = resolve }))
+    renderOncall()
+    openTab('升级策略')
+
+    fireEvent.click(screen.getByRole('button', { name: /新\s*建/ }))
+    fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'policy-a' } })
+
+    const saveBtn = screen.getByRole('button', { name: /保\s*存/ })
+    fireEvent.click(saveBtn)
+
+    await waitFor(() => {
+      expect(saveBtn).toHaveClass('ant-btn-loading')
+    })
+
+    fireEvent.click(saveBtn)
+    expect(h.apiSend).toHaveBeenCalledTimes(1)
+
+    resolveSend(undefined)
   })
 })

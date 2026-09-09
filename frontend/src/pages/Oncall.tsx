@@ -71,6 +71,8 @@ function CurrentTab() {
 function SchedulesTab() {
   const [form] = Form.useForm<OncallSchedule>()
   const [modalOpen, setModalOpen] = useState(false)
+  // M4：提交按钮 loading，防连点重复创建（范本 AssetFormModal confirmLoading）
+  const [submitting, setSubmitting] = useState(false)
   const { data, isLoading, isError, error, refetch } = useApiQuery<OncallSchedule[]>(
     ['oncall', 'schedules'] as const,
     async () => {
@@ -81,6 +83,7 @@ function SchedulesTab() {
   const list = data ?? []
 
   async function onSubmit() {
+    setSubmitting(true)
     try {
       const v = await form.validateFields()
       await apiSend('POST', '/oncall/schedules', v)
@@ -88,6 +91,7 @@ function SchedulesTab() {
       setModalOpen(false)
       refetch()
     } catch (e: any) { if (!e?.errorFields && !e?.isAxiosError) message.error(e?.message ?? '失败') }
+    finally { setSubmitting(false) }
   }
 
   async function onDelete(id: string) {
@@ -110,7 +114,7 @@ function SchedulesTab() {
             { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
           ]} />
       )}
-      <Modal title="新建值班组" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} okText="保存" cancelText="取消">
+      <Modal title="新建值班组" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
           <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item label="时区" name="timezone" initialValue="Asia/Shanghai"><Input /></Form.Item>
@@ -125,6 +129,8 @@ function SchedulesTab() {
 function PoliciesTab() {
   const [form] = Form.useForm<EscalationPolicy>()
   const [modalOpen, setModalOpen] = useState(false)
+  // M4：提交按钮 loading，防连点重复创建（范本 AssetFormModal confirmLoading）
+  const [submitting, setSubmitting] = useState(false)
   const { data, isLoading, isError, error, refetch } = useApiQuery<EscalationPolicy[]>(
     ['oncall', 'policies'] as const,
     async () => {
@@ -135,6 +141,7 @@ function PoliciesTab() {
   const list = data ?? []
 
   async function onSubmit() {
+    setSubmitting(true)
     try {
       // levelsJson 是 Form.Item 字段, 接口层 EscalationPolicy 不含, 这里 cast
       const v = await form.validateFields() as EscalationPolicy & { levelsJson?: string }
@@ -145,6 +152,7 @@ function PoliciesTab() {
       setModalOpen(false)
       refetch()
     } catch (e: any) { if (!e?.errorFields && !e?.isAxiosError) message.error(e?.message ?? '失败') }
+    finally { setSubmitting(false) }
   }
 
   async function onDelete(id: string) {
@@ -173,7 +181,7 @@ function PoliciesTab() {
             { title: '操作', key: 'actions', render: (_, r) => <Popconfirm title="删除？" onConfirm={() => r.id && onDelete(r.id)}><Button danger size="small" icon={<DeleteOutlined />}>删除</Button></Popconfirm> },
           ]} />
       )}
-      <Modal title="新建升级策略" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} okText="保存" cancelText="取消">
+      <Modal title="新建升级策略" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={onSubmit} confirmLoading={submitting} okText="保存" cancelText="取消">
         <Form form={form} layout="vertical">
           <Form.Item label="名称" name="name" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item label="启用" name="enabled" valuePropName="checked" initialValue={true}><Switch /></Form.Item>
