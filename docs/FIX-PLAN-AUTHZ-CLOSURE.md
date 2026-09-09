@@ -273,7 +273,8 @@ protected.PUT("/integrations/glpi",   middleware.RejectAPIKeyAuth(), canManage, 
 
 ### 9.3 后续发现（不在本轮范围）
 
-- **G-6**：Web 界面 TLS 最低版本（PCI DSS 4.2.1）在仓库内**无强制、无验证**——见 `TODO.md`。与本文档同属「凭据传输面」，但改动落在部署层，单独立项。
+- **G-6**：Web 界面 TLS 最低版本（PCI DSS 4.2.1）在仓库内**无强制、无验证**——**已于同日单独收口**（见 `TODO.md` G-6 结案）：`08-部署运维.md` §8.2.2 定义终止点与最低版本，`scripts/check-tls.sh` 主动降级断言，`frontend/nginx-tls.conf.example` 提供 TLS 1.2/1.3 + HSTS + 80→443 模板。连带发现 **G-9**（compose 引用的 Dockerfile 不存在）。
+
 - **G-7**：gin 未配受信代理（安全审计 F1①）——默认信任 `0.0.0.0/0`，`ClientIP()` 取 XFF 最左值，登录限流可被逐请求换 XFF 绕过、审计 IP 可伪造。修复需先定部署拓扑（compose 里 nginx 与后端是不同容器，故不能简单 `SetTrustedProxies(nil)`，否则全站共用限流桶）。见 `TODO.md`。
 - **G-8**：`RejectAPIKeyAuth` 在未挂 `AuthMiddleware` 的路由上静默放行（安全审计 F6）——当前无实际暴露路径，属潜在陷阱。见 `TODO.md`。
 
