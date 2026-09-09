@@ -80,6 +80,13 @@ describe('Oncall', () => {
     expect(screen.getByText('升级策略')).toBeInTheDocument()
   })
 
+  // M1：标题体系统一——Oncall 原 Tabs 页无可见标题（只 useDocumentTitle 改浏览器标题），
+  // 用户进来不知道这是值班管理页。补 PageHeader title（h4）。
+  it('M1：页面标题统一到 PageHeader（h4「值班管理」）', () => {
+    renderOncall()
+    expect(screen.getByRole('heading', { level: 4, name: '值班管理' })).toBeInTheDocument()
+  })
+
   it('当前值班 tab 显示值班人 + W2 时间格式化', async () => {
     renderOncall()
     expect(await screen.findByText('当前在班')).toBeInTheDocument()

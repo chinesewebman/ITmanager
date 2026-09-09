@@ -8,6 +8,7 @@ import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
 import { ErrorState } from '../components/ErrorState'
 import { EmptyState } from '../components/EmptyState'
+import { PageHeader } from '../components/PageHeader'
 import { formatDateTime } from '../utils/time'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -26,13 +27,17 @@ interface EscalationPolicy {
 export function Oncall() {
   useDocumentTitle('值班管理')
   return (
-    <Tabs
-      items={[
-        { key: 'current', label: '当前值班', children: <CurrentTab /> },
-        { key: 'schedules', label: '值班组', children: <SchedulesTab /> },
-        { key: 'policies', label: '升级策略', children: <PoliciesTab /> },
-      ]}
-    />
+    <div>
+      {/* M1：标题体系统一——原 Tabs 页无可见标题，用户进来不知道这是值班管理页 */}
+      <PageHeader title="值班管理" />
+      <Tabs
+        items={[
+          { key: 'current', label: '当前值班', children: <CurrentTab /> },
+          { key: 'schedules', label: '值班组', children: <SchedulesTab /> },
+          { key: 'policies', label: '升级策略', children: <PoliciesTab /> },
+        ]}
+      />
+    </div>
   )
 }
 
