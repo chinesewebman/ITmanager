@@ -4,7 +4,7 @@
 // W2：时间列此前用无 locale 的 new Date(v).toLocaleString()。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { message } from 'antd'
 
@@ -101,6 +101,32 @@ describe('MetricSnapshot', () => {
     runQuery()
     expect(screen.getByText('2026-02-14 10:00:00')).toBeInTheDocument()
     expect(screen.getByText('2026-02-14 10:01:00')).toBeInTheDocument()
+  })
+
+  // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
+  // MetricSnapshot 给时间/Asset ID/Key/Value 加前端本地排序；这里验证核心的 Value 数值排序。
+  it('M2：Value 列可排序（点击表头后按数值升序重排）', async () => {
+    h.override = {
+      data: [
+        { id: '1', asset_id: 'asset-1', key: 'cpu.user', value: 60.3, ts: '2026-02-14T10:00:00' },
+        { id: '2', asset_id: 'asset-1', key: 'cpu.user', value: 45.2, ts: '2026-02-14T10:01:00' },
+      ],
+    }
+    const { container } = renderPage()
+    runQuery()
+    const rowTexts = () =>
+      Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
+        (r) => r.textContent ?? '',
+      )
+
+    // 初始顺序 = dataSource 顺序：value 60.30 在前
+    expect(rowTexts()[0]).toContain('60.30')
+
+    // 点「Value」表头升序 → 45.20 < 60.30，45.20 排前
+    fireEvent.click(screen.getAllByText('Value')[0])
+    await waitFor(() => {
+      expect(rowTexts()[0]).toContain('45.20')
+    })
   })
 
   it('W1：查询失败时显示错误态 + 重试，不回落 MOCK_LATEST', () => {

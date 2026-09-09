@@ -133,12 +133,18 @@ export function MetricSnapshotList() {
               ),
             }}
             columns={[
+              // M2：加前端本地排序。时间按 Date 解析（RFC3339 字符串字典序会因时区偏移错序）；
+              // Asset ID/Key 字符串 localeCompare；Value 数值。
               { title: '时间', dataIndex: 'ts', key: 'ts',
+                sorter: (a: MetricSnapshot, b: MetricSnapshot) => new Date(a.ts).getTime() - new Date(b.ts).getTime(),
                 // W2：原先用无 locale 的 new Date(v).toLocaleString()，与其它页口径不一致
                 render: (v: string) => formatDateTime(v) },
-              { title: 'Asset ID', dataIndex: 'asset_id', key: 'asset_id', width: 280 },
-              { title: 'Key', dataIndex: 'key', key: 'key', width: 140 },
+              { title: 'Asset ID', dataIndex: 'asset_id', key: 'asset_id', width: 280,
+                sorter: (a: MetricSnapshot, b: MetricSnapshot) => a.asset_id.localeCompare(b.asset_id) },
+              { title: 'Key', dataIndex: 'key', key: 'key', width: 140,
+                sorter: (a: MetricSnapshot, b: MetricSnapshot) => a.key.localeCompare(b.key) },
               { title: 'Value', dataIndex: 'value', key: 'value', width: 120,
+                sorter: (a: MetricSnapshot, b: MetricSnapshot) => a.value - b.value,
                 render: v => <Tag color={v > 80 ? 'red' : v > 60 ? 'orange' : 'green'}>{v.toFixed(2)}</Tag> },
             ]}
           />
