@@ -4,7 +4,7 @@
 // 3 篇虚构 SOP，故障现场运维会照着不存在的手册操作。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
@@ -170,5 +170,30 @@ describe('Runbook', () => {
     expect(h.apiSend).toHaveBeenCalledTimes(1)
 
     resolveSend(undefined)
+  })
+
+  // M5：危险操作确认统一——title 带对象名 + okText="删除" + okButtonProps danger
+  // （范本 AssetTable Popconfirm 四件套）。此前 title 只有「确定删除?」不带对象名，无 danger。
+  it('M5：删除确认框带对象名 + danger 确认按钮', async () => {
+    h.apiSend.mockResolvedValue(undefined)
+    renderList()
+
+    // 第一行（主库复制延迟排查）的删除按钮
+    fireEvent.click(screen.getAllByRole('button', { name: /删\s*除/ })[0])
+
+    // 确认框 title 带对象名
+    const title = await screen.findByText(/确认删除 Runbook「主库复制延迟排查」/)
+    expect(title).toBeInTheDocument()
+
+    // 确认按钮 danger 类型（antd v5 用 ant-btn-dangerous class）
+    const popover = title.closest('.ant-popover') as HTMLElement
+    const okBtn = within(popover).getByRole('button', { name: /删\s*除/ })
+    expect(okBtn).toHaveClass('ant-btn-dangerous')
+
+    // 确认后调用 DELETE
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(h.apiSend).toHaveBeenCalledWith('DELETE', '/runbooks/r1')
+    })
   })
 })

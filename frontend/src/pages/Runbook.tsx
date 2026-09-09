@@ -171,7 +171,13 @@ function RunbookList() {
               <Space>
                 <Button size="small" onClick={() => setViewing(rb)}>查看</Button>
                 <Button size="small" onClick={() => openEdit(rb)}>编辑</Button>
-                <Popconfirm title="确定删除?" onConfirm={() => rb.id && onDelete(rb.id)}>
+                <Popconfirm
+                  title={`确认删除 Runbook「${rb.title}」？`}
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => rb.id && onDelete(rb.id)}
+                >
                   <Button size="small" danger>删除</Button>
                 </Popconfirm>
               </Space>
