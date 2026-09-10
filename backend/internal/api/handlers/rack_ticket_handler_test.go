@@ -122,7 +122,7 @@ type mockTicketService struct {
 	listFunc      func(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error)
 	getFunc       func(ctx context.Context, id string) (*models.Ticket, error)
 	createFunc    func(ctx context.Context, t *models.Ticket) error
-	updateFunc    func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error)
+	updateFunc    func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error)
 	fromAlertFunc func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error)
 }
 
@@ -135,8 +135,8 @@ func (m *mockTicketService) Get(ctx context.Context, id string) (*models.Ticket,
 func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket) error {
 	return m.createFunc(ctx, t)
 }
-func (m *mockTicketService) Update(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error) {
-	return m.updateFunc(ctx, id, u)
+func (m *mockTicketService) Update(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error) {
+	return m.updateFunc(ctx, id, u, a)
 }
 func (m *mockTicketService) CreateFromAlert(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
 	return m.fromAlertFunc(ctx, alertID, userID)
@@ -297,7 +297,7 @@ func TestTicketCreate_枚举越界_返回400带原因(t *testing.T) {
 func TestTicketUpdate_关闭工单_updates透传给service(t *testing.T) {
 	var capturedUpdates map[string]interface{}
 	svc := &mockTicketService{
-		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error) {
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error) {
 			capturedUpdates = u
 			return &models.Ticket{Title: "测试", Status: "closed"}, nil
 		},
@@ -322,7 +322,7 @@ func TestTicketUpdate_关闭工单_updates透传给service(t *testing.T) {
 // 运维看到 500 只会重试同样的请求。
 func TestTicketUpdate_不可变字段返回400(t *testing.T) {
 	svc := &mockTicketService{
-		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error) {
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error) {
 			return nil, service.ErrInvalidInput
 		},
 	}

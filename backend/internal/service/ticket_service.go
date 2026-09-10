@@ -25,12 +25,25 @@ type TicketFilter struct {
 	CursorID uuid.UUID
 }
 
+// Actor 一次写操作的经手人 —— 进 ticket_history 的 actor_id / actor_name 快照。
+//
+// 两个字段而不是两个裸 string：需要 **id（稳定）+ name（可读快照）** 两样东西，13 个调用点
+// 乘 2 个位置参数既难读又容易传反。ID 用指针：内部调用（seed / GLPI 同步 / 定时任务）
+// 没有 HTTP 上下文，用零值 uuid.UUID 表示「无」会和真实零值混淆。
+//
+// Name 是**快照**不是引用：用户改名或删号后，历史里仍要看得见当时是谁经的手
+// （同 audit_logs.username 的取向）。
+type Actor struct {
+	ID   *uuid.UUID
+	Name string
+}
+
 // TicketService 工单业务接口
 type TicketService interface {
 	List(ctx context.Context, f TicketFilter) (items []models.Ticket, total int64, err error)
 	Get(ctx context.Context, id string) (*models.Ticket, error)
 	Create(ctx context.Context, t *models.Ticket) error
-	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error)
+	Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error)
 	// CreateFromAlert 从告警派生一张工单并把 alerts.ticket_id 指回去（TODO D-3）。
 	// created=false 表示该告警已有关联工单，直接返回既有那张（幂等）。
 	CreateFromAlert(ctx context.Context, alertID, userID string) (ticket *models.Ticket, created bool, err error)
@@ -394,7 +407,7 @@ func validateTicketEnumValues(updates map[string]interface{}) error {
 	return nil
 }
 
-func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {
+func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error) {
 	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，统一为 1 次 First
 	var t models.Ticket
 	if err := s.db.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {

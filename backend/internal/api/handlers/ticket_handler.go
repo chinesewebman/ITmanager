@@ -104,10 +104,9 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 // （TODO D-3，契约见 docs/FIX-PLAN-ALERT-TICKET.md §3）。
 // 该告警已有关联工单时幂等返回既有那张（200 + created=false），新建返回 201 + created=true。
 func (h *TicketHandler) CreateTicketFromAlert(c *gin.Context) {
-	userID := c.GetString("username") // JWT 中间件写入
-	if userID == "" {
-		userID = "unknown"
-	}
+	// 经手人解析收在 actorFromContext 一处：这里只用 Name（旧签名收字符串），
+	// 与 UpdateTicket 走同一个 helper，避免两处各自 parse 而分叉。
+	userID := actorFromContext(c).Name
 	ticket, created, err := h.svc.CreateFromAlert(c.Request.Context(), c.Param("id"), userID)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
@@ -136,7 +135,7 @@ func (h *TicketHandler) UpdateTicket(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	t, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
+	t, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates, actorFromContext(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "工单不存在")

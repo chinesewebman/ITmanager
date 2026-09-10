@@ -17,6 +17,10 @@ import (
 	"network-monitor-platform/internal/models"
 )
 
+// testActor 单测里的经手人。这些用例关心的是工单字段本身，归属用固定值即可 ——
+// 「ctx 里的用户被正确解析成 Actor」由 handler 侧用例守（actor_test.go）。
+func testActor() Actor { return Actor{Name: "tester"} }
+
 // ==================== Ticket Service 测试 ====================
 
 func TestTicketService_Get_存在返回(t *testing.T) {
@@ -123,7 +127,7 @@ func TestTicketService_Update_空updates返当前(t *testing.T) {
 		WithArgs(id, 1).
 		WillReturnRows(rows)
 
-	got, err := svc.Update(ctx, id, map[string]interface{}{})
+	got, err := svc.Update(ctx, id, map[string]interface{}{}, testActor())
 	require.NoError(t, err)
 	assert.Equal(t, "unchanged", got.Title)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -198,7 +202,7 @@ func TestTicketService_Update_禁改列被拒(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, svc, id := seed(t)
-			_, err := svc.Update(context.Background(), id.String(), tc.updates)
+			_, err := svc.Update(context.Background(), id.String(), tc.updates, testActor())
 			require.ErrorIs(t, err, ErrInvalidInput)
 
 			var after models.Ticket
@@ -213,7 +217,7 @@ func TestTicketService_Update_禁改列被拒(t *testing.T) {
 		db, svc, id := seed(t)
 		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
 			"Title": "新标题", "Status": "closed",
-		})
+		}, testActor())
 		require.NoError(t, err)
 
 		var after models.Ticket
@@ -319,7 +323,7 @@ func TestTicketService_Update_枚举列取值越界被拒(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, svc, id := seed(t)
-			_, err := svc.Update(context.Background(), id.String(), tc.updates)
+			_, err := svc.Update(context.Background(), id.String(), tc.updates, testActor())
 			require.ErrorIs(t, err, ErrInvalidInput)
 
 			var after models.Ticket
@@ -333,7 +337,7 @@ func TestTicketService_Update_枚举列取值越界被拒(t *testing.T) {
 		db, svc, id := seed(t)
 		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
 			"Priority": "high", "Status": "closed",
-		})
+		}, testActor())
 		require.NoError(t, err)
 
 		var after models.Ticket
@@ -526,7 +530,7 @@ func TestTicketService_Update_成功_非空updates(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	got, err := svc.Update(ctx, id, map[string]interface{}{"title": "新标题"})
+	got, err := svc.Update(ctx, id, map[string]interface{}{"title": "新标题"}, testActor())
 	require.NoError(t, err)
 	assert.Equal(t, "新标题", got.Title, "gorm Updates 后会刷到 struct")
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -557,7 +561,7 @@ func TestTicketService_Update_关闭工单_写closed_at(t *testing.T) {
 			AddRow(id, "工单", "closed", time.Now()))
 
 	updates := map[string]interface{}{"status": "closed"}
-	got, err := svc.Update(ctx, id, updates)
+	got, err := svc.Update(ctx, id, updates, testActor())
 	require.NoError(t, err)
 	// 返回值必须带上刚写进去的关闭时间：注入的是 clause.Expr，gorm 不会回写 struct，
 	// 少了 Update 末尾那次重读，这里就是 nil（响应体与库不一致）。
@@ -579,7 +583,7 @@ func TestTicketService_Update_不存在返回ErrNotFound(t *testing.T) {
 		WithArgs("nonexistent", 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 
-	got, err := svc.Update(ctx, "nonexistent", map[string]interface{}{"title": "x"})
+	got, err := svc.Update(ctx, "nonexistent", map[string]interface{}{"title": "x"}, testActor())
 	assert.Nil(t, got)
 	assert.ErrorIs(t, err, ErrNotFound)
 }
@@ -602,7 +606,7 @@ func TestTicketService_Update_DB错误_透传(t *testing.T) {
 		WillReturnError(dbErr)
 	mock.ExpectRollback()
 
-	_, err := svc.Update(ctx, id, map[string]interface{}{"title": "x"})
+	_, err := svc.Update(ctx, id, map[string]interface{}{"title": "x"}, testActor())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr)
 }
@@ -714,7 +718,7 @@ func TestTicketService_Update_关闭时间随状态跃迁(t *testing.T) {
 
 	t.Run("重开工单_清空closed_at", func(t *testing.T) {
 		db, svc, id := seed(t, "closed", &t0)
-		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "open"})
+		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "open"}, testActor())
 		require.NoError(t, err)
 
 		after := load(t, db, id)
@@ -737,7 +741,7 @@ func TestTicketService_Update_关闭时间随状态跃迁(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				db, svc, id := seed(t, "closed", &t0)
-				_, err := svc.Update(context.Background(), id.String(), tc.updates)
+				_, err := svc.Update(context.Background(), id.String(), tc.updates, testActor())
 				require.NoError(t, err)
 
 				after := load(t, db, id)
@@ -752,7 +756,7 @@ func TestTicketService_Update_关闭时间随状态跃迁(t *testing.T) {
 		db, svc, id := seed(t, "open", nil)
 		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
 			"status": "closed", "closed_at": t1,
-		})
+		}, testActor())
 		require.NoError(t, err)
 
 		after := load(t, db, id)
@@ -763,7 +767,7 @@ func TestTicketService_Update_关闭时间随状态跃迁(t *testing.T) {
 
 	t.Run("正控_真正关到closed仍写now", func(t *testing.T) {
 		db, svc, id := seed(t, "in_progress", nil)
-		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "closed"})
+		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "closed"}, testActor())
 		require.NoError(t, err)
 
 		after := load(t, db, id)
