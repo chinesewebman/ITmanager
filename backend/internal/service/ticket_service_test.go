@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"network-monitor-platform/internal/models"
 )
@@ -549,12 +550,23 @@ func TestTicketService_Update_关闭工单_写closed_at(t *testing.T) {
 	mock.ExpectExec(`UPDATE "tickets"`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
+	// 注入的是 clause.Expr, gorm 不回写 struct → Update 末尾要重读一次拿真值
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
+		WithArgs(id, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "title", "status", "closed_at"}).
+			AddRow(id, "工单", "closed", time.Now()))
 
 	updates := map[string]interface{}{"status": "closed"}
-	_, err := svc.Update(ctx, id, updates)
+	got, err := svc.Update(ctx, id, updates)
 	require.NoError(t, err)
+	// 返回值必须带上刚写进去的关闭时间：注入的是 clause.Expr，gorm 不会回写 struct，
+	// 少了 Update 末尾那次重读，这里就是 nil（响应体与库不一致）。
+	require.NotNil(t, got.ClosedAt, "返回给 handler 的 closed_at 不得是空")
 	require.Contains(t, updates, "closed_at", "Update 内部应注入 closed_at")
 	assert.NotNil(t, updates["closed_at"], "closed_at 必填")
+	// 判据必须是 SQL 表达式，不能是 Go 侧读到的 t.Status 快照 —— 快照在并发跃迁下会判错
+	// （见 Update 里 M24 注释）。形态在这里钉住，防回退；黑盒用例分辨不出这一点。
+	assert.IsType(t, clause.Expr{}, updates["closed_at"], "跃迁判据要下推到 SQL 表达式")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -668,4 +680,142 @@ func TestTicketService_List_PageSize_默认20_最大500(t *testing.T) {
 	_, _, err := svc.List(ctx, TicketFilter{})
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M24：closed_at 与 status 的一致性 ====================
+
+// 不变式：`status == "closed"` ⟺ `closed_at IS NOT NULL`。这条链路上它有两个入口 ——
+// Update 的**跃迁**与 Create 的**出生即关闭**，所以两侧各有用例。
+//
+// 为什么值得钉死：消费者是资产时间线与 SLA 统计，两边都只看时间戳、不看 status。
+// diagnostic_service 只认 `closed_at IS NOT NULL` 就发「工单关闭」事件 —— 残留的关闭时间
+// = 一条永久假事件；dashboard 的 SLA 口径是 `status='closed' AND closed_at >= ?` ——
+// 缺失的关闭时间 = 一张已关闭却在统计里不存在的工单。
+func TestTicketService_Update_关闭时间随状态跃迁(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+
+	seed := func(t *testing.T, status string, closedAt *time.Time) (*gorm.DB, TicketService, uuid.UUID) {
+		t.Helper()
+		db := newTicketSQLiteDB(t)
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Ticket{ //nolint:exhaustruct
+			ID: id, TicketNumber: "TICKET-20260101-A", Title: "原标题", Status: status,
+			ClosedAt: closedAt, CreatedAt: t0, UpdatedAt: t0,
+		}).Error)
+		return db, NewTicketService(db), id
+	}
+	load := func(t *testing.T, db *gorm.DB, id uuid.UUID) models.Ticket {
+		t.Helper()
+		var after models.Ticket
+		require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+		return after
+	}
+
+	t.Run("重开工单_清空closed_at", func(t *testing.T) {
+		db, svc, id := seed(t, "closed", &t0)
+		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "open"})
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		assert.Equal(t, "open", after.Status)
+		assert.Nil(t, after.ClosedAt,
+			"重开后 closed_at 必须清空，否则资产时间线上永久挂着一条「工单关闭」")
+		// 返回值同样要反映清空：注入的是 clause.Expr，gorm 不回写 struct，
+		// 少了 Update 末尾的重读，响应体里会是一个库中已不存在的旧关闭时间。
+		require.NotNil(t, got)
+		assert.Nil(t, got.ClosedAt, "响应体里的 closed_at 不得落后于库")
+	})
+
+	t.Run("已关闭工单再PATCH_不重置关闭时间", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			updates map[string]interface{}
+		}{
+			{"重复置closed", map[string]interface{}{"status": "closed", "description": "改个描述"}},
+			{"只改其它列", map[string]interface{}{"description": "改个描述"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				db, svc, id := seed(t, "closed", &t0)
+				_, err := svc.Update(context.Background(), id.String(), tc.updates)
+				require.NoError(t, err)
+
+				after := load(t, db, id)
+				require.NotNil(t, after.ClosedAt)
+				assert.WithinDuration(t, t0, *after.ClosedAt, time.Second,
+					"一次无关编辑不得把 SLA 的关闭耗时重置成 now")
+			})
+		}
+	})
+
+	t.Run("关闭时显式给closed_at_尊重调用方", func(t *testing.T) {
+		db, svc, id := seed(t, "open", nil)
+		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
+			"status": "closed", "closed_at": t1,
+		})
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ClosedAt)
+		assert.WithinDuration(t, t1, *after.ClosedAt, time.Second,
+			"对接回灌的原始关闭时间不得被 now 覆盖")
+	})
+
+	t.Run("正控_真正关到closed仍写now", func(t *testing.T) {
+		db, svc, id := seed(t, "in_progress", nil)
+		got, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"status": "closed"})
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ClosedAt, "进入 closed 必须记关闭时间")
+		assert.WithinDuration(t, time.Now(), *after.ClosedAt, time.Minute)
+		// 响应体必须带上刚写的这个时间（而不是 First 读到的 nil）
+		require.NotNil(t, got)
+		require.NotNil(t, got.ClosedAt, "响应体里的 closed_at 不得为空")
+		assert.WithinDuration(t, *after.ClosedAt, *got.ClosedAt, time.Second,
+			"响应体里的 closed_at 必须与库中一致")
+	})
+}
+
+func TestTicketService_Create_建单即关闭_写closed_at(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  string
+		wantSet bool
+	}{
+		{"建单即已关闭", "closed", true},
+		{"缺省open不写", "", false},
+		{"中间态不写", "in_progress", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTicketSQLiteDB(t)
+			svc := NewTicketService(db)
+
+			tk := &models.Ticket{Title: "补录工单", Status: tc.status} //nolint:exhaustruct
+			require.NoError(t, svc.Create(context.Background(), tk))
+
+			var got models.Ticket
+			require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+			if tc.wantSet {
+				assert.NotNil(t, got.ClosedAt,
+					"建单即关闭必须落下 closed_at，否则 SLA 统计与资产时间线都看不见它")
+			} else {
+				assert.Nil(t, got.ClosedAt)
+			}
+		})
+	}
+
+	t.Run("显式给closed_at_不覆盖", func(t *testing.T) {
+		db := newTicketSQLiteDB(t)
+		svc := NewTicketService(db)
+		t1 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+
+		tk := &models.Ticket{Title: "回灌工单", Status: "closed", ClosedAt: &t1} //nolint:exhaustruct
+		require.NoError(t, svc.Create(context.Background(), tk))
+
+		var got models.Ticket
+		require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+		require.NotNil(t, got.ClosedAt)
+		assert.WithinDuration(t, t1, *got.ClosedAt, time.Second)
+	})
 }

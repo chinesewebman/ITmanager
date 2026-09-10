@@ -434,6 +434,63 @@
 两支不对称的守卫是典型的漏写；把它写成「先取第一张、再写一张」（不循环）可以让这种不对称
 无从发生。已由 `TestAssetService_Restore_多网卡时只写回第一张` 钉住。
 
+### T-46. gorm `Updates(map)` 里的 `clause.Expr` **不回写 struct 字段** —— 响应体与库静默不一致
+**状态**: ACTIVE | **类别**: 逻辑 / ORM 语义
+**现象**: 2026-09-11（M24 轮，工单 `closed_at`）。把判据下推到 SQL 表达式
+（`updates["closed_at"] = gorm.Expr("CASE WHEN ? = 'closed' THEN COALESCE(?, closed_at, ?) ELSE NULL END", …)`）
+之后，`Updates(updates)` 成功执行、**库里值完全正确**，但 `return &t` 里的 `t.ClosedAt` 还是
+`First` 读到的旧值 —— 刚关闭的工单 API 回 `closed_at: null`，重开的工单回**旧**的关闭时间。
+全程没有任何报错。
+
+**根因**: `gorm.io/gorm@v1.30.0/schema/field.go:582` 的 `fallbackSetter`（`Updates(map)` 用它把
+map 的值回写进 struct 字段）末支是：
+
+```go
+} else if _, ok := v.(clause.Expr); !ok {
+    return fmt.Errorf("failed to set value %#v to field %s", v, field.Name)
+}
+```
+
+注意这个写法：**`v` 真的是 `clause.Expr` 时该条件不成立** → if 链走完 → 落到末尾 `return`（`err`
+仍是 nil），**既不设值也不报错**，字段静默保持原样。那个 `fmt.Errorf` 是留给别的、无法赋值的类型的
+（把 Expr 排除掉，正是为了不误报）。**同一个 map 里其它"普通标量值"的键都会正常回写** ——
+这就是"平时没问题"的原因，也是它难被发现的原因：一次 `Updates` 里只有表达式那一列不同步。
+
+**为什么危险**: 危险的不是这条 UPDATE，而是**同一个 handler 里返回值与写库值来自两个真相源**。
+黑盒测试也照不出来 —— 单测若只断言「库里的值对」就全绿，只有断言**返回值**才会红（本轮补的
+`require.NotNil(t, got.ClosedAt, "返回给 handler 的 closed_at 不得是空")` 正是为此）。
+它是「把判据下推到 SQL 以消除读-改-写竞态」这个**正确修法的伴生代价**：越是用表达式换掉 Go 侧判断，
+越容易踩。
+
+**检测线索**: 任何 `Model(&x).Updates(map…)` 跟着 `return &x` 的地方，只要 map 里出现 `gorm.Expr`
+（或 `clause.Assignment` 之类"不是标量"的值），就必须复核返回值从哪来。
+`grep -rn 'gorm\.Expr(' --include='*.go' internal/` 逐处看宿主变量有没有被当返回值用。
+
+**解法**: 写完**重读**一次拿真值，并注意用**新 struct 实例**接：
+
+```go
+if injectedClosedAt {
+    var fresh models.Ticket
+    if err := s.db.WithContext(ctx).First(&fresh, "id = ?", t.ID).Error; err != nil { return nil, err }
+    t = fresh
+}
+```
+
+**不要**写成 `First(&t, "id = ?", t.ID)` —— 两支都会踩（实测，非推断）：① gorm 见 dest 已带主键
+会**追加**一条主键条件（SQL 变 `WHERE id = $1 AND "tickets"."id" = $2 ORDER BY "tickets"."id" LIMIT $3`，
+sqlmock 报 `expected 2, but got 3 arguments`）；② 填不回这个已装满旧值的 struct，用例读到**上一轮的
+旧时间**而不是 nil。第 ① 支本仓有独立先例 `asset_service.go:338`（`Restore` 末尾用新 struct 实例重读，
+注释写的是「避免事务 `Model.Updates` 把 `asset.ID` 写回后再 `First` 触发重复 bind」）；第 ② 支是
+M24 新踩到的。
+
+**另一面（同轮，成对记）**: 把判据放进 SQL 表达式而不是 Go 里 `if t.Status == …`，是为了消除
+**读-改-写竞态** —— `t` 是函数开头 `First` 读到的**快照**，两个并发 PUT（一个重开、一个关闭）都卡在
+读之后、写之前时会落成 `status='closed'` 且 `closed_at IS NULL` 的自相矛盾行（旧的盲目写法反而
+自洽）。代价就是上面的返回值问题，收益是判据与写入在**同一条 UPDATE** 里原子求值。
+**注意：行为等价的 Go 快照实现在黑盒用例下全绿**（行为确实等价，差别只在并发窗口），要守住这个
+设计选择只能靠**白盒形态断言**：`assert.IsType(t, clause.Expr{}, updates["closed_at"])` ——
+本轮变异实验证实，退回 Go 快照只红这一条。
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -500,6 +557,7 @@
 | — (M19 轮) | T-43 | ACTIVE |
 | — (M21 轮) | T-44 | ACTIVE |
 | — (M23 轮) | T-45 | ACTIVE |
+| — (M24 轮) | T-46 | ACTIVE |
 
 ---
 

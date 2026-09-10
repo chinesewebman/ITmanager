@@ -133,6 +133,17 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	}); err != nil {
 		return err
 	}
+	// M24：建单时就带 status='closed'（补录历史工单 / 对接回灌）也必须落下 closed_at。
+	// 不补的话这张票是「已关闭但没有关闭时间」，两个消费者同时看不见它：
+	// dashboard 的 SLA 口径是 `status='closed' AND closed_at >= ?`（dashboard_service.go），
+	// 统计里它不算已关闭；资产时间线靠 closed_at 派生「工单关闭」事件，它也永远没有。
+	// Update 那边管的是「跃迁」，这里管的是「出生即关闭」，同一个不变式（closed_at 与
+	// status 一致）的两个入口，两处都要守。
+	// 调用方显式给了时间（回灌带原始 ClosedDate）时不覆盖。
+	if t.Status == "closed" && t.ClosedAt == nil {
+		now := time.Now()
+		t.ClosedAt = &now
+	}
 	// 工单号在 BeforeCreate 里按「当天已建数量」生成，并发下两个请求可能算出同一个号。
 	// 唯一索引拒绝后重新生成并重试（最多 5 次），彻底消除竞态（缺陷 D-2）。
 	//
@@ -420,17 +431,56 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	}
 	// 枚举列取值校验放在归一化**之后**：Go 字段名写法（{"Status": …}）此刻已折成
 	// 小写键，与列名写法走同一条判据。放在 closed_at 判定**之前**：先确认 status
-	// 是契约词表里的值，那条 `status == "closed"` 精确比较才对得上。
+	// 是契约词表里的值（精确比较 "closed"），词表外的值不该进 closed_at 判据。
 	if err := validateTicketEnumValues(updates); err != nil {
 		return nil, err
 	}
-	// 关闭工单时自动写入 closed_at
-	if status, ok := updates["status"].(string); ok && status == "closed" {
-		now := time.Now()
-		updates["closed_at"] = &now
+	// M24：closed_at 跟着 status 走 —— 但判据必须落在**行自己身上**（SQL 表达式），
+	// 不能落在 Go 里读到的 `t.Status` 快照上。三个场景各自的期望：
+	//
+	//	status 不是 closed         → NULL。工单被重开后必须清掉，否则资产时间线（
+	//	                             diagnostic_service 只认 `closed_at IS NOT NULL`，不看
+	//	                             status）上永久挂着一条「工单关闭」假事件。
+	//	status 是 closed 且原本无值 → now。真正关闭的这一刻记时间。
+	//	status 是 closed 且原本有值 → 保留（COALESCE）。原来每 PUT 一次都刷成 now，改个描述
+	//	                             就把 SLA 的关闭耗时重置了。
+	//
+	// 为什么不写成 Go 侧的 `if t.Status == "closed"`：那要先读一次状态再判断，而读到的是
+	// **快照**。两个并发 PUT（一个重开、一个关闭）都卡在读之后、写之前时，按快照判断会落成
+	// `status='closed'` 且 `closed_at IS NULL` 的自相矛盾行。把判据和写入放进同一条 UPDATE
+	// 原子求值就没有这个窗口；COALESCE 顺带让「关掉一张已关闭的工单」天然幂等。
+	//
+	// 已知边界：只传 closed_at 不传 status 的请求不进这段逻辑（gorm 原样写列）。那种请求能
+	// 给已关闭的工单补时间，也能把一张 open 的工单写成「有 closed_at 却不 closed」——
+	// 后者会复现本段要治的时间线假事件。没有已知调用方，登记在 §8，不在这里替对接方决定。
+	injectedClosedAt := false
+	if status, ok := updates["status"].(string); ok {
+		var explicit interface{}
+		if v, ok := updates["closed_at"]; ok {
+			explicit = v
+		}
+		updates["closed_at"] = gorm.Expr(
+			"CASE WHEN ? = 'closed' THEN COALESCE(?, closed_at, ?) ELSE NULL END",
+			status, explicit, time.Now())
+		injectedClosedAt = true
 	}
 	if err := s.db.WithContext(ctx).Model(&t).Updates(updates).Error; err != nil {
 		return nil, err
+	}
+	// gorm 对 map 里的 clause.Expr **不回写 struct 字段**（schema 的 fallbackSetter 显式跳过
+	// Expr），所以 t.ClosedAt 此刻还是 First 读到的旧值。直接把 &t 返给 handler 会让响应体与
+	// 库里不一致：刚关闭的工单回 `closed_at: null`，重开的工单回旧的关闭时间。重读一次拿真值
+	// （PK 单行 SELECT），与 asset_service.Restore 末尾同款。
+	if injectedClosedAt {
+		// 用**新 struct 实例**接（asset_service.Restore 末尾同款）：t 此刻已带主键，
+		// 直接 First(&t, …) 会让 gorm 追加一条主键条件，生成
+		// `WHERE id = $1 AND "tickets"."id" = $2`，而且填不回这个已经装满旧值的 struct ——
+		// 实测两支都会踩（sqlmock 报参数不符 / 用例读到上一轮的旧时间）。
+		var fresh models.Ticket
+		if err := s.db.WithContext(ctx).First(&fresh, "id = ?", t.ID).Error; err != nil {
+			return nil, err
+		}
+		t = fresh
 	}
 	return &t, nil
 }
