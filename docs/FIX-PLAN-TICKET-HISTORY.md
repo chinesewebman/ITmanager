@@ -51,7 +51,7 @@
 |---|---|---|
 | `TicketService.Update` 生产调用方 | **1 处**：`ticket_handler.go:139` | 改签名代价低 |
 | 测试调用点 | **13 处**（`ticket_service_test.go:126,201,214,322,334,529,560,582,605,717,740,753,766`）+ **接口 mock 1 处**（`rack_ticket_handler_test.go:124,138` 的 `updateFunc`/`Update`） | 接口加 `ListHistory` 后 mock 也要同步补，否则编译红 |
-| 迁移编号 | ...000021、**000023**、000024 —— **000022 缺号** | 本轮用 **000025**；`internal/migrate/migrate.go:103-160` 的 `Load()` 用 `byVer` map 排序、**不检查连续性**（缺号容忍）→ 补 000022 会让已部署库多跑一个「新」迁移，不做 |
+| 迁移编号 | ...000021、**000023**、000024 —— **000022 缺号**（被本 plan 的 P20 `pg_trgm` 预占、尚未落地，见 `db_smoke_test.go` 注释） | 本轮用 **000025**；`internal/migrate/migrate.go:103-160` 的 `Load()` 用 `byVer` map 排序、**不检查连续性**（缺号容忍）→ 补 000022 会让已部署库多跑一个「新」迁移，不做 |
 | actor 在 ctx 里的可用形态 | `user_id`（claims.UserID 字符串）、`username`、`role`、`api_key_id`（`middleware/auth.go:120-122,194-197`） | handler 两者都能取到 |
 | 传 actor 的既有先例 | `assetService.Retire(ctx, id, reason, userID uuid.UUID)`（`asset_service.go:178`）、`alertService.Acknowledge(ctx, id, userID string)`（`alert_service.go:291`） | 显式参数是本仓既定模式 |
 | 服务端单测基座 | in-memory sqlite（`newTicketSQLiteDB`） | 见 §2.4 的行锁兼容性 |
@@ -274,13 +274,34 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 
 | 步 | 内容 | 验证 |
 |---|---|---|
-| 0 | **实测前置**：`clause.Locking` 在 sqlite 基座与真 PG 上的实际渲染；gorm `Updates(map)` 回写 struct 与自动补 `updated_at` 的行为 | 最小用例 + 真 PG 打印 SQL（这三条审查是读源码得出的，实现前用运行验证一次） |
-| 1 | 迁移 `000025` + `models.TicketHistory`（含 `TableName()`）+ `liveModels()` + `autoMigrate()` | `db_smoke.sh` 升级链（从上一版库）；Down 可回滚；drift 测试覆盖新表 |
+| ~~0~~ ✅ | **实测前置**：`clause.Locking` 在 sqlite 基座与真 PG 上的实际渲染；gorm `Updates(map)` 回写 struct 与自动补 `updated_at` 的行为 | **已完成，四条全部运行验证为真** —— 见下方「步骤 0 实测结论」 |
+| ~~1~~ ✅ | 迁移 `000025` + `models.TicketHistory`（含 `TableName()`）+ `liveModels()` + `autoMigrate()` + `db_smoke.sh` 白名单 + Down 链断言 + `TestDBSmoke_TicketHistory` | **已完成**：真 PG 冒烟两轮全绿（`✓ applied 25_000025_ticket_history`、Down 链 `25→24→23→21→…→13`）；`TestDBSmoke_TicketHistory` 确认在白名单里**真跑**（T-42 假绿已排除）；变异 V-1/V-2/V-4/V-5 全部红在预判断言上 |
 | 2 | `Actor` + `Update` 签名变更（1 handler + 13 测试 + 1 mock）+ 事务/行锁 + **原始行 map diff** + 批量插历史 + `CreateFromAlert` | 单测：字段级 diff、**无变化 PUT → 0 行**、`updated_at` 不入历史、**模型外列（如 `alert_id`）也留痕**、actor 快照、同事务回滚、**pre 必须在 UPDATE 前拷贝**（形态守卫：否则黑盒用例全绿，同 M24 V-5 同族） |
 | 3 | `Create` 出生事件（**每次尝试各一事务**，含重试） | 单测：`created` 行 + `source`；真 PG 制造 `ticket_number` 冲突验自愈仍活（R-5） |
 | 4 | `resolved_at` 随状态收口 | 单测（真 sqlite）：三态 + **`resolved→closed` 保留的反面用例** + 变异反证 + 真 PG 方言 |
 | 5 | 读端点 + `ungatedRoutes` 登记 + 分页 clamp 500 + openapi + `gen:api` + 前端手写类型 | handler 用例（分页/404/排序/上限）+ 路由分类闸门 + 契约漂移闸门 |
 | 6 | 前端工单详情时间线（按 `batch_id` 分组） | vitest + tsc + eslint |
+
+### 步骤 0 实测结论（2026-09-11，运行验证；探针文件已删）
+
+四条都在本机实跑过，不再是读源码推断：
+
+| # | 命题 | 实测结果 |
+|---|---|---|
+| a | `Updates(map)` **原地回写** struct（`callbacks/update.go:13,151,221`） | **为真** —— 拿同一个 `t` 当 pre-image 等于用 post 比 post，diff 恒空。§2.3 因此取原始行 map 而非 struct |
+| b | `Updates(map)` **无条件补 `updated_at`**（`:238-241`），即便同值 PUT | **为真** —— 「空 diff 就不写历史」这条路不可达，§2.3 改为按列比 |
+| c | `clause.Locking` 在 sqlite 基座被**静默丢弃** | **为真** —— DryRun SQL = `SELECT * FROM \`tickets\` WHERE id = ? …`，不含 `FOR UPDATE`（`sqlite@v1.6.0/sqlite.go:122-126` 的 `"FOR"` builder 直接 return）。故行锁只影响真 PG，单测基座不报错也不验证 |
+| d | 原始行 map 能读到**模型外列** | **为真** —— sqlite 基座 `ALTER TABLE tickets ADD COLUMN alert_id TEXT` 后，map 里 25 列含 `alert_id` |
+
+(c)(d) 合起来是 §2.3「原始行 map diff」可行、**且能在 sqlite 单测里复现模型外列场景**的依据。
+**仍待实跑**（不在本步范围）：PG 25P02（R-5，步骤 3）、真 PG 上 autocommit 的 `FOR UPDATE` 立即释放（步骤 2）。
+
+> ⚠️ **变异反证的一条陷阱（本轮踩到，登记在案）**：`scripts/db_smoke.sh:197` 的第二轮（upgrade 库）
+> 以 `[[ "$rc" -eq 0 ]]` 为门禁 —— **fresh 轮一红，upgrade 轮整轮不执行**。
+> 于是「落在 fresh 轮的变异」与「落在 upgrade 轮的变异」**不能合并成一次运行**：
+> 前者的失败会让后者的守门人根本没跑，报告成「未变红 —— 该变异没被断言守住」，
+> 把人骗去怀疑断言空转（本轮 V-5 白查一轮，最后发现是合并跑的锅）。
+> 省一次容器启动，换来的是**假证据** —— 逐条独立运行。
 
 每步按既有纪律收尾：变异反证（红在断言、红色集合与预判精确一致）→ 门禁（`npx tsc --noEmit` + `npm run lint` + 相关 vitest + `go test ./...`）→ §8 台账 → commit + push。
 
@@ -350,4 +371,6 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 
 `Update` 完全不碰 `resolved_at`；生产调用方 1 处、测试 13 处；**四条建单路径穷尽**（真 grep：无 webhook/复制/导入/定时任务/裸 INSERT）；**无删工单路径**（真 grep：零 `Unscoped()`、零 `Delete(&models.Ticket`）；`asset_history`/`step_progress_history` 零 Go 引用；迁移 000025 空闲且缺号容忍；`clause.Locking` 被 sqlite 驱动丢弃。
 
-**未核实项（实现步必须实跑验证，不当作已验证事实）**：PG 25P02（R-5）、autocommit 下 `FOR UPDATE` 立即释放（§2.4）、`Updates(map)` 回写 struct 与自动时间戳（步骤 0）—— 三条都是读源码/标准语义得出的，本机无可用 PG 实例。
+**未核实项（实现步必须实跑验证，不当作已验证事实）**：PG 25P02（R-5，步骤 3 验）、autocommit 下 `FOR UPDATE` 立即释放（§2.4，步骤 2 验）—— 两条都是读源码/标准语义得出的，需真 PG 才能确认。
+
+~~`Updates(map)` 回写 struct 与自动时间戳、`clause.Locking` 在 sqlite 被丢弃~~ —— **已实测为真，见 §5「步骤 0 实测结论」**。

@@ -971,6 +971,72 @@ func TestDBSmoke_AlertStatusDefault(t *testing.T) {
 		"GORM 零值路径漏设 Status 落成 %q —— 模型 tag 声明的是 problem，两边必须一致", st)
 }
 
+// TestDBSmoke_TicketHistory 000025 建出来的表在**真 Postgres** 上确实是我们要的形状。
+//
+// 为什么必须上真库：`ticket_history` 的几条关键属性**在 sqlite 单测基座里根本不存在**
+//
+//	· `gen_random_uuid()` 默认值 —— sqlite 没有这个函数（单测库是手写 CREATE TABLE，不走 DDL）；
+//	· `ON DELETE CASCADE` —— sqlite 要 PRAGMA foreign_keys=ON 才生效；
+//	· `actor_id` 上**没有**外键 —— 「没有」这种否定性事实只有查 pg 的系统表才说得清；
+//	· 索引是否真建出来 —— drift 测试只比对列，不看索引。
+//
+// 这几条又都直接支撑 M25 的设计决策（见 docs/FIX-PLAN-TICKET-HISTORY.md §2.1/§2.4），
+// 全靠「迁移文件里写了」当保证是不合格的。
+//
+// 放在 TestDBSmoke_DownPreservesLegacyColumns 之前：那个用例一路回滚到 000013，会拆掉本表。
+func TestDBSmoke_TicketHistory(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000025（ticket_history）—— 本用例前置不满足")
+	}
+
+	// ① 列集合与模型一致（模型侧由 tests/schema_drift_test.go 比对，两边合成一个闭环）
+	var cols []string
+	require.NoError(t, db.Raw(
+		`SELECT column_name FROM information_schema.columns
+		  WHERE table_name = 'ticket_history'`).Scan(&cols).Error)
+	assert.ElementsMatch(t, []string{
+		"id", "ticket_id", "batch_id", "kind", "field_name", "old_value", "new_value",
+		"actor_id", "actor_name", "source", "request_id", "created_at",
+	}, cols, "ticket_history 的实际列与模型/契约不符")
+
+	// ② 读路径的索引必须真建出来（drift 只比对列，不看索引）
+	var idx int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM pg_indexes
+		  WHERE tablename = 'ticket_history' AND indexname = 'idx_ticket_history_ticket'`).
+		Scan(&idx).Error)
+	assert.Equal(t, int64(1), idx, "读路径固定是「某张票的最新在前」，缺索引就是全表扫")
+
+	// ③ actor_id **不得**有外键 —— 这是 M25「历史插入失败即整单回滚」策略敢成立的前提。
+	// 带 FK 的话，带外删号后未过期 token 仍带 user_id（middleware/auth.go 只信 claims、
+	// 不复查用户存在），该用户此后每次改工单都会 500。
+	var actorFK int64
+	require.NoError(t, db.Raw(`
+		SELECT count(*) FROM information_schema.key_column_usage kcu
+		JOIN information_schema.table_constraints tc
+		  ON tc.constraint_name = kcu.constraint_name AND tc.table_name = kcu.table_name
+		WHERE kcu.table_name = 'ticket_history' AND kcu.column_name = 'actor_id'
+		  AND tc.constraint_type = 'FOREIGN KEY'`).Scan(&actorFK).Error)
+	assert.Zero(t, actorFK,
+		"actor_id 上出现了外键 —— 会把「记不上历史」变成「用户改不了工单」，见 FIX-PLAN §2.1")
+
+	// ④ ticket_id 的删除规则是 CASCADE（**已知取舍**，不是疏漏）：当前无工单删除端点故不可达，
+	// 将来新增删除端点时这条断言会提醒「历史会跟着一起没」。
+	var delRule string
+	require.NoError(t, db.Raw(`
+		SELECT rc.delete_rule FROM information_schema.referential_constraints rc
+		JOIN information_schema.key_column_usage kcu
+		  ON kcu.constraint_name = rc.constraint_name AND kcu.table_name = 'ticket_history'
+		WHERE kcu.column_name = 'ticket_id'`).Scan(&delRule).Error)
+	assert.Equal(t, "CASCADE", delRule,
+		"ticket_id 的 ON DELETE 规则变了 —— 历史与工单的生命周期绑定是有意选的，改动要同步文档")
+}
+
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。
@@ -978,10 +1044,10 @@ func TestDBSmoke_AlertStatusDefault(t *testing.T) {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000024（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
-//     故十一次 Down = 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000025（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
+//     故十二次 Down = 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //     **多滚 / 少滚都不会被链上断言发现**：下面全是「索引没了」的 assert.False，晚一步仍为真。
-//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000024」，
+//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000025」，
 //     结尾钉「000012 必须还在（多滚一层的唯一暴露点）」。
 //     下面每一步只写「回滚 0000NN」不写序数：序数本身会随新增迁移整体后移，是这行
 //     注释里最容易变成假话的部分（历史上就写重过两个「第三次」），版本号才是不变量。
@@ -1011,22 +1077,39 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
-	// 前置 3（M16/M20）：最新两个迁移必须已应用，且 000024 必须是**下一次** Down 的对象。
+	// 前置 3（M16/M20/M25）：最新三个迁移必须已应用，且 000025 必须是**下一次** Down 的对象。
 	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
 	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-	var has24, has23 int64
+	var has25, has24, has23 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
+		Scan(&has25).Error)
+	if has25 == 0 {
+		t.Fatalf("库未应用到 000025 —— 第一次 Down 会滚掉 000024，整条断言链静默后移")
+	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
 		Scan(&has24).Error)
 	if has24 == 0 {
-		t.Fatalf("库未应用到 000024 —— 第一次 Down 会滚掉 000023，整条断言链静默后移")
+		t.Fatalf("库未应用到 000024 —— 第二次 Down 会滚掉 000023，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&has23).Error)
 	if has23 == 0 {
-		t.Fatalf("库未应用到 000023 —— 第二次 Down 会滚掉 000021，整条断言链静默后移")
+		t.Fatalf("库未应用到 000023 —— 第三次 Down 会滚掉 000021，整条断言链静默后移")
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// Down = 回滚 000025：整表删除（ticket_history 是 000025 新建的，up 里没有存量数据改写）
+	require.NoError(t, migrate.Down(db), "回滚 000025 失败")
+	var v25 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
+		Scan(&v25).Error)
+	assert.Zero(t, v25, "第一次 Down 必须滚掉 000025 —— 否则后面每一次 Down 都在滚错的那一层")
+	var thTables int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'ticket_history'`).
+		Scan(&thTables).Error)
+	assert.Zero(t, thTables, "down 000025 应删掉 ticket_history 表")
 
 	// Down = 回滚 000024：只撤 alerts.status 的列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000024 失败")

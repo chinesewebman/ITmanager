@@ -47,6 +47,7 @@ func liveModels() []interface{} {
 		&models.Alert{},
 		&models.AlertRule{},
 		&models.Ticket{},
+		&models.TicketHistory{},
 		&models.NotificationChannel{},
 		&models.NotificationLog{},
 		&models.AlertSuppression{},

@@ -195,7 +195,7 @@ log "① 全新安装路径: migrate.Up 从零建库 + 核心链路 (build tag: 
 log "   TEST_DATABASE_URL=postgres://${DB_USER}:***@127.0.0.1:${HOST_PORT}/${DB_NAME}"
 ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$FRESH_DSN" "$GO_BIN" test \
     -tags dbsmoke -count=1 -v \
-    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_MigrationNoSessionGUCLeak|TestDBSmoke_AssetJSONBDefaults|TestDBSmoke_NetBoxUpsert|TestDBSmoke_NotificationPendingIndex|TestDBSmoke_AlertsProblemStartIndex|TestDBSmoke_AlertsTriggerIDIndex|TestDBSmoke_TicketsExternalIDIndex|TestDBSmoke_AssetsNameIndex|TestDBSmoke_AuditLogsPathIndex|TestDBSmoke_AlertBulkTransitionGuards|TestDBSmoke_AlertStatusDefault' \
+    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_MigrationNoSessionGUCLeak|TestDBSmoke_AssetJSONBDefaults|TestDBSmoke_NetBoxUpsert|TestDBSmoke_NotificationPendingIndex|TestDBSmoke_AlertsProblemStartIndex|TestDBSmoke_AlertsTriggerIDIndex|TestDBSmoke_TicketsExternalIDIndex|TestDBSmoke_AssetsNameIndex|TestDBSmoke_AuditLogsPathIndex|TestDBSmoke_AlertBulkTransitionGuards|TestDBSmoke_AlertStatusDefault|TestDBSmoke_TicketHistory' \
     ./tests/ ) || rc=$?
 
 if [[ "$rc" -eq 0 ]]; then

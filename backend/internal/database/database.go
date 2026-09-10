@@ -90,6 +90,7 @@ func autoMigrate() error {
 		&models.Alert{},
 		&models.AlertRule{},
 		&models.Ticket{},
+		&models.TicketHistory{}, // M25：AutoMigrate 兜底清单也得建，否则 dev 库缺表
 		&models.NotificationChannel{},
 		&models.NotificationLog{},
 	}
