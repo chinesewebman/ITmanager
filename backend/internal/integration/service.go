@@ -260,6 +260,11 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 	if len(toUpsert) == 0 {
 		return 0, nil
 	}
+	// 批量插入前显式分配工单号（TODO G-25）：CreateInBatches 会把整批的 BeforeCreate
+	// 都在 INSERT 之前跑完，每行各自按「当天条数」算号 → 整批同一个号 →
+	// tickets.ticket_number 唯一索引整批拒绝（一次新增 ≥2 张票的同步全失败）。
+	models.AssignTicketNumbers(database.DB.WithContext(ctx), toUpsert)
+
 	// 不加 ON CONFLICT：工单已存在时上面已跳过（状态更新走 PATCH），且 tickets.external_id
 	// 上没有唯一索引 —— 加了只会在真 PG 上 42P10 失败（见 docs/FIX-PLAN-NETBOX-UPSERT.md §1.2）。
 	if err := database.DB.WithContext(ctx).

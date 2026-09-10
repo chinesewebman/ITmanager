@@ -176,8 +176,9 @@ updates[c] = clause.Expr{SQL: "EXCLUDED." + c}   // c 由调用方给
 - 不引入 `TargetWhere`/部分唯一索引（NetBox 用整列唯一即可，NULL 天然不冲突）。
 - 不动 `internal/api/testdata/migrations/` 的 sqlite 兼容 schema（非生产路径，与既有口径一致）。
 - **GLPI 一次新增 ≥2 张工单仍会失败**（`Ticket.BeforeCreate` 的 `generateTicketNumber` 按「当天已建条数」算号，同批每行算出同一个号 → `ticket_number` 唯一索引整批拒绝）。这是**另一个缺陷**（TODO **G-25**），与本轮 upsert 修复无关：本轮只去掉那条注定报错的 `ON CONFLICT`。因此 `TestSyncFromGLPI_两次同步不重复` **刻意只喂 1 张票**，避免红在编号上、掩盖它真正要守的语义。
+  → **已由 G-25 轮修复（2026-09-10，commit 见 `TODO.md` G-25 条目）**：插入前 `models.AssignTicketNumbers` 预分配连续工单号，多张票不再撞号。两个用例的分工保留不变 —— `TestSyncFromGLPI_两次同步不重复` 仍只喂 1 张（守 `ON CONFLICT` 语义），新增 `TestSyncFromGLPI_一次同步多张工单不撞号` 守编号（一次 3 张全入库且号互异）。
 - **NetBox 状态映射不做**：`ConvertToAsset` 仍硬编码 `Status: "active"`（新增行用），本轮只把它从更新列里摘掉（F-7），不引入 NetBox status → 本地 status 的映射。
-- **不修 000014 的 `SET lock_timeout` 泄漏**（TODO G-26：会话级 `SET` 会留在连接池的连接上）—— 与本轮无关。
+- **不修 000014 的 `SET lock_timeout` 泄漏**（TODO G-26：会话级 `SET` 会留在连接池的连接上）—— 与本轮无关。→ **已由 G-26 轮修复（2026-09-10）**：改为 `SET LOCAL`，回归用例 `TestDBSmoke_MigrationNoSessionGUCLeak`。
 - **`rack_name` 不同步**：`NetBoxDevice` 没有 rack 字段、`ConvertToAsset` 不设 `RackName`（插入恒空串），故更新列**不含** `rack_name`（含了等于每次同步清空人工填的机柜）。将来若补 rack 映射，插入/更新两侧要一起补。
 - **Zabbix 本地已 ack 的告警会被重复插入**（TODO G-27）：预过滤只认 `status='problem'`，ack 行不算「已存在」→ 下次同步再插一行 `problem`。属**语义决策**（本地 ack 的进行中告警该不该再插？），本轮只把当前行为用断言钉住（`TestSyncFromZabbix_本地已确认的告警会重复插入`），不改语义。
 - **`PATCH /assets/:id` 的唯一冲突映射**：本轮顺手补上（`asset_service.Update` 撞 23505 → `ErrAlreadyExists` 409，与 `Create` 一致）—— 唯一索引是 000015 新引入的失败面，不修的话客户端会看到 500（审计 F-8）。同一处「`updates` map 任意列可写（如直接 `{"status":"retired"}` 绕过 Retire 流程）」是**既有问题**，本轮不动。

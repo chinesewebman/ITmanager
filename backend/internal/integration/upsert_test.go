@@ -457,11 +457,9 @@ func TestSyncFromZabbix_本地已确认的告警会重复插入(t *testing.T) {
 // （PG 42P10），SET 里的 id 又是 ambiguous（PG 42702）。tickets.external_id 在测试与
 // 生产 DDL 里都**没有**唯一索引，加回 ON CONFLICT 即红。
 //
-// ⚠️ 只喂 1 张工单：GLPI 同步目前**无法一次插入 ≥2 张新工单** ——
-// models.Ticket.BeforeCreate 的 generateTicketNumber 按「当天已建条数」算号，
-// 同一批里每行都算出同一个号（ticket_number 唯一索引 → 整批失败）。这是**另一个缺陷**，
-// 已登记 TODO G-25（与本轮 upsert 修复无关，本轮不修）。喂 2 张会让本用例红在编号上，
-// 掩盖它真正要守的 ON CONFLICT 语义。
+// 只喂 1 张工单：本用例守的是 ON CONFLICT 语义，「一次同步多张票」由
+// TestSyncFromGLPI_一次同步多张工单不撞号 单独守（G-25，2026-09-10 已修）。
+// 两者刻意分开，任一侧红了都能一眼看出是哪条语义破了。
 func TestSyncFromGLPI_两次同步不重复(t *testing.T) {
 	db := newUpsertTestDB(t)
 
@@ -495,4 +493,61 @@ func TestSyncFromGLPI_两次同步不重复(t *testing.T) {
 	var total int64
 	require.NoError(t, db.Model(&models.Ticket{}).Count(&total).Error)
 	assert.Equal(t, int64(1), total, "同步两次后仍应是 1 行")
+}
+
+// TestSyncFromGLPI_一次同步多张工单不撞号 是缺陷 G-25 的回归测试。
+//
+// 原实现直接 CreateInBatches：gorm 的 before_create 回调对整片 slice 的每一行都跑完
+// 才进 INSERT，每行各自按「当天条数」算号拿到**同一个值** → 整批同一个 ticket_number
+// → 唯一索引整批拒绝 → 首次同步（或任何一次新增 ≥2 张票的同步）全部失败，
+// 且 SyncAll 把它记成 glpi 失败。修复：插入前 models.AssignTicketNumbers 预分配。
+func TestSyncFromGLPI_一次同步多张工单不撞号(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/initSession"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"session_token":"sess-1"}`))
+		case strings.Contains(r.URL.Path, "/Ticket"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":1,"name":"Disk full","content":"disk 100%","status":1,"priority":4,"date":"2026-09-10 10:00"},
+				{"id":2,"name":"CPU 飙高","content":"load 40","status":1,"priority":5,"date":"2026-09-10 10:01"},
+				{"id":3,"name":"内存不足","content":"oom","status":1,"priority":3,"date":"2026-09-10 10:02"}
+			]`))
+		default:
+			t.Errorf("未预期的 GLPI 请求: %s", r.URL.Path)
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+
+	svc := &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
+
+	n, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err, "一次同步 3 张新工单不得撞号（G-25）")
+	require.Equal(t, 3, n)
+
+	var rows []models.Ticket
+	require.NoError(t, db.Order("ticket_number").Find(&rows).Error)
+	require.Len(t, rows, 3, "3 张工单必须全部入库，不能整批被唯一索引拒掉")
+
+	seen := make(map[string]string, len(rows))
+	for _, r := range rows {
+		assert.NotEmpty(t, r.TicketNumber, "external_id=%s 未生成工单号", r.ExternalID)
+		if first, dup := seen[r.TicketNumber]; dup {
+			t.Fatalf("工单号 %s 被 external_id=%s 与 %s 重复占用", r.TicketNumber, first, r.ExternalID)
+		}
+		seen[r.TicketNumber] = r.ExternalID
+	}
+
+	// 第二次同步：3 张都已在库，应全跳过，且不因重算编号而改写
+	n, err = svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "已存在的工单应被跳过")
+
+	var after int64
+	require.NoError(t, db.Model(&models.Ticket{}).Count(&after).Error)
+	assert.Equal(t, int64(3), after, "同步两次后仍应是 3 行")
 }

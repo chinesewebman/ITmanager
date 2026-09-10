@@ -411,6 +411,77 @@ func TestTicket_BeforeCreate_已有tickets时再Create_字母应递增(t *testin
 	assert.Regexp(t, regexp.MustCompile(`^TICKET-\d{8}-[A-Z]$`), tk.TicketNumber)
 }
 
+// ==================== Ticket.AssignTicketNumbers (G-25) ====================
+//
+// 缺陷背景：SyncFromGLPI 用 CreateInBatches 落库，而 gorm 的 before_create 回调对整片
+// slice 的每一行都跑完才进 INSERT —— 每行各自按「当天条数」算号拿到同一个值 →
+// 整批同一个号 → ticket_number 唯一索引整批拒绝。一次新增 ≥2 张票的同步全失败。
+
+// TestTicket_CreateInBatches_不预分配则整批同号 是 G-25 的**根因特征化测试**：
+// 钉住「批量路径天然算不出不同号」这一事实，正是 AssignTicketNumbers 存在的理由。
+// 谁把批量路径的预分配删掉，红的就是下面那条集成用例；这条说明为什么不能靠钩子。
+func TestTicket_CreateInBatches_不预分配则整批同号(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	now := time.Now()
+	batch := []models.Ticket{
+		{ID: uuid.New(), Title: "batch-1", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Title: "batch-2", CreatedAt: now, UpdatedAt: now},
+	}
+
+	err := db.CreateInBatches(batch, 100).Error
+	require.Error(t, err, "整批同号应被 ticket_number 唯一索引拒绝（G-25 的根因）")
+	assert.Equal(t, batch[0].TicketNumber, batch[1].TicketNumber,
+		"两行的 BeforeCreate 在同一批插入前跑完，算出的号必然相同")
+	assert.Contains(t, err.Error(), "UNIQUE", "拒绝来源应是唯一索引，实际: %v", err)
+}
+
+// TestTicket_AssignTicketNumbers_批量预分配互不相同 守 G-25 的修复本身。
+func TestTicket_AssignTicketNumbers_批量预分配互不相同(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	now := time.Now()
+	batch := []models.Ticket{
+		{ID: uuid.New(), Title: "b1", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Title: "b2", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Title: "b3", CreatedAt: now, UpdatedAt: now},
+	}
+	models.AssignTicketNumbers(db, batch)
+
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	assert.Equal(t, []string{prefix + "A", prefix + "B", prefix + "C"},
+		[]string{batch[0].TicketNumber, batch[1].TicketNumber, batch[2].TicketNumber},
+		"预分配应从当天下一个可用序号起连续递增")
+
+	// 预分配之后整批才插得进去（钩子见号不再覆盖）
+	require.NoError(t, db.CreateInBatches(batch, 100).Error, "预分配后整批应可插入")
+
+	// 第二批要接着上一批的序号，不能从 -A 重来
+	second := []models.Ticket{{ID: uuid.New(), Title: "b4", CreatedAt: now, UpdatedAt: now}}
+	models.AssignTicketNumbers(db, second)
+	assert.Equal(t, prefix+"D", second[0].TicketNumber, "第二批应续着当天已有条数往后排")
+	require.NoError(t, db.Create(second).Error)
+
+	var total int64
+	require.NoError(t, db.Model(&models.Ticket{}).Count(&total).Error)
+	assert.Equal(t, int64(4), total)
+}
+
+// TestTicket_AssignTicketNumbers_已有号不覆盖 守逃生门：外部系统自带号的行走原值。
+func TestTicket_AssignTicketNumbers_已有号不覆盖(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	batch := []models.Ticket{
+		{ID: uuid.New(), Title: "preset", TicketNumber: "GLPI-42"},
+		{ID: uuid.New(), Title: "auto"},
+	}
+	models.AssignTicketNumbers(db, batch)
+
+	assert.Equal(t, "GLPI-42", batch[0].TicketNumber, "已填号的工单不得被改写")
+	assert.Equal(t, "TICKET-"+time.Now().Format("20060102")+"-A", batch[1].TicketNumber,
+		"自动号不应因跳过已填行而空转（从当天起点开始）")
+}
+
 // ==================== Asset.BeforeSave (G-20) ====================
 //
 // 缺陷背景：tags/custom_fields 是 jsonb，模型字段是 string，零值 "" 被写进 INSERT
