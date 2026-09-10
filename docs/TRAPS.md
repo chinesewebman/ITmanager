@@ -370,6 +370,19 @@
 **现象**: `old_string: "}"` 或 `"if err != nil"` 之类短 snippet 命中 8+ matches → patch 拒绝。
 **解法**: 包含 2-3 行 surrounding context, 或 `replace_all=true` (有意全改时)。
 
+### T-42. `scripts/db_smoke.sh` 用 `-run` 白名单挑用例 —— 新用例**静默不跑**
+**状态**: ACTIVE | **类别**: 测试基建 / 假绿
+**现象**: 2026-09-11（M19 轮）新增 `TestDBSmoke_AlertBulkTransitionGuards` 后跑 `bash scripts/db_smoke.sh`，输出里从 `TestDBSmoke_TicketPriorityNormalize` 直接跳到 `TestDBSmoke_DownPreservesLegacyColumns`，**新用例一行都没有**，而脚本照旧打印 `结果: ✅ 迁移(全新+升级) + 冒烟断言全部通过`。原因：脚本第 196–205 行用显式 `-run 'TestDBSmoke_A|TestDBSmoke_B|…'` 列举要跑的用例，不在此列的测试根本不执行，`go test` 也不会报「你没跑它」——**新写的真库用例再严密，也只是躺在文件里**。这比「用例写错了」危险得多：写错会红，不跑永远绿。
+**检测方法**: ① 新增 dbsmoke 用例后，**去脚本输出里找到它的 `--- PASS:` 那一行**，找不到就是没跑；② 更省事的判据：`grep -c '^func TestDBSmoke_' backend/tests/db_smoke_test.go` 与 `-run` 白名单里的分支数对不上就是漏了（注意白名单只覆盖 `TestDBSmoke_` 前缀里该路径适用的那些，另有 `SMOKE_EXPECT_UPGRADE` 那条路径单独一份名单，**两份都要看**）。
+**解法**: 加进对应路径的 `-run` 白名单（全新路径 / 升级路径各一份），重跑并确认输出里出现该用例。命名前缀统一为 `TestDBSmoke_` 只是为了让白名单可读，减少漏加概率，**不解决**「漏加就静默」这个本质问题。
+
+### T-43. 状态机只编码在前端，服务端按 id 裸更新 = 状态可被回退
+**状态**: ACTIVE | **类别**: 逻辑 / 前后端职责
+**现象**: 2026-09-11（M19 轮，告警）。合法状态迁移只写在 `frontend/src/components/AlertTable.tsx` 的 `getAlertActions` 里（problem 才给「确认」、problem/acknowledged 才给「解决」），后端 `Acknowledge`/`Resolve`/`BulkAcknowledge`/`BulkResolve` 四条写路径**只按 id 更新、对当前状态零检查**。于是 `PUT /alerts/{id}/ack` 打在已 resolved 的告警上会把状态**回退**成 acknowledged——该行掉出 `dashboard_service.go` 的 `ResolvedAlerts` 计数、重新落进待处理桶、并多发一条通知；重复 resolve 把 `resolve_time` 推到 now → MTTR 虚高。
+**为什么前端那道守卫不算防线**: 列表 5s 轮询。A 与 B 两个值班看同一条，A 先解决，B 的页面仍是旧状态（按钮还在）→ B 点下去服务端照单全收。**可见性判断只配用来省一次请求**；这条规矩 D-3（告警一键建单）已经立过（幂等交后端兜底），本 trap 是它的反面，两处可以互相印证。
+**检测方法**: 全仓找「只按主键更新 + 有一个 status/state 列」的写路径（grep `Where("id = ?"` 后跟 `Updates`），看 UPDATE 的 WHERE 里有没有带上合法源状态；再找前端有没有对应的按钮显隐逻辑——**只要显隐逻辑存在而后端没有对应的 WHERE 守卫，就是同一个洞**。批量路径（`id IN ?`）别漏。
+**解法**: 合法源状态写进 UPDATE 的 WHERE（`id = ? AND status IN (...)`），**不要**写成「读出来在 Go 里判断再写」——后者有 TOCTOU 窗口，会原样复现这个缺陷。`RowsAffected == 0` 走冷路径复读一次，区分「幂等成功（已在目标态）/ 状态冲突 / 记录不存在」三种。重复请求分两类：已在**目标态** → 幂等成功且**不重写时间戳**（重写会污染 MTTR/MTTD）；已在**更后的终态** → 拒绝（409，不是 500 也不是 400）。批量路径**不因个别 id 状态不合法而整批失败**，让它们落空、`affected` 如实报数。
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -432,6 +445,8 @@
 | — (G-25 轮) | T-39 | FIXED |
 | — (D-3 轮) | T-40 | ACTIVE |
 | — (M16 轮) | T-41 | FIXED |
+| — (M19 轮) | T-42 | ACTIVE |
+| — (M19 轮) | T-43 | ACTIVE |
 
 ---
 

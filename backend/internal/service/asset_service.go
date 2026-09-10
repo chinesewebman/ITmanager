@@ -20,6 +20,10 @@ var (
 	ErrAlreadyExists = errors.New("resource already exists")
 	ErrInvalidInput  = errors.New("invalid input")
 	ErrTooManyItems  = errors.New("too many items in batch request") // 🐛 BUG#17
+	// ErrInvalidState M19：请求本身合法，但与资源**当前状态**冲突（如对已解决的告警再确认）。
+	// 与 ErrInvalidInput 分开：那是「请求写错了」（400），这是「来晚了/状态已经走了」（409）。
+	// 混成一个会让调用方分不清「改参数重试」和「刷新后别再试」。
+	ErrInvalidState = errors.New("invalid state transition")
 )
 
 // AssetFilter 资产列表查询条件

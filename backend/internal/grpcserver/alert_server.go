@@ -97,6 +97,10 @@ func (s *AlertServer) AckAlert(ctx context.Context, req *alertv1.AckAlertRequest
 		return nil, status.Error(codes.InvalidArgument, "id and user_id required")
 	}
 	if err := s.svc.Acknowledge(ctx, req.Id, req.UserId); err != nil {
+		// M19: 状态冲突要能被客户端识别成「别再试了」而不是「服务端炸了」
+		if errors.Is(err, service.ErrInvalidState) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	a, err := s.svc.Get(ctx, req.Id)
@@ -111,6 +115,10 @@ func (s *AlertServer) ResolveAlert(ctx context.Context, req *alertv1.ResolveAler
 		return nil, status.Error(codes.InvalidArgument, "id and user_id required")
 	}
 	if err := s.svc.Resolve(ctx, req.Id, req.UserId); err != nil {
+		// M19: 同 AckAlert
+		if errors.Is(err, service.ErrInvalidState) {
+			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	a, err := s.svc.Get(ctx, req.Id)

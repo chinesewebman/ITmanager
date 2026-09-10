@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -211,6 +212,40 @@ func TestAlertHandler_Acknowledge_服务返错返500(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// M19：状态冲突必须是 409。落 500 会被当成服务端故障去重试，落 400 会被当成
+// 「参数写错了」去改参数 —— 两者都指错方向，正确的动作是刷新列表。
+func TestAlertHandler_Acknowledge_状态冲突返409带原因(t *testing.T) {
+	svc := &mockAlertService{
+		ackFunc: func(_ context.Context, _, _ string) error {
+			return fmt.Errorf("%w: 告警当前状态不允许该操作", service.ErrInvalidState)
+		},
+	}
+	r := newAlertTestRouter(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/alerts/"+uuid.NewString()+"/ack", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "conflict")
+	assert.Contains(t, w.Body.String(), "告警当前状态不允许该操作", "409 必须说明真实原因")
+}
+
+func TestAlertHandler_Resolve_状态冲突返409(t *testing.T) {
+	svc := &mockAlertService{
+		resolveFunc: func(_ context.Context, _, _ string) error {
+			return fmt.Errorf("%w: 告警当前状态不允许该操作", service.ErrInvalidState)
+		},
+	}
+	r := newAlertTestRouter(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/alerts/"+uuid.NewString()+"/resolve", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
 }
 
 func TestAlertHandler_BulkAck_成功返200(t *testing.T) {

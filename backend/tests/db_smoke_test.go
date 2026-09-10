@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -34,6 +35,7 @@ import (
 	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/migrate"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/service"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -795,6 +797,114 @@ func TestDBSmoke_TicketPriorityNormalize(t *testing.T) {
 		`SELECT count(*) FROM tickets WHERE status NOT IN ('open','in_progress','pending','resolved','closed')`).
 		Scan(&off).Error)
 	assert.Zero(t, off, "tickets.status 出现 openapi Ticket.status enum 之外的值")
+}
+
+// alertSmokeState 读回一行 alerts 的状态列。
+func alertSmokeState(t *testing.T, db *gorm.DB, id uuid.UUID) (status, ackUser, resolveUser string, ackTime, resolveTime *time.Time) {
+	t.Helper()
+	var row struct {
+		Status      string
+		AckUser     string
+		ResolveUser string
+		AckTime     *time.Time
+		ResolveTime *time.Time
+	}
+	require.NoError(t, db.Raw(
+		`SELECT status, ack_user, resolve_user, ack_time, resolve_time FROM alerts WHERE id = ?`, id).
+		Scan(&row).Error, "读回 alerts 行失败")
+	return row.Status, row.AckUser, row.ResolveUser, row.AckTime, row.ResolveTime
+}
+
+// TestDBSmoke_AlertBulkTransitionGuards 守 M19：批量确认/解决只能动**合法源状态**的行。
+//
+// 单测里那条 `WHERE id IN (...) AND status IN (...)` 只是正则匹配 SQL 文本，它证明不了
+// Postgres 真按这个条件筛行 —— 语义只有真库能证明。三条断言各对应一个真实后果：
+//
+//	① 已 resolved 的行不能被批量「确认」拉回 acknowledged（会掉出 dashboard 的
+//	   ResolvedAlerts 计数、重新落进待处理桶，还会多发一条「已确认」通知）；
+//	② 已 resolved 的行不能被批量「解决」重写 resolve_time（MTTR = AVG(resolve_time −
+//	   problem_start) 随之虚高）；已 acknowledged 的行也不能被重写 ack_time（MTTD 虚高）；
+//	③ affected 必须如实报数，而不是「传了几个 id 就报几」—— UI 拿它显示「成功 N 条」。
+//
+// 放在 TestDBSmoke_DownPreservesLegacyColumns 之前：Go 按源码顺序跑用例，那个用例会
+// 回滚 000013。本用例自建自清（t.Cleanup 删掉插入的行），不扰动后面的索引 EXPLAIN 断言。
+func TestDBSmoke_AlertBulkTransitionGuards(t *testing.T) {
+	db := openSmokeDB(t)
+	svc := service.NewAlertService(db)
+	ctx := context.Background()
+
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	var inserted []uuid.UUID
+	t.Cleanup(func() {
+		if len(inserted) > 0 {
+			db.Where("id IN ?", inserted).Delete(&models.Alert{})
+		}
+	})
+
+	mk := func(status string) uuid.UUID {
+		a := &models.Alert{
+			AlertID:      "m19-" + uuid.NewString()[:8],
+			HostName:     "smoke-m19",
+			TriggerName:  "M19 状态守卫",
+			Severity:     3,
+			Problem:      "M19 dbsmoke",
+			ProblemStart: t0,
+			Status:       status,
+		}
+		require.NoError(t, db.Create(a).Error, "插入 alerts 夹具失败")
+		inserted = append(inserted, a.ID)
+		return a.ID
+	}
+
+	problemID := mk("problem")
+	ackedID := mk("acknowledged")
+	resolvedID := mk("resolved")
+
+	// 给「已经处理过」的两行各钉一个旧时间戳：幂等路径若不挡，这两个值会被推到 now。
+	require.NoError(t, db.Model(&models.Alert{}).Where("id = ?", ackedID).
+		Updates(map[string]interface{}{"ack_time": t0, "ack_user": "orig-ack"}).Error)
+	require.NoError(t, db.Model(&models.Alert{}).Where("id = ?", resolvedID).
+		Updates(map[string]interface{}{"resolve_time": t0, "resolve_user": "orig-resolve"}).Error)
+
+	ids := []string{problemID.String(), ackedID.String(), resolvedID.String()}
+
+	// ---- ① 批量确认：只有 problem 那行该被改 ----
+	affected, err := svc.BulkAcknowledge(ctx, ids, "m19-user")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), affected,
+		"affected 必须如实报数（3 个 id 里只有 1 行合法），UI 直接拿它显示「成功 N 条」")
+
+	st, _, _, _, _ := alertSmokeState(t, db, problemID)
+	assert.Equal(t, "acknowledged", st)
+	st, ackUser, _, ackTime, _ := alertSmokeState(t, db, ackedID)
+	assert.Equal(t, "acknowledged", st)
+	assert.Equal(t, "orig-ack", ackUser, "批量确认不得改写已确认行的认领人")
+	require.NotNil(t, ackTime, "ack_time 被清空了")
+	assert.True(t, ackTime.Equal(t0), "重复确认把 ack_time 推到 now → MTTD 虚高，实际 %v", ackTime)
+
+	st, _, _, _, resolveTime := alertSmokeState(t, db, resolvedID)
+	assert.Equal(t, "resolved", st,
+		"已解决的告警被批量确认拉回 acknowledged —— 会掉出 ResolvedAlerts 计数并重新落进待处理桶")
+	require.NotNil(t, resolveTime, "resolve_time 被清空了")
+
+	// ---- ② 批量解决：problem/acknowledged 两行该被改，resolved 那行不许动 ----
+	affected, err = svc.BulkResolve(ctx, ids, "m19-user")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), affected, "3 个 id 里只有 2 行处于可解决状态")
+
+	var resolveUser string
+	st, _, resolveUser, _, resolveTime = alertSmokeState(t, db, resolvedID)
+	assert.Equal(t, "resolved", st)
+	assert.Equal(t, "orig-resolve", resolveUser, "重复解决不得改写解决人")
+	assert.True(t, resolveTime.Equal(t0),
+		"重复解决把 resolve_time 推到 now → MTTR(AVG(resolve_time − problem_start)) 虚高，实际 %v", resolveTime)
+
+	for _, id := range []uuid.UUID{problemID, ackedID} {
+		st, _, _, _, resolveTime = alertSmokeState(t, db, id)
+		assert.Equal(t, "resolved", st)
+		require.NotNil(t, resolveTime, "合法解决路径必须写上 resolve_time")
+	}
 }
 
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。

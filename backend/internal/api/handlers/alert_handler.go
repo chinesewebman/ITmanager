@@ -101,6 +101,13 @@ func (h *AlertHandler) AcknowledgeAlert(c *gin.Context) {
 			apierr.NotFound(c, "告警不存在")
 			return
 		}
+		// M19: 对已解决的告警再确认 → 409。落 500 会让调用方以为服务端故障而重试，
+		// 落 400 会被当成「参数写错了」去改参数 —— 两者都指错方向，正确的动作是刷新列表。
+		// 用 err.Error() 而不是写死文案（同 M18）：这个分支将来可能承载多种状态冲突原因。
+		if errors.Is(err, service.ErrInvalidState) {
+			apierr.Conflict(c, err.Error())
+			return
+		}
 		apierr.Internal(c, "确认告警失败", err)
 		return
 	}
@@ -119,6 +126,11 @@ func (h *AlertHandler) ResolveAlert(c *gin.Context) {
 	if err := h.svc.Resolve(c.Request.Context(), c.Param("id"), userID); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在")
+			return
+		}
+		// M19: 同 AcknowledgeAlert —— 状态冲突是 409，不是 500/400
+		if errors.Is(err, service.ErrInvalidState) {
+			apierr.Conflict(c, err.Error())
 			return
 		}
 		apierr.Internal(c, "解决告警失败", err)

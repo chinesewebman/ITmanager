@@ -230,17 +230,89 @@ func (s *alertService) Get(ctx context.Context, id string) (*models.Alert, error
 	return &alert, nil
 }
 
+// ==================== M19：告警状态迁移收口 ====================
+//
+// 合法迁移表**本来就存在**，写在前端 getAlertActions 里：只给 problem 出「确认」、
+// 只给 problem/acknowledged 出「解决」，resolved 两个按钮都不给。也就是说
+//
+//	problem      --ack-->     acknowledged
+//	problem      --resolve--> resolved
+//	acknowledged --resolve--> resolved
+//
+// ——服务端此前一条都不校验，只按 id 更新。于是公开端点（openapi 有 PUT
+// /alerts/{id}/ack）可以把**已解决**的告警「确认」回去，status 从 resolved 退回
+// acknowledged，后果全是静默的：
+//   - dashboard 的 ResolvedAlerts 是 COUNT(*) FILTER (WHERE status='resolved')，当场掉数；
+//   - 按状态过滤时它重新落回「未处理」，值班会重复处理一条已经处理完的告警；
+//   - writeNotificationTrigger 补发一条「已确认」的假通知。
+//
+// 前端的按钮判断挡不住：它看到的是 5s 轮询前的世界，两个值班同时处理同一条告警时，
+// 第二个人的列表**必然**过期。可见性判断只配用来省一次请求，正确性必须由服务端兜底
+// ——这是 D-3 已经确立的原则，这里是它的反面。
+//
+// 重复请求分两类，不能合并：
+//   - 已是**目标状态**（ack 一个 acknowledged、resolve 一个 resolved）→ 幂等成功，
+//     且**不重写时间戳**。重写会污染指标：ack_time 后移拉长 MTTD、resolve_time 后移
+//     拉长 MTTR（dashboard_service.go 那两个 AVG 直接吃这两列）。
+//   - 处于**更后的终态**（ack 一个 resolved）→ 拒绝。静默 no-op 会让调用方以为生效，
+//     正是本仓反复出现的「静默」反模式。
+//
+// 并发：合法源状态写进 UPDATE 的 WHERE，而不是「读出来在 Go 里判断再写」。两个值班
+// 同时点「确认」和「解决」，读-判-写会让后落地的那个把状态改回去（正是要修的缺陷）；
+// 条件 UPDATE 让最终结果与到达顺序无关。
+var (
+	alertAckSources     = []string{"problem"}
+	alertResolveSources = []string{"problem", "acknowledged"}
+)
+
+// alertTerminalState 判断状态是否已是该操作的目标（→ 幂等成功，不写库不通知）。
+func alertTerminalState(cur, target string) bool { return cur == target }
+
+// classifyAlertNoRows 解释「条件 UPDATE 影响了 0 行」。
+//
+// 返回 nil = 幂等成功（并发下别人已经推进到 target）；否则返回给调用方的错误。
+// 只在这条冷路径上多查一次：happy path 不付这个代价。
+func (s *alertService) classifyAlertNoRows(ctx context.Context, id, target string) error {
+	var cur models.Alert
+	if err := s.db.WithContext(ctx).Select("status").First(&cur, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if alertTerminalState(cur.Status, target) {
+		return nil
+	}
+	// 不回显 cur.Status：它虽出自本库，但历史行可能带着任意字符串，
+	// 而这条 message 会原样进 409 body。
+	return fmt.Errorf("%w: 告警当前状态不允许该操作", ErrInvalidState)
+}
+
 func (s *alertService) Acknowledge(ctx context.Context, id, userID string) error {
 	alert, err := s.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	if err := s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
-		"status":   "acknowledged",
-		"ack_time": time.Now(),
-		"ack_user": userID,
-	}).Error; err != nil {
-		return err
+	// 幂等 / 拒绝的快速判定，省掉一次必然 0 行的 UPDATE
+	if alertTerminalState(alert.Status, "acknowledged") {
+		return nil
+	}
+	if alert.Status != "problem" {
+		return fmt.Errorf("%w: 告警当前状态不允许该操作", ErrInvalidState)
+	}
+	res := s.db.WithContext(ctx).Model(&models.Alert{}).
+		Where("id = ? AND status IN ?", id, alertAckSources).
+		Updates(map[string]interface{}{
+			"status":   "acknowledged",
+			"ack_time": time.Now(),
+			"ack_user": userID,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// 读与写之间被别人改了
+		return s.classifyAlertNoRows(ctx, id, "acknowledged")
 	}
 	// v1.1: 状态变更触发通知 trigger — 落 notification_logs (pending)
 	// 实际发送 (dingtalk/email) 由 v1.2 异步 worker 消费
@@ -252,19 +324,32 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 	if err != nil {
 		return err
 	}
+	// 已是终态 → 幂等成功。重复解决会把 resolve_time 改成 now，MTTR 随之虚高
+	if alertTerminalState(alert.Status, "resolved") {
+		return nil
+	}
+	if alert.Status != "problem" && alert.Status != "acknowledged" {
+		return fmt.Errorf("%w: 告警当前状态不允许该操作", ErrInvalidState)
+	}
 	now := time.Now()
 	var duration int
 	if !alert.ProblemStart.IsZero() {
 		duration = int(now.Sub(alert.ProblemStart).Seconds())
 	}
-	if err := s.db.WithContext(ctx).Model(alert).Updates(map[string]interface{}{
-		"status":       "resolved",
-		"resolve_time": now,
-		"resolve_user": userID,
-		"problem_end":  now,
-		"duration":     duration,
-	}).Error; err != nil {
-		return err
+	res := s.db.WithContext(ctx).Model(&models.Alert{}).
+		Where("id = ? AND status IN ?", id, alertResolveSources).
+		Updates(map[string]interface{}{
+			"status":       "resolved",
+			"resolve_time": now,
+			"resolve_user": userID,
+			"problem_end":  now,
+			"duration":     duration,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return s.classifyAlertNoRows(ctx, id, "resolved")
 	}
 	// v2.0: 发 alert.resolved 事件给 event bus (通知 worker subscriber)
 	s.publish(eventbus.TopicAlertResolved, notification.AlertEventPayload{
@@ -293,7 +378,10 @@ func (s *alertService) BulkAcknowledge(ctx context.Context, ids []string, userID
 	var affected int64
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.Alert{}).
-			Where("id IN ?", ids).
+			// M19: 源状态守卫 —— 已经 resolved 的不能被批量「确认」回去（单条路径的同一个洞）。
+			// 批量**不**因为个别 id 状态不合法而整批失败：运维勾了 20 条、其中 3 条已被同事
+			// 处理完，拒掉整批是最糟的选择。让它们自然落空，affected 如实报数即可。
+			Where("id IN ? AND status IN ?", ids, alertAckSources).
 			Updates(map[string]interface{}{
 				"status":   "acknowledged",
 				"ack_time": now,
@@ -324,9 +412,12 @@ func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID str
 	now := time.Now()
 	var affected int64
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 一次 select 拿所有 alert（避免后续 N+1）
+		// 一次 select 拿所有 alert（避免后续 N+1）。
+		// M19: 条件与下面的 UPDATE 保持一致 —— 「算进来的行」必须就是「会写的行」，
+		// 否则这个 select 会给出一个偏大的印象（同 M17 的「校验的键 == 落库的键」）。
 		var alerts []models.Alert
-		if err := tx.Where("id IN ?", ids).Find(&alerts).Error; err != nil {
+		if err := tx.Where("id IN ? AND status IN ?", ids, alertResolveSources).
+			Find(&alerts).Error; err != nil {
 			return err
 		}
 		if len(alerts) == 0 {
@@ -334,7 +425,8 @@ func (s *alertService) BulkResolve(ctx context.Context, ids []string, userID str
 		}
 		// 单条 UPDATE 批量改 status + time（duration 走 0，准确性让位性能）
 		res := tx.Model(&models.Alert{}).
-			Where("id IN ?", ids).
+			// M19: 已 resolved 的重复解决会把 resolve_time 推到 now → MTTR 虚高，挡在 WHERE 上
+			Where("id IN ? AND status IN ?", ids, alertResolveSources).
 			Updates(map[string]interface{}{
 				"status":       "resolved",
 				"resolve_time": now,
