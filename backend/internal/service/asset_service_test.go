@@ -254,7 +254,7 @@ func TestAssetService_Get_成功返回asset和networks(t *testing.T) {
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
 	// 2) Find(networks by asset_id)
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "asset_id", "ip_address", "ipv6_address", "mac", "interface_name", "speed_mbps",
@@ -327,7 +327,7 @@ func TestAssetService_Update_空updates只Get不写DB(t *testing.T) {
 	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
@@ -429,7 +429,7 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 		WithArgs(id, 1).
 		WillReturnRows(activeAssetSampleRows(id.String()))
 	// 2) Find networks (取 IPv4)
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, id, "eth0", "192.168.3.50", ""))
@@ -443,7 +443,7 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	// 4) 重读 networks (查最终态)
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, "", ""))
@@ -519,7 +519,7 @@ func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
 			"created_at", "updated_at",
 		}).AddRow(id, "web-01", "retired", "server", lastIP4, time.Now(), time.Now()))
 	// 2) Find networks (空 IP 待写回)
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, id, "eth0", "", ""))
@@ -533,7 +533,7 @@ func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	// 4) 重读
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address"}).
 			AddRow(netID, lastIP4))
@@ -550,6 +550,76 @@ func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
 	assert.Nil(t, asset.LastKnownIP4)
 	require.NotEmpty(t, networks)
 	assert.Equal(t, lastIP4, networks[0].IPv4Address)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// M23：多网卡资产的 Restore —— 只能写第一张网卡。
+//
+// 早先这里 IPv6 那支漏了「只有第一张」的守卫（IPv4 那支有 i == 0，IPv6 没有），
+// N 张网卡的资产恢复后**每张卡都被写上同一个 IPv6** —— 一个地址同时挂在 N 个接口上。
+//
+// 证明手法：只设**一条** asset_networks UPDATE 期望，且 WithArgs 钉死目标是 net0。
+// 若实现又去写 net1/net2，第二条 UPDATE 会撞上 sqlmock 的 unexpected call → 事务返回
+// 错误 → 用例红。比「数 Exec 调用次数」更直接：不设期望就是不接受写入（同 M19 手法）。
+func TestAssetService_Restore_多网卡时只写回第一张(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	net0, net1, net2 := uuid.New(), uuid.New(), uuid.New()
+	lastIP4, lastIP6 := "192.168.3.50", "2001:db8::50"
+	base := time.Now()
+
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "name", "status", "asset_type", "last_known_ip4", "last_known_ip6",
+			"created_at", "updated_at",
+		}).AddRow(id, "web-01", "retired", "server", lastIP4, lastIP6, base, base))
+
+	// 三张网卡，Retire 已把它们（含 IPv6）全部清空。created_at 递增 → net0 是最早建的
+	// 那张，也就是 Retire 取 last_known_ip* 时读的那张。
+	netCols := []string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address", "created_at"}
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows(netCols).
+			AddRow(net0, id, "eth0", "", "", base).
+			AddRow(net1, id, "eth1", "", "", base.Add(time.Second)).
+			AddRow(net2, id, "eth2", "", "", base.Add(2*time.Second)))
+
+	mock.ExpectBegin()
+	// 唯一一条网卡写入：目标是 net0，且 IPv4/IPv6 各只出现一次
+	// （GORM 对 map 形式的 Updates 按 key 排序，故 ipv4 在前；中间那个是自动带的 updated_at）
+	mock.ExpectExec(`UPDATE "asset_networks" SET`).
+		WithArgs(lastIP4, lastIP6, sqlmock.AnyArg(), net0).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	// 重读：只有 net0 拿到地址，另两张仍是空的
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows(netCols).
+			AddRow(net0, id, "eth0", lastIP4, lastIP6, base).
+			AddRow(net1, id, "eth1", "", "", base.Add(time.Second)).
+			AddRow(net2, id, "eth2", "", "", base.Add(2*time.Second)))
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow(id, "active"))
+
+	asset, networks, err := svc.Restore(context.Background(), id.String())
+	require.NoError(t, err)
+	require.Len(t, networks, 3)
+	assert.Equal(t, "active", asset.Status)
+	// 地址回到第一张卡
+	assert.Equal(t, lastIP4, networks[0].IPv4Address)
+	assert.Equal(t, lastIP6, networks[0].IPv6Address)
+	// 关键断言：另两张卡没被写上同一个 IPv6
+	assert.Empty(t, networks[1].IPv6Address, "第二张网卡不该拿到别人家的 IPv6")
+	assert.Empty(t, networks[1].IPv4Address)
+	assert.Empty(t, networks[2].IPv6Address, "第三张网卡不该拿到别人家的 IPv6")
+	assert.Empty(t, networks[2].IPv4Address)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -592,7 +662,7 @@ func TestAssetService_Retire_无网卡时last_known为空(t *testing.T) {
 		WithArgs(id, 1).
 		WillReturnRows(activeAssetSampleRows(id.String()))
 	// 0 张网卡
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectBegin()
@@ -601,7 +671,7 @@ func TestAssetService_Retire_无网卡时last_known为空(t *testing.T) {
 	mock.ExpectExec(`UPDATE "asset_networks" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id`).
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 

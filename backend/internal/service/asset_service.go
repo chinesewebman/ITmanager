@@ -104,11 +104,30 @@ func (s *assetService) Get(ctx context.Context, id string) (*models.Asset, []mod
 		return nil, nil, err
 	}
 
-	var networks []models.AssetNetwork
-	if err := s.db.WithContext(ctx).Where("asset_id = ?", asset.ID).Find(&networks).Error; err != nil {
+	networks, err := s.listNetworks(ctx, asset.ID)
+	if err != nil {
 		return nil, nil, err
 	}
 	return &asset, networks, nil
+}
+
+// listNetworks 取某资产的全部网卡，按**稳定顺序**（最早建的在前）。
+//
+// 为什么要显式 ORDER BY：`Retire` 把「第一张有 IP 的网卡」的地址存进 `last_known_ip*`，
+// `Restore` 再把它写回「第一张网卡」—— 两处都依赖「第一张」的含义，而 Postgres 对不带
+// ORDER BY 的查询**不保证行序**：走 asset_id 索引时按 (asset_id, ctid) 排，而 Retire 把
+// N 张网卡全 UPDATE 了一遍，ctid 全变 → 退役前后两次 SELECT 的「第一行」可能不是同一张卡，
+// 恢复时 IP 就落到别的网卡上。排序把「第一张」钉成「最早创建的那张」，两次调用说的是同一张。
+//
+// `id` 只是决胜列（同一批插入的 created_at 可能相同），与 alert/ticket 的
+// `created_at DESC, id DESC` 二元组排序同一套约定。
+func (s *assetService) listNetworks(ctx context.Context, assetID uuid.UUID) ([]models.AssetNetwork, error) {
+	var networks []models.AssetNetwork
+	err := s.db.WithContext(ctx).
+		Where("asset_id = ?", assetID).
+		Order("created_at ASC, id ASC").
+		Find(&networks).Error
+	return networks, err
 }
 
 func (s *assetService) Create(ctx context.Context, asset *models.Asset) error {
@@ -176,8 +195,8 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 		return nil, nil, ErrInvalidInput
 	}
 
-	var networks []models.AssetNetwork
-	if err := s.db.WithContext(ctx).Where("asset_id = ?", uid).Find(&networks).Error; err != nil {
+	networks, err := s.listNetworks(ctx, uid)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -234,7 +253,7 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 	}
 
 	// 重读 networks 返给 handler (gorm.Model.Updates 不会刷新内存 struct)
-	if err := s.db.WithContext(ctx).Where("asset_id = ?", uid).Find(&networks).Error; err != nil {
+	if networks, err = s.listNetworks(ctx, uid); err != nil {
 		return nil, nil, err
 	}
 	return &asset, networks, nil
@@ -262,26 +281,34 @@ func (s *assetService) Restore(ctx context.Context, id string) (*models.Asset, [
 		return nil, nil, ErrInvalidInput // 非退役状态不能恢复
 	}
 
-	var networks []models.AssetNetwork
-	if err := s.db.WithContext(ctx).Where("asset_id = ?", uid).Find(&networks).Error; err != nil {
+	networks, err := s.listNetworks(ctx, uid)
+	if err != nil {
 		return nil, nil, err
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 写回 IP: 把 LastKnownIP4/6 写回第一张网卡 (顺序: 之前有 IPv4 的那张优先)
-		// 简单策略: 第一张网卡接收 IPv4, 第二张接收 IPv6 (如果多网卡需要精细化, 后续扩展)
-		for i := range networks {
-			if i == 0 && asset.LastKnownIP4 != nil {
-				networks[i].IPv4Address = *asset.LastKnownIP4
+		// 写回 IP：IPv4/IPv6 都回到**第一张**网卡（即 listNetworks 排序后最早创建的那张，
+		// 也就是 Retire 存 last_known_ip* 时读的那张）。双栈落在同一张卡是常态。
+		//
+		// 早先这里 IPv6 那支漏了「只有第一张」的守卫：N 张网卡的资产恢复后**每张卡都被写上
+		// 同一个 IPv6** —— 一个地址同时挂在 N 个接口上。IPv4 那支有 i == 0，IPv6 没有，
+		// 是不对称漏写；两支护在一起才不会再次分叉。
+		//
+		// 已知局限（如实记录，别当它不存在）：Retire 只记 IP、不记它原来在哪张卡上
+		// （last_known_ip* 是**资产级**列），所以 IP 原属 NIC[1] 时恢复会落到 NIC[0]。
+		// 要精确还原得给 assets 加来源列，属独立决策（见 docs/FIX-PLAN-UI-PERF.md §8 登记）。
+		if len(networks) > 0 {
+			if asset.LastKnownIP4 != nil {
+				networks[0].IPv4Address = *asset.LastKnownIP4
 			}
 			if asset.LastKnownIP6 != nil {
-				networks[i].IPv6Address = *asset.LastKnownIP6
+				networks[0].IPv6Address = *asset.LastKnownIP6
 			}
 			if err := tx.Model(&models.AssetNetwork{}).
-				Where("id = ?", networks[i].ID).
+				Where("id = ?", networks[0].ID).
 				Updates(map[string]interface{}{
-					"ipv4_address": networks[i].IPv4Address,
-					"ipv6_address": networks[i].IPv6Address,
+					"ipv4_address": networks[0].IPv4Address,
+					"ipv6_address": networks[0].IPv6Address,
 				}).Error; err != nil {
 				return err
 			}
@@ -305,7 +332,7 @@ func (s *assetService) Restore(ctx context.Context, id string) (*models.Asset, [
 	}
 
 	// 重读
-	if err := s.db.WithContext(ctx).Where("asset_id = ?", uid).Find(&networks).Error; err != nil {
+	if networks, err = s.listNetworks(ctx, uid); err != nil {
 		return nil, nil, err
 	}
 	// 重新读 asset 拿最终状态 — 用新 struct 实例, 避免事务 Model.Updates 把 asset.ID 写回后再 First 触发重复 bind
