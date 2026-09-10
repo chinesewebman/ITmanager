@@ -20,6 +20,9 @@ export interface Alert {
   marked_by?: string | null;
   marked_at?: string | null;
   false_positive_note?: string | null;
+  // D-3：已关联的本系统工单 id。列表接口直出 models.Alert，该字段一直在响应里，
+  // 此前只是没在前端声明。空 = 尚未建单（见 getAlertActions 的建单分支）。
+  ticket_id?: string | null;
 }
 
 export interface AlertTableProps {
@@ -29,6 +32,8 @@ export interface AlertTableProps {
   onResolve: (id: string) => Promise<void> | void;
   // 小改进 #2：标记/反标记误报
   onMarkFP?: (id: string, isFP: boolean) => void;
+  // D-3：告警一键建单（undefined 时不渲染该按钮）
+  onCreateTicket?: (id: string) => void;
   // C-P6: 批量勾选（undefined 时不开启）
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
@@ -43,20 +48,24 @@ export interface AlertActionHandlers {
   onAck: (id: string) => void;
   onResolve: (id: string) => void;
   onMarkFP?: (id: string, isFP: boolean) => void;
+  onCreateTicket?: (id: string) => void;
 }
 
 export interface AlertAction {
   key: string;
   label: string;
   danger?: boolean;
-  onClick: () => void;
+  // 仅作指示的项（如「已建单」）disabled 且不带 onClick —— 让 onClick 可选比塞一个
+  // 永不执行的空函数诚实。antd Button 本就接受 undefined。
+  disabled?: boolean;
+  onClick?: () => void;
 }
 
 // M13：抽「操作按钮决策」为纯函数，桌面端（AlertTable 操作列）与移动端（AlertCard）共用，
 // 避免两处 status/is_false_positive 分支漂移（H9 教训：Assets 移动端与 AssetTable 桌面端渲染不一致导致 maintenance 标错）。
 export function getAlertActions(
   record: Alert,
-  { onAck, onResolve, onMarkFP }: AlertActionHandlers,
+  { onAck, onResolve, onMarkFP, onCreateTicket }: AlertActionHandlers,
 ): AlertAction[] {
   const actions: AlertAction[] = [];
   if (record.status === "problem") {
@@ -64,6 +73,15 @@ export function getAlertActions(
     actions.push({ key: "resolve", label: "解决", onClick: () => onResolve(record.id) });
   } else if (record.status === "acknowledged") {
     actions.push({ key: "resolve", label: "解决", onClick: () => onResolve(record.id) });
+  }
+  // D-3：一键建单。ticket_id 是列表查询时的快照，只用来**省一次请求**；
+  // 防重由后端幂等兜底（已关联时返回既有票、created=false），前端判断不承担正确性。
+  if (onCreateTicket) {
+    if (record.ticket_id) {
+      actions.push({ key: "ticket", label: "已建单", disabled: true });
+    } else {
+      actions.push({ key: "ticket", label: "建单", onClick: () => onCreateTicket(record.id) });
+    }
   }
   if (onMarkFP) {
     if (!record.is_false_positive) {
@@ -81,6 +99,7 @@ export const AlertTable = memo(function AlertTable({
   onAck,
   onResolve,
   onMarkFP,
+  onCreateTicket,
   selectedIds,
   onSelectionChange,
   total,
@@ -124,20 +143,28 @@ export const AlertTable = memo(function AlertTable({
     {
       title: "操作",
       key: "action",
-      width: 280,
+      width: 340, // D-3 加了「建单」后 280 会挤到换行
       fixed: "right",
       // M13：操作按钮决策抽到 getAlertActions，与移动端 AlertCard 共用（避免分支漂移）
       render: (_, record) => (
         <Space>
-          {getAlertActions(record, { onAck, onResolve, onMarkFP }).map((a) => (
-            <Button key={a.key} type="link" size="small" danger={a.danger} onClick={a.onClick}>
+          {getAlertActions(record, { onAck, onResolve, onMarkFP, onCreateTicket }).map((a) => (
+            <Button
+              key={a.key}
+              type="link"
+              size="small"
+              danger={a.danger}
+              disabled={a.disabled}
+              onClick={a.onClick}
+            >
               {a.label}
             </Button>
           ))}
         </Space>
       ),
     },
-  ], [onAck, onResolve, onMarkFP]);
+    // R-2：onCreateTicket 漏进依赖会让 columns 不随新回调重建 → React.memo 下按钮停在旧闭包
+  ], [onAck, onResolve, onMarkFP, onCreateTicket]);
 
   return (
     <Table<Alert>

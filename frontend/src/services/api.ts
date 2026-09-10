@@ -140,6 +140,13 @@ export const alertApi = {
       responseType: "blob",
     });
   },
+  // D-3：从告警一键建单。后端**幂等** —— 该告警已有关联工单时返回既有那张并置
+  // created=false（HTTP 200），不是错误。created 决定前端提示「已建单」还是「该告警已建单」。
+  createTicket: (id: string) =>
+    apiSend<{ ticket: { ticket_number: string }; created: boolean }>(
+      "post",
+      `/alerts/${id}/ticket`,
+    ),
 };
 
 // ==================== 告警规则 ====================

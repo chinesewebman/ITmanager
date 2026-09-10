@@ -251,7 +251,12 @@ func ticketFromAlert(a *models.Alert, userID string) *models.Ticket {
 }
 
 // priorityFromSeverity Zabbix 0-5 严重级别 → tickets.priority。
-// 取值 low/medium/high/critical 与前端工单页的优先级下拉一致。
+//
+// 取值 low/medium/high/critical，与真实写入方（GLPI 同步 integration/glpi.go:158）一致。
+// **已知分歧（M16）**：openapi.yaml 的 Ticket.priority enum 与前端工单表单/筛选下拉用的是
+// normal，本函数与 GLPI 用的是 medium —— 同一个「普通」概念两套词。后果是 /tickets 按
+// 「普通」筛选查不到本函数建出来的票。改哪一边是契约决策（可能牵扯存量数据迁移），
+// 未定案前不要单方面改这里，详见 docs/FIX-PLAN-UI-PERF.md M16。
 func priorityFromSeverity(sev int) string {
 	switch {
 	case sev >= 5: // Disaster

@@ -1,8 +1,11 @@
 // Alerts page：W1 去假数据兜底 + W2 时间格式化 + 空 data 守卫。
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import Alerts from "./Alerts";
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
+// antd 的 message 在 src/test/setup.ts 里被全局 mock 成 vi.fn()，断言打在调用上
+// （jsdom 下静态 message 不落 DOM，查文本必失败）。
+import { message } from "antd";
+import Alerts, { ticketResultMessage } from "./Alerts";
 
 const h = vi.hoisted(() => ({
   override: {} as Record<string, unknown>,
@@ -12,6 +15,11 @@ const h = vi.hoisted(() => ({
   mutateAsync: vi.fn(),
   // M3/P5：记录 queryKey，供分页/筛选断言
   lastKey: null as unknown,
+  // D-3：每次 useApiMutation 的 (opts, mutate) 都留档。mock 的 mutate 不会真发请求，
+  // 于是 onSuccess 的回调分支（created 分流）没有触发入口 —— 靠「哪个 mutate 被点了」
+  // 反查它对应的 opts，再手工驱动。按顺序取 index 会因为新增 mutation 而悄悄错位，
+  // 反查不会：点没点过是事实。
+  mutations: [] as { mutate: ReturnType<typeof vi.fn>; opts: any }[],
 }))
 
 const mockAlerts = [
@@ -54,7 +62,13 @@ vi.mock("../hooks/useApiQuery", () => ({
       ...h.override,
     }
   },
-  useApiMutation: () => ({ mutate: h.mutate, mutateAsync: h.mutateAsync, isPending: false }),
+  useApiMutation: (_fn: unknown, opts: unknown) => {
+    // 每次调用一个独立 spy（都转发到共享的 h.mutate，既有断言不受影响），
+    // 这样「哪一个 mutation 被触发」是可判定的。
+    const mutate = vi.fn((...args: unknown[]) => h.mutate(...args))
+    h.mutations.push({ mutate, opts })
+    return { mutate, mutateAsync: h.mutateAsync, isPending: false }
+  },
   queryKeys: { alerts: { list: (f?: Record<string, unknown>) => ["alerts", "list", f ?? {}] } },
 }));
 
@@ -63,6 +77,10 @@ beforeEach(() => {
   h.refetch.mockClear()
   h.mutate.mockClear()
   h.lastKey = null
+  h.mutations = []
+  vi.mocked(message.success).mockClear()
+  vi.mocked(message.info).mockClear()
+  vi.mocked(message.error).mockClear()
 })
 
 describe("Alerts page", () => {
@@ -186,5 +204,80 @@ describe("Alerts page", () => {
     await waitFor(() => {
       expect((h.lastKey as any)[2]).toMatchObject({ status: "resolved", page: 1 });
     });
+  });
+
+  // ---- D-3 告警一键建单 ----
+
+  // 入口在 getAlertActions（桌面表格 / 移动卡片共用），这里验证页面确实把 onClick
+  // 接到了建单 mutation 上、且带的是该行的告警 id（接错行会建出别的告警的票）。
+  it("D-3：点告警行「建单」调用建单 mutation，参数是该行告警 id", async () => {
+    render(<Alerts />);
+    // 「建单」精确匹配，不会命中「已建单」；两行都未建单，取第一行（id=1）
+    fireEvent.click(screen.getAllByText("建单")[0]);
+    await waitFor(() => {
+      expect(h.mutate).toHaveBeenCalledWith("1");
+    });
+  });
+
+  // R-3：created=false 是「这张告警早就有票」，不是失败。写成 error 会让运维以为建单挂了
+  // 而反复重试 —— 断言用户真的看到 info 文案，而不是「建单失败」。
+  it("D-3：created=false 提示「该告警已建单」，不是失败", async () => {
+    render(<Alerts />);
+    fireEvent.click(screen.getAllByText("建单")[0]);
+    // 反查被触发的那个 mutation，手工驱动它的 onSuccess（mock 不会真发请求）
+    const fired = h.mutations.find((m) => m.mutate.mock.calls.length > 0);
+    expect(fired).toBeTruthy();
+    await act(async () => {
+      fired!.opts.onSuccess({
+        created: false,
+        ticket: { ticket_number: "TICKET-9" },
+      });
+    });
+    expect(message.info).toHaveBeenCalledWith(
+      expect.stringContaining("TICKET-9"),
+    );
+    // 关键：不是失败提示。说成 error 会让运维以为建单挂了而反复重试。
+    expect(message.error).not.toHaveBeenCalled();
+    expect(message.success).not.toHaveBeenCalled();
+    expect(h.refetch).toHaveBeenCalled();
+  });
+
+  it("D-3：created=true 提示新建的工单号", async () => {
+    render(<Alerts />);
+    fireEvent.click(screen.getAllByText("建单")[0]);
+    const fired = h.mutations.find((m) => m.mutate.mock.calls.length > 0);
+    await act(async () => {
+      fired!.opts.onSuccess({
+        created: true,
+        ticket: { ticket_number: "TICKET-10" },
+      });
+    });
+    expect(message.success).toHaveBeenCalledWith(
+      expect.stringContaining("TICKET-10"),
+    );
+    expect(message.info).not.toHaveBeenCalled();
+    expect(message.error).not.toHaveBeenCalled();
+  });
+});
+
+// 提示分流的纯逻辑。抽出来就是为了能这样直接钉住「已建单 ≠ 失败」。
+describe("ticketResultMessage", () => {
+  it("created=true → success，文案带工单号", () => {
+    const m = ticketResultMessage(true, "TICKET-20260910-001");
+    expect(m.level).toBe("success");
+    expect(m.text).toContain("TICKET-20260910-001");
+  });
+
+  it("created=false → info（不是 error），且文案与新建可区分", () => {
+    const m = ticketResultMessage(false, "TICKET-20260910-001");
+    expect(m.level).toBe("info");
+    expect(m.text).toContain("TICKET-20260910-001");
+    // 两条文案必须不同：否则运维看不出「这次没新建」还是「又建了一张」
+    expect(m.text).not.toBe(ticketResultMessage(true, "TICKET-20260910-001").text);
+  });
+
+  it("工单号缺失时不渲染出裸 undefined", () => {
+    expect(ticketResultMessage(true).text).not.toContain("undefined");
+    expect(ticketResultMessage(false).text).not.toContain("undefined");
   });
 });

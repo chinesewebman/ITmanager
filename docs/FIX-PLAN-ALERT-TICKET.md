@@ -1,6 +1,6 @@
 # 功能需求文档：告警 → 一键建单（收口 D-3）
 
-> 状态: **已实现**（步骤 1–8 全部落地；前端「建单」按钮按 §6 留下一轮）
+> 状态: **已实现（含前端入口，§7）** —— 后端步骤 1–8 全落地；前端「建单」按钮按 §7 落地，2026-09-10
 > 日期: 2026-09-10
 > 基线: `main` @ 6a501e0
 > 依据: `05-运维工单.md` §5.4、[ADR-0004](adr/0004-工单SoT决策.md)、`TODO.md` D-3
@@ -85,7 +85,7 @@ POST /api/alerts/{id}/ticket
 | `title` | `[主机名] 触发器名` | 触发器名为空退化用 `problem`，再空退化用 `告警 <alert_id>`；**按 rune 截断到 255**（`varchar(255)` 在 PG 里数字符，但触发器名最长 500） |
 | `description` | 固定模板 | 来源告警 ID / 主机 / 触发器 / 级别 / 开始时间 / 现象，纯文本 |
 | `ticket_type` | `incident` | 告警即故障 |
-| `priority` | severity 映射 | 0,1→`low`；2,3→`medium`；4→`high`；5→`critical`（值域与前端 Tickets 页下拉一致） |
+| `priority` | severity 映射 | 0,1→`low`；2,3→`medium`；4→`high`；5→`critical`。**原写「与前端 Tickets 页下拉一致」是错的**（实测下拉是 `normal`，见 M16）——本函数跟的是 GLPI 同步的 `medium`，代价是工单页按「普通」筛选查不到这些票 |
 | `status` | `open` | 由 `Create` 默认值填 |
 | `source` | `alert` | 模型注释的枚举 `manual, email, api, glpi` 之外**新增 `alert`**，需同步注释 |
 | `asset_id` / `asset_name` | 告警的 `asset_id` / `host_name` | 资产关联能带上就带上 |
@@ -124,7 +124,51 @@ POST /api/alerts/{id}/ticket
 | 不做 | 原因 |
 |------|------|
 | 自动建单 / 规则触发建单 | ADR-0004 硬约束 |
-| 前端「建单」按钮 | **下一轮单独一步**（本轮先落可独立验证的端点 + 契约）。已知前端 `Alerts.tsx` 详情抽屉是入口位 |
+| ~~前端「建单」按钮~~ | **✅ 已完成**（§7，2026-09-10）。入口位见 §7.1（原写「`Alerts.tsx` 详情抽屉」，实测**该页没有详情抽屉**，已纠正） |
 | 工单 → 告警的反向导航 | 无需求；`alerts.ticket_id` 是单向链接 |
 | 建单事件发 eventbus / 通知 | 无需求（通知链路当前只订阅 `alert.created`/`alert.resolved`） |
 | `/tickets` 列表按来源筛选 | `source='alert'` 是新值，前端筛选器不认——**这是本轮的已知副作用**，下一轮随前端一起处理 |
+
+---
+
+## 7. 前端入口（下一轮，2026-09-10 补设计）
+
+### 7.1 入口位置：`getAlertActions`，不是详情抽屉
+
+§6 原写「`Alerts.tsx` 详情抽屉是入口位」——**实测该页没有详情抽屉/弹窗**。告警页的操作只有两处，且共用同一个决策函数：
+
+| 界面 | 文件 | 说明 |
+|------|------|------|
+| 桌面表格操作列 | `components/AlertTable.tsx:130` | `getAlertActions(record, handlers)` |
+| 移动端卡片 | `components/AlertCard.tsx:31` | 同一个 `getAlertActions` |
+
+`getAlertActions`（`AlertTable.tsx:57`）是 M13 抽出来的**纯函数**，存在的理由就是「桌面端与移动端不漂移」（H9 教训）。建单入口挂这里，一处实现两个界面同时生效，且天然有测试缝（`AlertCard.test.tsx` 已按这个模式测另外 4 个动作）。
+
+### 7.2 可见性：用 `ticket_id` 判断，但**正确性不依赖它**
+
+`alerts` 列表的 `items` 是 `[]models.Alert` 直出（`alert_handler.go:61`），**含 `ticket_id`** —— 前端 `Alert` interface（`AlertTable.tsx:9`）此前没声明这个字段，本轮补上。
+
+| `record.ticket_id` | 渲染 |
+|---|---|
+| 空 / 未定义 | 「建单」，可点，调 `POST /alerts/{id}/ticket` |
+| 非空 | 「已建单」，`disabled` |
+
+**关键**：列表里的 `ticket_id` 是**查询时的快照**。快照为 null 而实际已被别人建单时，点击后后端幂等返回 `created=false` → 前端提示「该告警已建单」。所以前端的可见性判断**只是省一次请求的优化**，正确性由后端幂等兜底 —— 反过来（让前端判断承担防重职责）就会在并发下建出两张票，正是后端 K-2 认领优先要解决的问题。
+
+### 7.3 文案分流（`created` 是给用户看的，不只是给代码看的）
+
+| 响应 | 提示 |
+|------|------|
+| `created=true` | `success`「已建单 TICKET-…」 |
+| `created=false` | `info`「该告警已建单：TICKET-…」（**不是 error**——这不是失败） |
+| 请求失败 | `error`「建单失败」 |
+
+成功后 `refetch()`：让 `ticket_id` 刷新，按钮自动翻成「已建单」。
+
+### 7.4 Risk
+
+| # | 失败模式 | 缓解 |
+|---|---------|------|
+| R-1 | `AlertAction.onClick` 改可选后，既有 4 个动作漏传 onClick 不再编译报错（类型保护变弱） | 只有 disabled 项省略 onClick；渲染处 antd `Button` 本就接受 `undefined`；既有动作的点击行为已有 `AlertCard.test.tsx` 4 条断言守着 |
+| R-2 | `Alerts.tsx` 新增的回调没进 `AlertTable` columns 的 `useMemo` 依赖 → memo 失效（P4 教训） | `handleCreateTicket` 走 `useCallback`，并计入 columns 依赖数组 |
+| R-3 | 提示文案把「已建单」说成失败，运维重复操作 | `created=false` 走 `info` 不走 `error`；测试断言两条文案互不相同 |

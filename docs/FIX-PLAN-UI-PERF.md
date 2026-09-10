@@ -403,7 +403,12 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 
 **下一步（按顺序）**：
 1. ~~W1 逐页推进~~ → W1 全部 11 页已完成（Dashboard/Alerts/Assets/Tickets/Oncall/AlertSuppressions/MetricSnapshot/Racks/Topology/Runbook/AssetTimeline）。
-1.5. **D-3 告警一键建单（后端，2026-09-10 完成，出自 `docs/FIX-PLAN-ALERT-TICKET.md`，不在本表 W 系列内）** → `POST /api/alerts/{id}/ticket` + `TicketService.CreateFromAlert`（认领优先 + 认领与插票同事务）；8 service 用例 + 4 handler 用例绿，3 条变异红在业务断言；openapi + `gen:api` 已同步；TODO.md D-3 收口、`05-运维工单.md` §5.4/§5.5 同步。**留待下一轮**：前端告警详情抽屉的「建单」按钮 + `/tickets` 列表对 `source='alert'` 的筛选口径（见该文档 §6）。
+1.5. **D-3 告警一键建单（2026-09-10 完成，出自 `docs/FIX-PLAN-ALERT-TICKET.md`，不在本表 W 系列内）**
+   - **后端**：`POST /api/alerts/{id}/ticket` + `TicketService.CreateFromAlert`（认领优先 + 认领与插票同事务）；8 service 用例 + 4 handler 用例绿，3 条变异红在业务断言；openapi + `gen:api` 已同步；TODO.md D-3 收口、`05-运维工单.md` §5.4/§5.5 同步。
+   - **前端**（本轮）：入口挂在 `getAlertActions`（`AlertTable.tsx` 纯函数，桌面表格与移动卡片共用，一处实现两界面生效）——**不是**原先假设的「告警详情抽屉」，实测该页没有抽屉，已纠正设计记录 §6/§7。`Alert` 补 `ticket_id` 字段；`ticket_id` 非空渲染 disabled 的「已建单」，否则可点的「建单」。提示分流抽成纯函数 `ticketResultMessage`（`Alerts.tsx` 具名导出）：`created=true`→`success`，`created=false`→**`info`**「该告警已建单」（幂等不是失败，写成 error 会让运维反复重试）。**可见性判断只用来省一次请求，正确性由后端幂等兜底**——让前端判断承担防重职责会在并发下建出两张票。
+   - **测试**：`AlertCard.test.tsx` +3（建单/已建单 disabled/未传不渲染）、`Alerts.test.tsx` +5（点击带对 id、created 两个分支的用户可见文案、纯函数 3 条）；4 条变异全部红在业务断言（V-1 已建单判断置 false / V-2 created=false 走 error / V-3 onSuccess 忽略 created / V-4 丢 disabled 透传），还原字节一致。
+   - **测试基建**：`Alerts.test.tsx` 的 `useApiMutation` mock 由「忽略参数、共用一个 mutate spy」改为「每次调用一个独立 spy（转发到共享 spy）+ 留档 opts」——原先 onSuccess 回调分支**没有触发入口**；新写法按「哪个 spy 被点了」反查对应 opts，不依赖调用顺序（新增 mutation 不会悄悄错位）。`antd` 的 `message` 已在 `src/test/setup.ts` 全局 mock，断言打在调用上（jsdom 下静态 message 不落 DOM）。
+   - **未做（登记）**：`/tickets` 列表对 `source='alert'` 的筛选口径；M16 优先级域 normal vs medium（见上「已知阻塞」）。
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。

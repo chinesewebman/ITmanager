@@ -34,6 +34,15 @@ interface AlertsResp {
   total: number;
 }
 
+// D-3：created 决定提示文案与级别。抽成纯函数是因为「已建单」这条最容易被写成 error ——
+// 它不是失败（重复点、或并发被别人抢先），写成 error 会让运维以为建单挂了而反复重试。
+export function ticketResultMessage(created: boolean, ticketNumber?: string) {
+  if (created) {
+    return { level: "success" as const, text: `已建单 ${ticketNumber ?? ""}`.trim() };
+  }
+  return { level: "info" as const, text: `该告警已建单：${ticketNumber ?? "已存在"}` };
+}
+
 function Alerts() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [severityFilter, setSeverityFilter] = useState<string>("");
@@ -159,6 +168,24 @@ function Alerts() {
     },
   );
 
+  // D-3：告警一键建单。后端幂等，created 区分「本次新建」与「早就有票」——
+  // 后者不是失败（重复点 / 并发被别人抢先都会走到这里），故走 info 不走 error。
+  // 成功后 refetch：让列表里的 ticket_id 刷新，按钮翻成「已建单」。
+  const createTicketMut = useApiMutation(
+    (id: string) => alertApi.createTicket(id),
+    {
+      onSuccess: (r) => {
+        const { level, text } = ticketResultMessage(
+          !!r?.created,
+          r?.ticket?.ticket_number,
+        );
+        message[level](text);
+        refetch();
+      },
+      onError: () => message.error("建单失败"),
+    },
+  );
+
   // 小改进 #2：导出误报训练集 CSV（浏览器下载）
   const handleExportFP = async () => {
     try {
@@ -184,11 +211,16 @@ function Alerts() {
   const { mutate: ackMutate } = ackMut;
   const { mutate: resolveMutate } = resolveMut;
   const { mutate: markFPMutate } = markFPMut;
+  const { mutate: createTicketMutate } = createTicketMut;
   const handleAck = useCallback((id: string) => ackMutate(id), [ackMutate]);
   const handleResolve = useCallback((id: string) => resolveMutate(id), [resolveMutate]);
   const handleMarkFP = useCallback(
     (id: string, isFP: boolean) => markFPMutate({ id, isFP }),
     [markFPMutate],
+  );
+  const handleCreateTicket = useCallback(
+    (id: string) => createTicketMutate(id),
+    [createTicketMutate],
   );
 
   const list = data?.items ?? [];
@@ -302,6 +334,7 @@ function Alerts() {
                   onAck={handleAck}
                   onResolve={handleResolve}
                   onMarkFP={handleMarkFP}
+                  onCreateTicket={handleCreateTicket}
                 />
               )}
             />
@@ -312,6 +345,7 @@ function Alerts() {
               onAck={handleAck}
               onResolve={handleResolve}
               onMarkFP={handleMarkFP}
+              onCreateTicket={handleCreateTicket}
               selectedIds={selectedIds}
               onSelectionChange={setSelectedIds}
               total={total}

@@ -9,10 +9,12 @@ export interface AlertCardProps {
   onAck: (id: string) => void;
   onResolve: (id: string) => void;
   onMarkFP?: (id: string, isFP: boolean) => void;
+  // D-3：告警一键建单（undefined 时不渲染该按钮）
+  onCreateTicket?: (id: string) => void;
 }
 
 // M13：移动端单条告警卡片（替代表格在 xs 断点横向溢出）。操作按钮走 getAlertActions 与桌面端同一决策。
-export function AlertCard({ alert, onAck, onResolve, onMarkFP }: AlertCardProps) {
+export function AlertCard({ alert, onAck, onResolve, onMarkFP, onCreateTicket }: AlertCardProps) {
   const { token } = theme.useToken();
   return (
     <div>
@@ -28,8 +30,15 @@ export function AlertCard({ alert, onAck, onResolve, onMarkFP }: AlertCardProps)
         </div>
       </div>
       <Space style={{ marginTop: 8 }}>
-        {getAlertActions(alert, { onAck, onResolve, onMarkFP }).map((a) => (
-          <Button key={a.key} type="link" size="small" danger={a.danger} onClick={a.onClick}>
+        {getAlertActions(alert, { onAck, onResolve, onMarkFP, onCreateTicket }).map((a) => (
+          <Button
+            key={a.key}
+            type="link"
+            size="small"
+            danger={a.danger}
+            disabled={a.disabled}
+            onClick={a.onClick}
+          >
             {a.label}
           </Button>
         ))}
