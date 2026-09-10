@@ -19,6 +19,10 @@ import (
 //  5. internal/api/routes_integration_test.go 的 matrixRoles
 //  6. openapi.yaml 的 User.role enum + frontend/src/types/index.ts 的 union
 //
+// 引用角色的代码一律走 Can() / IsKnownRole() / CanonicalRole()，禁止直接比较字面量
+// （如 `role == "admin"`）：直接比较会绕过 CanonicalRole 的遗留别名折叠与 fail-safe
+// 只读地板，还会把 user 兜底角色（只读地板，见 knownRoles）误判为「无效角色」。
+//
 // 详见 docs/FIX-PLAN-AUTHZ.md §3.1。
 const (
 	RoleAdmin    = "admin"
