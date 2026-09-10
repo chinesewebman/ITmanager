@@ -21,9 +21,19 @@ import (
 // 本文件只测不依赖 svc 的 GetIntegrationStatus 路由
 
 func newIntegrationTestRouter(cfg *config.Config) *gin.Engine {
+	return newIntegrationTestRouterWithRole(cfg, "")
+}
+
+// newIntegrationTestRouterWithRole 同 newIntegrationTestRouter，但在注册路由前注入指定 role
+// （模拟 auth 中间件 c.Set("role", …)）。role 为空则走 fail-safe 只读地板。
+// 注：gin 的 Engine.Use 只作用于之后注册的路由，所以必须在这里（g.GET 之前）注入。
+func newIntegrationTestRouterWithRole(cfg *config.Config, role string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(gin.Recovery())                         // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
+	r.Use(gin.Recovery()) // 把 svc=nil 触发的 panic 转 500（不让它穿透 testing.tRunner）
+	if role != "" {
+		r.Use(func(c *gin.Context) { c.Set("role", role); c.Next() })
+	}
 	h := handlers.NewIntegrationHandler(nil, cfg) // nil svc，Sync 路由不能实际调用
 	g := r.Group("/integrations")
 	g.POST("/sync", h.Sync)
@@ -132,6 +142,61 @@ func TestIntegrationStatus_不泄露Secret字段(t *testing.T) {
 	assert.NotContains(t, body, `"password"`)
 }
 
+// P2-1/Pre-1：readonly/auditor/user 可看集成配置状态（enabled/url/user），
+// 但不看凭据存在性（has_*）；canManage（admin/ops_admin）看完整状态。
+func TestIntegrationStatus_凭据存在性仅canManage可见(t *testing.T) {
+	cfg := minimalCfgForTest("http://netbox.local", "http://zabbix.local", "http://glpi.local")
+	cfg.Integrations.Netbox.Token = "tok"
+	cfg.Integrations.Zabbix.User = "zbx-user"
+	cfg.Integrations.Zabbix.Password = "pwd"
+	cfg.Integrations.GLPI.AppToken = "app"
+	cfg.Integrations.GLPI.UserToken = "user"
+
+	cases := []struct {
+		role    string
+		wantHas bool
+	}{
+		{"admin", true},
+		{"ops_admin", true},
+		{"ops_user", false},
+		{"auditor", false},
+		{"readonly", false},
+		{"user", false},
+		{"", false}, // 未知/空角色 → fail-safe 只读地板
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			r := newIntegrationTestRouterWithRole(cfg, tc.role)
+
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+			require.Equal(t, http.StatusOK, w.Code)
+
+			var resp map[string]interface{}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			data := resp["data"].(map[string]interface{})
+			netbox := data["netbox"].(map[string]interface{})
+			zabbix := data["zabbix"].(map[string]interface{})
+			glpi := data["glpi"].(map[string]interface{})
+
+			// 配置状态（url/user）对所有人可见
+			assert.Contains(t, netbox, "url")
+			assert.Contains(t, zabbix, "user")
+
+			// 凭据存在性（has_*）仅 canManage 可见
+			_, nbHas := netbox["has_token"]
+			_, zbxHas := zabbix["has_password"]
+			_, glpiApp := glpi["has_app_token"]
+			_, glpiUser := glpi["has_user_token"]
+			assert.Equal(t, tc.wantHas, nbHas, "netbox.has_token")
+			assert.Equal(t, tc.wantHas, zbxHas, "zabbix.has_password")
+			assert.Equal(t, tc.wantHas, glpiApp, "glpi.has_app_token")
+			assert.Equal(t, tc.wantHas, glpiUser, "glpi.has_user_token")
+		})
+	}
+}
+
 // ==================== BUG FIX 回归测试 ====================
 
 // TestSync_非法Type_返400 — BUG#7
@@ -189,7 +254,7 @@ func TestIntegrationStatus_Zabbix_HasUserAndHasPassword(t *testing.T) {
 	cfg := minimalCfgForTest("", "http://zabbix.local", "")
 	cfg.Integrations.Zabbix.User = "Admin"
 	cfg.Integrations.Zabbix.Password = "zabbix"
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
@@ -207,7 +272,7 @@ func TestIntegrationStatus_Zabbix_NoPassword(t *testing.T) {
 	cfg := minimalCfgForTest("", "http://zabbix.local", "")
 	cfg.Integrations.Zabbix.User = "Admin"
 	cfg.Integrations.Zabbix.Password = ""
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
@@ -309,7 +374,7 @@ func TestTestZabbix_svcNil_返500(t *testing.T) {
 func TestIntegrationStatus_NetBox_HasToken(t *testing.T) {
 	cfg := minimalCfgForTest("http://netbox.local", "", "")
 	cfg.Integrations.Netbox.Token = "real-token-xyz"
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -320,7 +385,7 @@ func TestIntegrationStatus_NetBox_HasToken(t *testing.T) {
 
 func TestIntegrationStatus_NetBox_NoToken(t *testing.T) {
 	cfg := minimalCfgForTest("http://netbox.local", "", "")
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
 	assert.Contains(t, w.Body.String(), `"has_token":false`)
@@ -331,7 +396,7 @@ func TestIntegrationStatus_GLPI_HasTokens(t *testing.T) {
 	cfg := minimalCfgForTest("", "", "http://glpi.local")
 	cfg.Integrations.GLPI.AppToken = "app-tok"
 	cfg.Integrations.GLPI.UserToken = "" // 只有 app
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
 	body := w.Body.String()

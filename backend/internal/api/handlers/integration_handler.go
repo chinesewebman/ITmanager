@@ -8,6 +8,7 @@ import (
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/integration"
+	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/redact"
 
 	"github.com/gin-gonic/gin"
@@ -90,26 +91,37 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 
 // GetIntegrationStatus 获取集成状态
 func (h *IntegrationHandler) GetIntegrationStatus(c *gin.Context) {
+	// P2-1/Pre-1：readonly/auditor/user 可看集成配置状态（enabled/url/user），
+	// 但不看凭据存在性（has_*）——那属敏感信息（boolean 泄露密码是否已配置）。
+	// canManage 角色（admin/ops_admin）看完整状态，供 Settings 配置页显示「已配置/未配置」。
+	canManage := middleware.Can(c.GetString("role"), middleware.CapManage)
+
+	netbox := gin.H{
+		"enabled": h.config.Integrations.Netbox.URL != "",
+		"url":     h.config.Integrations.Netbox.URL,
+	}
+	zabbix := gin.H{
+		"enabled": h.config.Integrations.Zabbix.URL != "",
+		"url":     h.config.Integrations.Zabbix.URL,
+		"user":    h.config.Integrations.Zabbix.User,
+	}
+	glpi := gin.H{
+		"enabled": h.config.Integrations.GLPI.URL != "",
+		"url":     h.config.Integrations.GLPI.URL,
+	}
+	if canManage {
+		netbox["has_token"] = h.config.Integrations.Netbox.Token != ""
+		zabbix["has_password"] = h.config.Integrations.Zabbix.Password != ""
+		glpi["has_app_token"] = h.config.Integrations.GLPI.AppToken != ""
+		glpi["has_user_token"] = h.config.Integrations.GLPI.UserToken != ""
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"netbox": gin.H{
-				"enabled":   h.config.Integrations.Netbox.URL != "",
-				"url":       h.config.Integrations.Netbox.URL,
-				"has_token": h.config.Integrations.Netbox.Token != "",
-			},
-			"zabbix": gin.H{
-				"enabled":      h.config.Integrations.Zabbix.URL != "",
-				"url":          h.config.Integrations.Zabbix.URL,
-				"user":         h.config.Integrations.Zabbix.User,
-				"has_password": h.config.Integrations.Zabbix.Password != "",
-			},
-			"glpi": gin.H{
-				"enabled":        h.config.Integrations.GLPI.URL != "",
-				"url":            h.config.Integrations.GLPI.URL,
-				"has_app_token":  h.config.Integrations.GLPI.AppToken != "",
-				"has_user_token": h.config.Integrations.GLPI.UserToken != "",
-			},
+			"netbox": netbox,
+			"zabbix": zabbix,
+			"glpi":   glpi,
 		},
 	})
 }
