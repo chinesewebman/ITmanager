@@ -10,15 +10,26 @@ on:
 permissions:
   contents: read
 
+# actions/* 统一在 v7（2026-09-10 从 checkout@v4 / setup-go@v5 / setup-node@v4 /
+# upload-artifact@v4 升上来）。旧版跑在 Node 20 上，GitHub 已标记 deprecated：
+# 每次运行都报 "Node.js 20 is deprecated ... forced to run on Node.js 24" —— 现在
+# 只是被强制兜住仍能跑通，等兜底层撤掉就会直接红。v7 的 runs.using 是 node24，
+# 要求 runner ≥ 2.327.1（托管 runner 早已满足）。
+# 升级面：checkout v6 起凭据持久化到单独文件、v7 拦 fork PR 的 pull_request_target
+# checkout；setup-go v6 起 toolchain 选择逻辑变化；setup-node v5 起按 packageManager
+# 字段自动开缓存、v6 起收窄为仅 npm；upload-artifact v7 新增 archive:false 直传。
+# 本工作流全都不落在这些变更面上：无 git 写操作、无 packageManager 字段、
+# go.mod 无 toolchain 指令、artifact 仍走 name+path。
+
 jobs:
   backend:
     name: Backend (Go)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # 跟 go.mod 的 go 指令走（当前 1.25.0）。原先钉 1.21，而 go.mod 要求
           # 1.25.0 → 每次 CI 都靠 GOTOOLCHAIN=auto 额外下载 ~100MB 工具链，
@@ -51,7 +62,7 @@ jobs:
         run: go build -o bin/seed ./cmd/seed
 
       - name: Upload backend binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-binaries
           path: backend/bin/
@@ -76,10 +87,10 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # 跟 go.mod 的 go 指令走（当前 1.25.0）。原先钉 1.21，而 go.mod 要求
           # 1.25.0 → 每次 CI 都靠 GOTOOLCHAIN=auto 额外下载 ~100MB 工具链，
@@ -150,10 +161,10 @@ jobs:
     name: Frontend (Node)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # jsdom@29（vitest 的 jsdom 环境）engines: ^20.19.0 || ^22.13.0 || >=24；
           # Node 18 下 require() ESM 直接抛错 → 单测步骤 3s 内 exit 1（CI 长期红）。
@@ -195,7 +206,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist/
@@ -210,7 +221,7 @@ jobs:
     # 不在这里 build/up：Go+Node 全量构建会给每次 push 加 3–5 分钟，
     # 编译由 backend/frontend job 覆盖、迁移由 dbsmoke 覆盖。
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Dockerfile 存在性（G-9 回归）
         run: |
