@@ -383,6 +383,28 @@
 **检测方法**: 全仓找「只按主键更新 + 有一个 status/state 列」的写路径（grep `Where("id = ?"` 后跟 `Updates`），看 UPDATE 的 WHERE 里有没有带上合法源状态；再找前端有没有对应的按钮显隐逻辑——**只要显隐逻辑存在而后端没有对应的 WHERE 守卫，就是同一个洞**。批量路径（`id IN ?`）别漏。
 **解法**: 合法源状态写进 UPDATE 的 WHERE（`id = ? AND status IN (...)`），**不要**写成「读出来在 Go 里判断再写」——后者有 TOCTOU 窗口，会原样复现这个缺陷。`RowsAffected == 0` 走冷路径复读一次，区分「幂等成功（已在目标态）/ 状态冲突 / 记录不存在」三种。重复请求分两类：已在**目标态** → 幂等成功且**不重写时间戳**（重写会污染 MTTR/MTTD）；已在**更后的终态** → 拒绝（409，不是 500 也不是 400）。批量路径**不因个别 id 状态不合法而整批失败**，让它们落空、`affected` 如实报数。
 
+### T-44. 在 service 层的**消费方**判 `gorm.ErrRecordNotFound` —— 判据永不命中，语义错误静默降级成 500
+**状态**: ACTIVE | **类别**: 逻辑 / 分层边界
+**现象**: 2026-09-11（M21 轮，gRPC）。`grpcserver/alert_server.go` 的 `GetAlert` 写的是
+`if errors.Is(err, gorm.ErrRecordNotFound) { return NotFound }`，但 `service.Get` 返回的是
+`service.ErrNotFound`（`alert_service.go:225` 把 gorm 的错误**在 service 层就翻译掉了**）。
+判据永不命中 → 「告警不存在」被报成 `codes.Internal`，客户端当服务端故障去重试。
+同一个 RPC 里还并行存在第二种病：`status.Errorf(codes.Internal, "%v", err)` 把原始错误文本
+**塞进响应**，与 `apierr.Respond` 的出口契约（G-28：原始文本只进日志、且经 `redact.Text`）相反。
+
+**为什么容易被写出来**: `gorm.ErrRecordNotFound` 在 service 层是**正确的**判据
+（那里正是 gorm 调用的最近处，全仓 20+ 处在用且都对）。错的是把它带到**上层**：分层之后
+上层根本见不到 gorm 的错误类型了。看起来「和别处一样」，实际语义完全不同。
+
+**检测方法**: `grep -rn "gorm.ErrRecordNotFound" --include="*.go" . | grep -v _test`，
+凡是出现在 `internal/service/` **之外**的，逐一核对它拿到的是不是 gorm 的原始错误。
+另一种形态是 `apierr.TranslateDBError`（它只认 gorm 错误）—— 见 §8 登记，当前无生产调用方。
+
+**解法**: 上层只认 service 的哨兵错误（`ErrNotFound`/`ErrInvalidState`/…），翻译集中到一个函数里
+（`grpcserver.serviceErrToStatus` / `apierr.Respond` 家族），**覆盖 service 包全部哨兵**而不是
+只覆盖今天可达的那几支 —— 漏掉的那支正是会静默降级的那支。非哨兵错误一律 Internal/500，
+文案用通用串，原始文本只经 `redact.Text` 进日志。
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -447,6 +469,7 @@
 | — (M16 轮) | T-41 | FIXED |
 | — (M19 轮) | T-42 | ACTIVE |
 | — (M19 轮) | T-43 | ACTIVE |
+| — (M21 轮) | T-44 | ACTIVE |
 
 ---
 

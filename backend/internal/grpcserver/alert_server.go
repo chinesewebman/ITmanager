@@ -9,11 +9,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"gorm.io/gorm"
 	"network-monitor-platform/api/proto/alert/v1"
 	"network-monitor-platform/internal/cursor"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/redact"
 	"network-monitor-platform/internal/service"
+	"network-monitor-platform/pkg/logger"
 )
 
 // AlertServer 包装 AlertService 暴露 gRPC
@@ -58,7 +59,7 @@ func (s *AlertServer) ListAlerts(ctx context.Context, req *alertv1.ListAlertsReq
 
 	alerts, _, _, err := s.svc.List(ctx, filter)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("ListAlerts", err)
 	}
 
 	// 老 page/size 不支持 — 走 offset 模拟
@@ -67,7 +68,7 @@ func (s *AlertServer) ListAlerts(ctx context.Context, req *alertv1.ListAlertsReq
 		filter.Limit = limit + offset
 		alerts, _, _, err = s.svc.List(ctx, filter)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "%v", err)
+			return nil, serviceErrToStatus("ListAlerts", err)
 		}
 		if len(alerts) > offset {
 			alerts = alerts[offset:]
@@ -84,10 +85,7 @@ func (s *AlertServer) GetAlert(ctx context.Context, req *alertv1.GetAlertRequest
 	}
 	a, err := s.svc.Get(ctx, req.Id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "alert not found")
-		}
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("GetAlert", err)
 	}
 	return alertToProto(a), nil
 }
@@ -98,14 +96,11 @@ func (s *AlertServer) AckAlert(ctx context.Context, req *alertv1.AckAlertRequest
 	}
 	if err := s.svc.Acknowledge(ctx, req.Id, req.UserId); err != nil {
 		// M19: 状态冲突要能被客户端识别成「别再试了」而不是「服务端炸了」
-		if errors.Is(err, service.ErrInvalidState) {
-			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
-		}
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("AckAlert", err)
 	}
 	a, err := s.svc.Get(ctx, req.Id)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("AckAlert", err)
 	}
 	return alertToProto(a), nil
 }
@@ -116,19 +111,47 @@ func (s *AlertServer) ResolveAlert(ctx context.Context, req *alertv1.ResolveAler
 	}
 	if err := s.svc.Resolve(ctx, req.Id, req.UserId); err != nil {
 		// M19: 同 AckAlert
-		if errors.Is(err, service.ErrInvalidState) {
-			return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
-		}
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("ResolveAlert", err)
 	}
 	a, err := s.svc.Get(ctx, req.Id)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, serviceErrToStatus("ResolveAlert", err)
 	}
 	return &alertv1.ResolveAlertResponse{Alert: alertToProto(a)}, nil
 }
 
 // ---- helpers ----
+
+// serviceErrToStatus 把 service 层的哨兵错误翻译成 gRPC 状态码，一处集中。
+//
+// 为什么集中而不是各调用点自己 if：散着写必定会漏，而**漏掉的那支静默降级成
+// codes.Internal** —— 客户端把「告警不存在」当成「服务端炸了」去重试，正是 M19
+// 在 HTTP 侧修掉的那个形态（409 落 500）。故本函数覆盖 service 包的**全部**哨兵，
+// 而不是只覆盖今天这条路径可达的那几个：翻译表本来就是用来防「将来新增的那支没人管」。
+//
+// 与 apierr.Respond 共用同一份出口契约（G-28）：**原始错误文本永不进响应**，
+// 只在 codes.Internal 时经 redact.Text 记日志 —— 内部错误可能带 DSN / URL userinfo。
+// 哨兵那几支的文案是我们自己写的、可安全外露：M19 刻意让状态冲突带上真实原因，
+// 好让客户端区分「别再试了」和「改参数重试」。
+//
+// method 只进日志，用于定位是哪个 RPC。
+func serviceErrToStatus(method string, err error) error {
+	switch {
+	case errors.Is(err, service.ErrNotFound):
+		// 用具体文案而非哨兵的通用文本（"resource not found"）：gRPC 侧目前只服务告警。
+		return status.Error(codes.NotFound, "alert not found")
+	case errors.Is(err, service.ErrInvalidState):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, service.ErrInvalidInput):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, service.ErrTooManyItems):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, service.ErrAlreadyExists):
+		return status.Error(codes.AlreadyExists, err.Error())
+	}
+	logger.Errorf("gRPC 调用内部错误", "method", method, "err", redact.Text(err.Error()))
+	return status.Error(codes.Internal, "internal error")
+}
 
 type decodedCursor struct {
 	TS time.Time
