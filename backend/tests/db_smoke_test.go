@@ -907,6 +907,70 @@ func TestDBSmoke_AlertBulkTransitionGuards(t *testing.T) {
 	}
 }
 
+// TestDBSmoke_AlertStatusDefault 守 M20：alerts.status 的**库默认值**必须是契约里的初始态。
+//
+// 为什么只有真库能守：sqlmock 完全没有「列默认值」这回事，库默认值与模型 tag 之间的
+// 漂移它永远看不见。**实测出的机理**（见迁移 000024 的注释）：GORM 对带 `default:` tag 的
+// 零值字段，是 Create 时用它自己解析的 tag 值替代，**不省略该列、也不吃库默认值**。
+// 于是两条路各自独立：GORM 路靠 tag 兜，裸 SQL 路靠库默认值兜 —— 本用例分别钉住它们。
+//
+// 三条断言，一条比一条靠近真实路径：
+//
+//	① information_schema 里列的默认值就是 problem（迁移真的改了它，且没退回 firing）；
+//	② 裸 SQL 漏设 status 插入 → 落 problem（**库默认值本身可达**，这是 000024 的靶心）；
+//	③ 走 GORM `db.Create` 漏设 Status → 落 problem（活路径：模型 tag 与契约一致）。
+//	   ③ 不依赖 000024：把 up 换成 SELECT 1 它照样绿（已实测）。留着是因为它钉住
+//	   「tag 声明 == 落库值 == 契约初始态」这三者不脱节，且未来 GORM 若改成送空串，
+//	   红的是这里 —— 那正是本用例想提前知道的。
+//
+// 放在 TestDBSmoke_DownPreservesLegacyColumns 之前：那个用例一路回滚到 000013，
+// 本用例依赖 000024 设下的默认值。自建自清，不扰动后面的索引 EXPLAIN 断言。
+func TestDBSmoke_AlertStatusDefault(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000024（alerts.status 默认值对齐）—— 本用例前置不满足")
+	}
+
+	// ① 列默认值
+	var def *string
+	require.NoError(t, db.Raw(
+		`SELECT column_default FROM information_schema.columns
+		  WHERE table_name = 'alerts' AND column_name = 'status'`).Scan(&def).Error)
+	require.NotNil(t, def, "alerts.status 没有默认值了 —— 000024 没生效？")
+	assert.Contains(t, *def, "problem",
+		"库默认值不是 problem —— 漏设 status 的写入方会落一个前端不认的状态：%s", *def)
+	assert.NotContains(t, *def, "firing",
+		"库默认值仍是 000001 的 firing —— 前端 getAlertActions 对它一个按钮都不给")
+
+	var ids []uuid.UUID
+	t.Cleanup(func() {
+		if len(ids) > 0 {
+			db.Where("id IN ?", ids).Delete(&models.Alert{})
+		}
+	})
+
+	// ② 裸 SQL 漏设 status（写入方最原始的那条路）
+	rawID := uuid.New()
+	require.NoError(t, db.Exec(
+		`INSERT INTO alerts (id, alert_id, severity) VALUES (?, ?, ?)`,
+		rawID, "m20-raw", 3).Error)
+	ids = append(ids, rawID)
+	st, _, _, _, _ := alertSmokeState(t, db, rawID)
+	assert.Equal(t, "problem", st, "裸 SQL 漏设 status 应落库默认值 problem")
+
+	// ③ GORM 活路径漏设 Status
+	viaORM := &models.Alert{AlertID: "m20-orm", Severity: 3, Problem: "M20 dbsmoke"}
+	require.NoError(t, db.Create(viaORM).Error)
+	ids = append(ids, viaORM.ID)
+	st, _, _, _, _ = alertSmokeState(t, db, viaORM.ID)
+	assert.Equal(t, "problem", st,
+		"GORM 零值路径漏设 Status 落成 %q —— 模型 tag 声明的是 problem，两边必须一致", st)
+}
+
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。
@@ -914,11 +978,13 @@ func TestDBSmoke_AlertBulkTransitionGuards(t *testing.T) {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000023（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
-//     故十次 Down = 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000024（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
+//     故十一次 Down = 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //     **多滚 / 少滚都不会被链上断言发现**：下面全是「索引没了」的 assert.False，晚一步仍为真。
-//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000023」，
+//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000024」，
 //     结尾钉「000012 必须还在（多滚一层的唯一暴露点）」。
+//     下面每一步只写「回滚 0000NN」不写序数：序数本身会随新增迁移整体后移，是这行
+//     注释里最容易变成假话的部分（历史上就写重过两个「第三次」），版本号才是不变量。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
@@ -945,27 +1011,46 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
-	// 前置 3（M16）：000023 必须已应用，且必须是**下一次** Down 的对象。
-	// 少了这条，第一次 Down 滚掉的是 000021，整条断言链静默后移一位 ——
+	// 前置 3（M16/M20）：最新两个迁移必须已应用，且 000024 必须是**下一次** Down 的对象。
+	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
 	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-	var has23 int64
+	var has24, has23 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
+		Scan(&has24).Error)
+	if has24 == 0 {
+		t.Fatalf("库未应用到 000024 —— 第一次 Down 会滚掉 000023，整条断言链静默后移")
+	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&has23).Error)
 	if has23 == 0 {
-		t.Fatalf("库未应用到 000023 —— 第一次 Down 会滚掉 000021，整条断言链静默后移")
+		t.Fatalf("库未应用到 000023 —— 第二次 Down 会滚掉 000021，整条断言链静默后移")
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// 第一次 Down = 回滚 000023：工单优先级归一是纯数据迁移，down 是 no-op，
+	// Down = 回滚 000024：只撤 alerts.status 的列默认值，数据不动
+	require.NoError(t, migrate.Down(db), "回滚 000024 失败")
+	var v24 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
+		Scan(&v24).Error)
+	assert.Zero(t, v24, "第一次 Down 必须滚掉 000024 —— 否则后面每一次 Down 都在滚错的那一层")
+	var statusDef *string
+	require.NoError(t, db.Raw(
+		`SELECT column_default FROM information_schema.columns
+		  WHERE table_name = 'alerts' AND column_name = 'status'`).Scan(&statusDef).Error)
+	require.NotNil(t, statusDef, "down 000024 后 alerts.status 不该没有默认值")
+	assert.Contains(t, *statusDef, "firing",
+		"down 000024 应把 alerts.status 默认值退回 000001 声明的 firing：%s", *statusDef)
+
+	// Down = 回滚 000023：工单优先级归一是纯数据迁移，down 是 no-op，
 	// 只销版本号（原值已不可分辨，见 000023_*.down.sql 的注释）
 	require.NoError(t, migrate.Down(db), "回滚 000023 失败")
 	var v23 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&v23).Error)
-	assert.Zero(t, v23, "第一次 Down 必须滚掉 000023 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v23, "第二次 Down 必须滚掉 000023")
 
-	// 第三次 Down = 回滚 000021：删除 path text_pattern_ops 索引
+	// Down = 回滚 000021：删除 path text_pattern_ops 索引
 	require.NoError(t, migrate.Down(db), "回滚 000021 失败")
 	var pathIdxExists bool
 	require.NoError(t, db.Raw(
@@ -973,7 +1058,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&pathIdxExists).Error)
 	assert.False(t, pathIdxExists, "down 000021 应 DROP idx_audit_logs_path")
 
-	// 第三次 Down = 回滚 000020：删除 name 索引
+	// Down = 回滚 000020：删除 name 索引
 	require.NoError(t, migrate.Down(db), "回滚 000020 失败")
 	var nameIdxExists bool
 	require.NoError(t, db.Raw(
@@ -981,7 +1066,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&nameIdxExists).Error)
 	assert.False(t, nameIdxExists, "down 000020 应 DROP idx_assets_name")
 
-	// 第四次 Down = 回滚 000019：删除 external_id 索引
+	// Down = 回滚 000019：删除 external_id 索引
 	require.NoError(t, migrate.Down(db), "回滚 000019 失败")
 	var extIdxExists bool
 	require.NoError(t, db.Raw(
@@ -989,7 +1074,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&extIdxExists).Error)
 	assert.False(t, extIdxExists, "down 000019 应 DROP idx_tickets_external_id")
 
-	// 第五次 Down = 回滚 000018：删除 trigger_id 索引
+	// Down = 回滚 000018：删除 trigger_id 索引
 	require.NoError(t, migrate.Down(db), "回滚 000018 失败")
 	var trigIdxExists bool
 	require.NoError(t, db.Raw(
@@ -997,7 +1082,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&trigIdxExists).Error)
 	assert.False(t, trigIdxExists, "down 000018 应 DROP idx_alerts_trigger_id")
 
-	// 第六次 Down = 回滚 000017：删除 problem_start 索引
+	// Down = 回滚 000017：删除 problem_start 索引
 	require.NoError(t, migrate.Down(db), "回滚 000017 失败")
 	var psIdxExists bool
 	require.NoError(t, db.Raw(
@@ -1005,7 +1090,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&psIdxExists).Error)
 	assert.False(t, psIdxExists, "down 000017 应 DROP idx_alerts_problem_start")
 
-	// 第七次 Down = 回滚 000016：删除 pending 部分索引
+	// Down = 回滚 000016：删除 pending 部分索引
 	require.NoError(t, migrate.Down(db), "回滚 000016 失败")
 	var pendingIdxExists bool
 	require.NoError(t, db.Raw(
@@ -1013,11 +1098,11 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		Scan(&pendingIdxExists).Error)
 	assert.False(t, pendingIdxExists, "down 000016 应 DROP idx_notification_logs_pending")
 
-	// 第八次 Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
+	// Down = 回滚 000015：net_box_id 回到非唯一索引（组合状态下 ON CONFLICT 会 42P10）
 	require.NoError(t, migrate.Down(db), "回滚 000015 失败")
 	assertNetBoxIDIndexUnique(t, db, false)
 
-	// 第九次 Down = 回滚 000014：只撤列默认值，数据不动
+	// Down = 回滚 000014：只撤列默认值，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000014 失败")
 	var def *string
 	require.NoError(t, db.Raw(
@@ -1026,7 +1111,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.Nil(t, def, "down 000014 应 DROP DEFAULT assets.tags")
 	assertJSONB(t, db, "legacy-null-jsonb", "[]", "{}") // 回填值仍在（down 不动数据）
 
-	// 第十次 Down = 回滚 000013：本用例真正要守的那个
+	// Down = 回滚 000013：本用例真正要守的那个
 	require.NoError(t, migrate.Down(db), "回滚 000013 失败")
 
 	var exists bool
@@ -1037,13 +1122,13 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.True(t, exists, "down 不得 DROP 000001 建的 tickets.ticket_type（丢列丢数据）")
 
 	// 收尾正向断言：**多滚一层唯一的暴露点**。
-	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十一次 Down 会一路全绿，
+	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十二次 Down 会一路全绿，
 	// 同时把 000012 也滚掉。只有「000012 必须还在」能挡住它。
 	var v12 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 12`).
 		Scan(&v12).Error)
 	assert.Equal(t, int64(1), v12,
-		"十次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
+		"十一次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
 }
 
 // explainSeqScanOff 在**单连接**上禁掉顺序扫描后跑 EXPLAIN，返回完整计划文本。

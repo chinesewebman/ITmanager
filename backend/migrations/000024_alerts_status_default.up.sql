@@ -1,0 +1,47 @@
+-- 000024_alerts_status_default
+--
+-- M20：alerts.status 的**库默认值与模型声明不一致**，而且库默认值是一个不在任何词表里的状态。
+--
+--   migrations/000001_init.up.sql   status VARCHAR(20) DEFAULT 'firing'
+--   internal/models/alert.go        gorm:"size:20;index;default:problem"
+--
+-- 本仓用迁移建库、**不用 AutoMigrate**，所以 000001 那行是库里的既成事实，
+-- 不会因为模型 tag 写了 problem 就被改掉。
+--
+-- 【机理：已实测，不是推测】GORM 对带 `default:` tag 的零值字段，是在 Create 时
+-- **用它自己解析出的 tag 值替代**，既不是「省略该列」（不吃库默认值），也不是送空串。
+-- 证据：把库默认值留在 'firing'、只跑真 PG 冒烟，裸 SQL 那条断言红、GORM `db.Create`
+-- 那条断言绿（tests/db_smoke_test.go 的 TestDBSmoke_AlertStatusDefault ②/③）。
+-- 所以「GORM 零值会落到库默认值」是**错的**，本注释早期版本就是这么写的，特此纠正。
+--
+-- 【因此这条缺陷当前是潜伏的，不是活的】今天的写入方分两类，都不会落 'firing'：
+--   · 显式赋值 —— integration/service.go、integration/zabbix.go、cmd/seed/main.go；
+--   · 漏赋值 —— 也被模型 tag 兜成 'problem'。
+-- 全仓非测试 Go 里没有裸 INSERT/UPDATE alerts（grep 已确认），即**没有绕开模型字段表的写入方**。
+--
+-- 【那为什么还要改】库默认值是**绕开模型字段表那条路的最后一道**：裸 SQL、db.Exec、
+-- 将来的非 GORM 导入器、以及有人直接 psql 手插一行。今天没有这样的写入方，
+-- 所以本迁移的定位是**拆除陷阱 + 让 tag 与库两侧对齐**，而不是修一个正在发生的 bug ——
+-- 不为它编一个更吓人的理由。
+--
+-- 'firing' 一旦落库，危害是**静默**的：它不在前端 getAlertActions
+--（frontend/src/components/AlertTable.tsx）认识的三个状态里（problem / acknowledged /
+-- resolved），按钮一个都不给；也不进 dashboard_service.go 的告警计数分支。告警会出现在
+-- 列表里却**无法处理**、也不进任何统计 —— 看得见、动不了。'firing' 这个词在 000001 的
+-- DDL 与三份 testdata 之外**不出现在任何地方**。
+--
+-- 以契约为准，把库默认值对齐到 problem（契约里「未处理」的初始态）。同 M16 的思路：
+-- 以声明/契约那一侧为准，而不是让一个没人维护的库默认值继续当事实标准。
+--
+-- 为什么不反过来把模型改成 firing：firing 不在任何词表里，改模型等于把一个前端不认的
+-- 状态**确认为正确**，是把 bug 固化成契约。
+--
+-- 为什么不加 NOT NULL 逼写入方显式给值：加 NOT NULL 不会当场破坏现有三个写入方
+--（它们都显式赋值），但将来一旦有写入方漏赋值，插入会**直接失败** —— 对告警系统而言
+-- 「丢一条告警」（无声无息）比「落一条默认为 problem 的告警」（列表里看得见、能处理）
+-- 严重得多。默认值在这里是安全网，不是缺陷。
+--
+-- 幂等：SET DEFAULT 可重复执行，结果相同。
+-- **不碰任何存量行**：存的都是显式写入的值，没有需要回填的 NULL/空值。
+
+ALTER TABLE alerts ALTER COLUMN status SET DEFAULT 'problem';
