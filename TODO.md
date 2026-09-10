@@ -31,7 +31,7 @@
 
 - [x] **D-1（阻断级）`tickets` 三套 schema 不一致** — 修复轮 `2ec518c`：补齐式迁移 `000013_schema_align`（非破坏、幂等、带类型守卫）+ `db_smoke` CI job（全新安装 + 存量升级两条路径）
 - [x] **D-2 工单号碰撞** — `2ec518c`：按当日前缀计数 + 进位字母标签，唯一索引兜底
-- [ ] **D-3 `alerts.ticket_id` 悬空** — 字段语义已修（`000013` 补列 + 模型对齐），**写入方仍缺**：随「告警 → 一键建单」落地
+- [x] **D-3 `alerts.ticket_id` 悬空** — `000013` 补列后本轮补上**写入方**：`POST /api/alerts/{id}/ticket` 一键建单（`TicketService.CreateFromAlert`），认领与插票同事务，插票失败认领一并回滚 → 不再产生悬空指针。**残留**：只覆盖「人点建单」这一条写入路径，自动建单仍未做（ADR-0004 明确不做）；`ticket_id` 指向的工单被外部直接删库仍会悬空，该情形按防御性 404 处理（`TestTicketService_CreateFromAlert_关联悬空返回ErrNotFound`）
 - [x] **D-4（阻断级）`users` 表缺 `role` / `deleted_at` 列** — `2ec518c` + `000013`：先加列后回填再设 DEFAULT（避免存量 admin 降级）
 - [x] **D-5 `audit_logs` 列名漂移** — `2ec518c`：`000013` RENAME 表/列对齐模型
 - [x] **D-6 `RequireRole` 未挂载** — `2ec518c` 挂载 17 条 admin 专属路由；**2026-09-09 进一步升级为能力矩阵**（见下方 AUTHZ 条目）

@@ -323,6 +323,9 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			alerts.PUT("/:id/ack", canWrite, alertH.AcknowledgeAlert)
 			alerts.PUT("/:id/resolve", canWrite, alertH.ResolveAlert)
 			alerts.POST("/:id/mark-fp", canWrite, alertH.MarkFalsePositive) // 小改进 #2：标记/反标记误报
+			// D-3：告警一键建单（人在告警详情点，不自动建单；handler 在 TicketHandler 是因为
+			// 工单号生成与撞号处理都在 TicketService）。该端点**不得**加入 HolmesGPT toolset。
+			alerts.POST("/:id/ticket", canWrite, ticketH.CreateTicketFromAlert)
 
 			rules := protected.Group("/alert-rules")
 			{

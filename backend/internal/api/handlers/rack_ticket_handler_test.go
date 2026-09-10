@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockRackService 演示 service 接口的可测试性
@@ -117,10 +118,11 @@ func TestRackGet_不存在_统一404结构(t *testing.T) {
 // ---- Ticket handler 测试 ----
 
 type mockTicketService struct {
-	listFunc   func(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error)
-	getFunc    func(ctx context.Context, id string) (*models.Ticket, error)
-	createFunc func(ctx context.Context, t *models.Ticket) error
-	updateFunc func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error)
+	listFunc      func(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error)
+	getFunc       func(ctx context.Context, id string) (*models.Ticket, error)
+	createFunc    func(ctx context.Context, t *models.Ticket) error
+	updateFunc    func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error)
+	fromAlertFunc func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error)
 }
 
 func (m *mockTicketService) List(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error) {
@@ -135,6 +137,9 @@ func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket) error 
 func (m *mockTicketService) Update(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error) {
 	return m.updateFunc(ctx, id, u)
 }
+func (m *mockTicketService) CreateFromAlert(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+	return m.fromAlertFunc(ctx, alertID, userID)
+}
 
 func newTicketRouter(svc service.TicketService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -146,6 +151,104 @@ func newTicketRouter(svc service.TicketService) *gin.Engine {
 	g.POST("", h.CreateTicket)
 	g.PUT("/:id", h.UpdateTicket)
 	return r
+}
+
+// newAlertTicketRouter 按 routes.go 的挂法建一个最小路由：D-3 的端点虽然路径归 /alerts，
+// handler 却在 TicketHandler 上（工单号生成与撞号处理都在 TicketService）。
+// 中间件塞 username，与 JWT 中间件写入的键一致。
+func newAlertTicketRouter(svc service.TicketService) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := handlers.NewTicketHandler(svc)
+	r.Use(func(c *gin.Context) {
+		c.Set("username", "yanru")
+		c.Next()
+	})
+	r.POST("/api/alerts/:id/ticket", h.CreateTicketFromAlert)
+	return r
+}
+
+func TestTicketCreateFromAlert_新建返回201(t *testing.T) {
+	var gotAlertID, gotUser string
+	svc := &mockTicketService{
+		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+			gotAlertID, gotUser = alertID, userID
+			return &models.Ticket{Title: "core-sw-01 CPU 高", Source: "alert", Priority: "medium"}, true, nil
+		},
+	}
+	r := newAlertTicketRouter(svc)
+
+	req := httptest.NewRequest("POST", "/api/alerts/a-1/ticket", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, "a-1", gotAlertID, "路径参数应透传")
+	assert.Equal(t, "yanru", gotUser, "requester 取 JWT 里的 username")
+
+	var resp struct {
+		Data struct {
+			Ticket  models.Ticket `json:"ticket"`
+			Created bool          `json:"created"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Data.Created)
+	assert.Equal(t, "alert", resp.Data.Ticket.Source)
+}
+
+// 已关联时幂等返回既有票 —— 200 而非 201，前端据此决定要不要提示「已建单」。
+func TestTicketCreateFromAlert_已关联返回200(t *testing.T) {
+	svc := &mockTicketService{
+		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+			return &models.Ticket{Title: "既有工单", TicketNumber: "TICKET-20260910-A"}, false, nil
+		},
+	}
+	r := newAlertTicketRouter(svc)
+
+	req := httptest.NewRequest("POST", "/api/alerts/a-1/ticket", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "TICKET-20260910-A")
+	assert.Contains(t, w.Body.String(), `"created":false`)
+}
+
+func TestTicketCreateFromAlert_告警不存在返回404(t *testing.T) {
+	svc := &mockTicketService{
+		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+			return nil, false, service.ErrNotFound
+		},
+	}
+	r := newAlertTicketRouter(svc)
+
+	req := httptest.NewRequest("POST", "/api/alerts/missing/ticket", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "not_found")
+}
+
+func TestTicketCreateFromAlert_DB错误不泄露(t *testing.T) {
+	svc := &mockTicketService{
+		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+			return nil, false, errors.New("pq: duplicate key value violates unique constraint \"tickets_ticket_number_key\"")
+		},
+	}
+	r := newAlertTicketRouter(svc)
+
+	req := httptest.NewRequest("POST", "/api/alerts/a-1/ticket", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	body := w.Body.String()
+	// 与 rack handler 同一条安全红线：原始 SQL 错误不得漏到客户端
+	assert.NotContains(t, body, "pq:")
+	assert.NotContains(t, body, "constraint")
+	assert.NotContains(t, body, "tickets_ticket_number_key")
 }
 
 func TestTicketCreate_空标题_返回400(t *testing.T) {

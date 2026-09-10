@@ -242,6 +242,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/alerts/{id}/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 从告警一键建单
+         * @description 由人点「建单」触发，把告警现场信息派生成一张 incident 工单，并回写
+         *     `alerts.ticket_id`（ADR-0004：工单 SoT 在后端，建单必须由人显式发起）。
+         *     **幂等**：同一告警重复调用不会建出第二张票，返回既有那张。
+         *
+         *     响应码区分首次与重复：`201` = 本次新建，`200` = 该告警已有关联工单，
+         *     前端据此决定是否提示「已建单」。
+         */
+        post: operations["createTicketFromAlert"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/alerts/false-positives/export": {
         parameters: {
             query?: never;
@@ -1269,6 +1294,14 @@ export interface components {
                 next_cursor?: string;
             };
         };
+        AlertTicketResult: {
+            code?: number;
+            data?: {
+                ticket?: components["schemas"]["Ticket"];
+                /** @description true=本次新建；false=该告警已有关联工单，ticket 为既有那张 */
+                created?: boolean;
+            };
+        };
         AlertStats: {
             code?: number;
             data?: {
@@ -1858,6 +1891,44 @@ export interface operations {
                 };
             };
             /** @description 告警不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    createTicketFromAlert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 告警已有关联工单，幂等返回既有那张（created=false） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTicketResult"];
+                };
+            };
+            /** @description 本次新建成功 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTicketResult"];
+                };
+            };
+            /** @description 告警不存在，或其关联的工单已失效 */
             404: {
                 headers: {
                     [name: string]: unknown;

@@ -566,6 +566,8 @@ var gatedRoutes = []struct {
 	{middleware.CapWrite, http.MethodPut, "/api/alerts/:id/ack", false},
 	{middleware.CapWrite, http.MethodPut, "/api/alerts/:id/resolve", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alerts/:id/mark-fp", false},
+	// D-3 告警一键建单：写操作（建工单 + 回写 alerts.ticket_id），ADR-0004 要求由人点。
+	{middleware.CapWrite, http.MethodPost, "/api/alerts/:id/ticket", false},
 	{middleware.CapWrite, http.MethodPost, "/api/tickets", false},
 	{middleware.CapWrite, http.MethodPut, "/api/tickets/:id", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alert-suppressions", false},

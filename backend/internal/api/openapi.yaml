@@ -465,6 +465,42 @@ paths:
         '404':
           description: 告警不存在
 
+  /alerts/{id}/ticket:
+    post:
+      tags:
+        - 告警中心
+      summary: 从告警一键建单
+      description: |
+        由人点「建单」触发，把告警现场信息派生成一张 incident 工单，并回写
+        `alerts.ticket_id`（ADR-0004：工单 SoT 在后端，建单必须由人显式发起）。
+        **幂等**：同一告警重复调用不会建出第二张票，返回既有那张。
+
+        响应码区分首次与重复：`201` = 本次新建，`200` = 该告警已有关联工单，
+        前端据此决定是否提示「已建单」。
+      operationId: createTicketFromAlert
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '201':
+          description: 本次新建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertTicketResult'
+        '200':
+          description: 告警已有关联工单，幂等返回既有那张（created=false）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertTicketResult'
+        '404':
+          description: 告警不存在，或其关联的工单已失效
+
   /alerts/false-positives/export:
     get:
       tags:
@@ -2216,6 +2252,22 @@ components:
             next_cursor:
               type: string
               description: 还有下一页时返回（items 长度等于 limit 时）
+
+    # D-3 告警一键建单的响应体。created 是前端区分 201/200 之外的显式标志：
+    # 一次「看似新建」的点击在并发下可能被别人抢先，此时返回的是既有票。
+    AlertTicketResult:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            ticket:
+              $ref: '#/components/schemas/Ticket'
+            created:
+              type: boolean
+              description: true=本次新建；false=该告警已有关联工单，ticket 为既有那张
 
     AlertStats:
       type: object

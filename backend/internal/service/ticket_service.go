@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"network-monitor-platform/internal/models"
@@ -29,6 +31,9 @@ type TicketService interface {
 	Get(ctx context.Context, id string) (*models.Ticket, error)
 	Create(ctx context.Context, t *models.Ticket) error
 	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error)
+	// CreateFromAlert 从告警派生一张工单并把 alerts.ticket_id 指回去（TODO D-3）。
+	// created=false 表示该告警已有关联工单，直接返回既有那张（幂等）。
+	CreateFromAlert(ctx context.Context, alertID, userID string) (ticket *models.Ticket, created bool, err error)
 }
 
 type ticketService struct {
@@ -126,6 +131,149 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 		t.ID = uuid.Nil
 		t.TicketNumber = ""
 	}
+}
+
+// CreateFromAlert 从告警一键建单（TODO D-3，设计见 docs/FIX-PLAN-ALERT-TICKET.md）。
+//
+// **认领优先**：先做条件 UPDATE「若此告警尚无关联工单，就把它认领给 newID」，抢到才插票。
+// 「先查空再建票」的写法在两次点击同时到达时两边都查到空 → 各建一张票，而双击恰恰是最常见
+// 的并发。条件 UPDATE 是数据库层面的原子裁决点：N 个并发请求里恰好一个 RowsAffected=1。
+//
+// 没抢到的请求读出既有 ticket_id 返回那张票（created=false）——重复点击拿到的是同一张票，
+// 不是错误。认领与插票同一事务：插票失败（如工单号撞唯一索引）时认领一并回滚，不留悬空指针。
+func (s *ticketService) CreateFromAlert(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+	var (
+		out     *models.Ticket
+		created bool
+	)
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 读告警拿派生字段。这次读到的 ticket_id 只用于填工单内容，胜负由下面的条件 UPDATE 定。
+		var alert models.Alert
+		if err := tx.First(&alert, "id = ?", alertID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+
+		newID := uuid.New()
+		res := tx.Model(&models.Alert{}).
+			Where("id = ? AND ticket_id IS NULL", alertID).
+			Update("ticket_id", newID)
+		if res.Error != nil {
+			return res.Error
+		}
+
+		if res.RowsAffected == 1 {
+			// 抢到认领：工单 ID 就用刚写进 alerts.ticket_id 的那个，任何时刻 ticket_id
+			// 都指向本事务将要插入（或已插入）的那一行。
+			t := ticketFromAlert(&alert, userID)
+			t.ID = newID
+			if err := tx.Create(t).Error; err != nil {
+				return err // 整个事务回滚，上面的认领一并撤销
+			}
+			out, created = t, true
+			return nil
+		}
+
+		// 没抢到：告警已被关联（并发赢家提交了，或自己重复点）。重读一次——
+		// 上面那次 First 可能是并发赢家提交**之前**的快照，其 ticket_id 还是 NULL。
+		var cur models.Alert
+		if err := tx.First(&cur, "id = ?", alertID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if cur.TicketID == nil {
+			// UPDATE 没命中 ⇔ ticket_id 非 NULL（或行不存在）。重读后仍为空说明关联
+			// 在这一瞬间被清掉了，属不该出现的中间态 —— 报错而不是猜。
+			return fmt.Errorf("告警 %s 认领失败但 ticket_id 仍为空", alertID)
+		}
+		var existing models.Ticket
+		if err := tx.First(&existing, "id = ?", *cur.TicketID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 关联悬空。本系统无删除工单的端点，理论上不可达，属防御性分支：
+				// 报 404 而不是静默改写别人写下的关联。
+				return ErrNotFound
+			}
+			return err
+		}
+		out, created = &existing, false
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, created, nil
+}
+
+// ticketFromAlert 把告警的现场信息派生成一张待建工单。
+func ticketFromAlert(a *models.Alert, userID string) *models.Ticket {
+	title := a.TriggerName
+	if title == "" {
+		title = a.Problem
+	}
+	if title == "" {
+		title = "告警 " + a.AlertID
+	}
+	if a.HostName != "" {
+		title = a.HostName + " " + title
+	}
+
+	var b strings.Builder
+	b.WriteString("由告警一键建单生成。\n")
+	fmt.Fprintf(&b, "告警 ID：%s\n", a.AlertID)
+	fmt.Fprintf(&b, "主机：%s", a.HostName)
+	if a.HostIP != "" {
+		fmt.Fprintf(&b, "（%s）", a.HostIP)
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "触发器：%s\n", a.TriggerName)
+	fmt.Fprintf(&b, "严重级别：%s（%d）\n", a.SeverityName, a.Severity)
+	if !a.ProblemStart.IsZero() {
+		fmt.Fprintf(&b, "开始时间：%s\n", a.ProblemStart.Format(time.RFC3339))
+	}
+	if a.Problem != "" {
+		fmt.Fprintf(&b, "现象：%s\n", a.Problem)
+	}
+
+	return &models.Ticket{
+		Title:         truncateRunes(title, 255), // tickets.title varchar(255)，触发器名可长 500
+		Description:   b.String(),
+		TicketType:    "incident",
+		Priority:      priorityFromSeverity(a.Severity),
+		Source:        "alert",
+		AssetID:       a.AssetID,
+		AssetName:     a.HostName,
+		RequesterName: userID,
+	}
+}
+
+// priorityFromSeverity Zabbix 0-5 严重级别 → tickets.priority。
+// 取值 low/medium/high/critical 与前端工单页的优先级下拉一致。
+func priorityFromSeverity(sev int) string {
+	switch {
+	case sev >= 5: // Disaster
+		return "critical"
+	case sev == 4: // High
+		return "high"
+	case sev >= 2: // Warning / Average
+		return "medium"
+	default: // 0 Not classified / 1 Information
+		return "low"
+	}
+}
+
+// truncateRunes 按**字符**截断到 max 个 rune。
+// 不能用 s[:max] 那种按 byte 的切法 —— 中文被切在两字节之间会留下非法 UTF-8，
+// 而 tickets.title 是 PG 的 varchar(255)（按字符计数），rune 数才是对的尺子。
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {

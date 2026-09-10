@@ -97,6 +97,36 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"code": 0, "data": ticket})
 }
 
+// CreateTicketFromAlert POST /alerts/:id/ticket —— 从告警一键建单并回写 alerts.ticket_id
+// （TODO D-3，契约见 docs/FIX-PLAN-ALERT-TICKET.md §3）。
+// 该告警已有关联工单时幂等返回既有那张（200 + created=false），新建返回 201 + created=true。
+func (h *TicketHandler) CreateTicketFromAlert(c *gin.Context) {
+	userID := c.GetString("username") // JWT 中间件写入
+	if userID == "" {
+		userID = "unknown"
+	}
+	ticket, created, err := h.svc.CreateFromAlert(c.Request.Context(), c.Param("id"), userID)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "告警不存在或关联的工单已失效")
+			return
+		}
+		apierr.Internal(c, "从告警创建工单失败", err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	c.JSON(status, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"ticket":  ticket,
+			"created": created,
+		},
+	})
+}
+
 func (h *TicketHandler) UpdateTicket(c *gin.Context) {
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
