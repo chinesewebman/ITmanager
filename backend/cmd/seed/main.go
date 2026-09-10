@@ -116,12 +116,21 @@ func seedData(db *gorm.DB) int {
 	}
 
 	// ========== 创建机房 ==========
+	// 每个机房占一个 RFC 5737 文档网段（见 demoSiteNets），两者必须等长 ——
+	// 否则多出来的机房会拿到越界下标（panic）或被静默复用同一段（IP 重复）。
 	sites := []models.Site{
 		{Name: "北京数据中心A", Code: "DC-BJ-01", Province: "北京", City: "北京", Address: "朝阳区科技园A座", Contact: "张明", ContactPhone: "13800000001", Tier: "T3", IsActive: true},
 		{Name: "上海数据中心B", Code: "DC-SH-01", Province: "上海", City: "上海", Address: "浦东新区张江高科技园", Contact: "李华", ContactPhone: "13800000002", Tier: "T3", IsActive: true},
 		{Name: "广州数据中心C", Code: "DC-GZ-01", Province: "广东", City: "广州", Address: "天河区软件园", Contact: "王芳", ContactPhone: "13800000003", Tier: "T4", IsActive: true},
 	}
-	for _, site := range sites {
+	if len(sites) != len(demoSiteNets) {
+		fail("机房数与演示网段数不一致", fmt.Errorf(
+			"sites=%d demoSiteNets=%d —— 加机房要同步扩 demoSiteNets，否则 IP 段会静默复用",
+			len(sites), len(demoSiteNets)))
+		return failures
+	}
+
+	for siteIdx, site := range sites {
 		if err := db.Create(&site).Error; err != nil {
 			fail("创建机房失败", err)
 			continue
@@ -135,7 +144,7 @@ func seedData(db *gorm.DB) int {
 			{SiteID: site.ID, SiteName: site.Name, Name: "Rack-A03", TotalU: 42, MaxWeight: 800, Floor: "1F", Row: "A", Column: "03", Status: "active"},
 			{SiteID: site.ID, SiteName: site.Name, Name: "Rack-B01", TotalU: 42, MaxWeight: 800, Floor: "2F", Row: "B", Column: "01", Status: "active"},
 		}
-		for _, rack := range racks {
+		for rackIdx, rack := range racks {
 			if err := db.Create(&rack).Error; err != nil {
 				fail("创建机柜失败", err)
 				continue
@@ -150,7 +159,7 @@ func seedData(db *gorm.DB) int {
 				{Name: fmt.Sprintf("app-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-002", site.Code, rack.Name), SN: fmt.Sprintf("SN-APP-%s-001", rack.Name), AssetType: "server", Brand: "HP", Model: "ProLiant DL380 Gen10", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "2U", Vendor: "HP Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "互联网业务", ServiceName: "应用服务", Tags: `["app", "production"]`},
 				{Name: fmt.Sprintf("db-server-%s-01", rack.Name), AssetTag: fmt.Sprintf("AST-%s-%s-003", site.Code, rack.Name), SN: fmt.Sprintf("SN-DB-%s-001", rack.Name), AssetType: "server", Brand: "Huawei", Model: "RH2288H V3", Status: "active", SiteID: &site.ID, SiteName: site.Name, RackID: &rack.ID, RackName: rack.Name, RackPosition: "3U", Vendor: "Huawei Official", PurchaseDate: &purchaseDate, WarrantyEnd: &warrantyEnd, BusinessUnit: "数据服务", ServiceName: "数据库", Tags: `["database", "production"]`},
 			}
-			for _, server := range servers {
+			for serverIdx, server := range servers {
 				if err := db.Create(&server).Error; err != nil {
 					fail("创建服务器失败", err)
 					continue
@@ -159,9 +168,9 @@ func seedData(db *gorm.DB) int {
 
 				// 为服务器创建网络接口
 				networks := []models.AssetNetwork{
-					{AssetID: server.ID, InterfaceName: "eth0", InterfaceType: "ethernet", IPv4Address: fmt.Sprintf("192.168.%s.10", rack.Row), MACAddress: generateMAC(), Status: "up", Purpose: "mgmt"},
-					{AssetID: server.ID, InterfaceName: "eth1", InterfaceType: "ethernet", IPv4Address: fmt.Sprintf("192.168.%s.11", rack.Row), MACAddress: generateMAC(), Status: "up", Purpose: "service"},
-					{AssetID: server.ID, InterfaceName: "eth2", InterfaceType: "ethernet", IPv4Address: fmt.Sprintf("192.168.%s.12", rack.Row), MACAddress: generateMAC(), Status: "up", Purpose: "backup"},
+					{AssetID: server.ID, InterfaceName: "eth0", InterfaceType: "ethernet", IPv4Address: demoIPv4(siteIdx, rackIdx, serverIdx, 0), MACAddress: generateMAC(), Status: "up", Purpose: "mgmt"},
+					{AssetID: server.ID, InterfaceName: "eth1", InterfaceType: "ethernet", IPv4Address: demoIPv4(siteIdx, rackIdx, serverIdx, 1), MACAddress: generateMAC(), Status: "up", Purpose: "service"},
+					{AssetID: server.ID, InterfaceName: "eth2", InterfaceType: "ethernet", IPv4Address: demoIPv4(siteIdx, rackIdx, serverIdx, 2), MACAddress: generateMAC(), Status: "up", Purpose: "backup"},
 				}
 				for _, net := range networks {
 					if err := db.Create(&net).Error; err != nil {
@@ -199,13 +208,20 @@ func seedData(db *gorm.DB) int {
 	// ========== 创建告警 ==========
 
 	// 模拟告警数据
+	//
+	// HostIP 与资产网卡同一套编址（RFC 5737 文档网段，见 demoSiteNets/demoIPv4）：
+	// 原实现写死 "192.168.A.10" / "192.168.B.10" 这类**非法 IPv4**（第三段是机柜字母行）。
+	// 这些主机名不带机房后缀（同名资产在 3 个机房各有一份），统一取第一个机房
+	// （北京DC-A，demoSiteNets[0]）的地址，值即 demoIPv4(0, rackIdx, serverIdx, 0)：
+	// Rack-A01/A02/A03/B01 的 rackIdx 为 0/1/2/3，web/app/db 的 serverIdx 为 0/1/2。
+	// switch-Rack-A03-01 留空是**预期**：seed 只给交换机建了无 IP 的接入端口（见上）。
 	alerts := []models.Alert{
-		{HostName: "web-server-Rack-A01-01", HostIP: "192.168.A.10", TriggerName: "CPU使用率超过90%", Severity: 5, SeverityName: "灾难", Problem: "CPU使用率达到95%，持续5分钟", Status: "problem"},
-		{HostName: "app-server-Rack-A02-01", HostIP: "192.168.A.11", TriggerName: "内存使用率超过85%", Severity: 4, SeverityName: "严重", Problem: "内存使用率88%，接近阈值", Status: "acknowledged"},
-		{HostName: "db-server-Rack-B01-01", HostIP: "192.168.B.10", TriggerName: "磁盘空间不足", Severity: 4, SeverityName: "严重", Problem: "/data 分区使用率92%", Status: "problem"},
+		{HostName: "web-server-Rack-A01-01", HostIP: "192.0.2.1", TriggerName: "CPU使用率超过90%", Severity: 5, SeverityName: "灾难", Problem: "CPU使用率达到95%，持续5分钟", Status: "problem"},
+		{HostName: "app-server-Rack-A02-01", HostIP: "192.0.2.13", TriggerName: "内存使用率超过85%", Severity: 4, SeverityName: "严重", Problem: "内存使用率88%，接近阈值", Status: "acknowledged"},
+		{HostName: "db-server-Rack-B01-01", HostIP: "192.0.2.34", TriggerName: "磁盘空间不足", Severity: 4, SeverityName: "严重", Problem: "/data 分区使用率92%", Status: "problem"},
 		{HostName: "switch-Rack-A03-01", HostIP: "", TriggerName: "网络端口状态异常", Severity: 3, SeverityName: "一般严重", Problem: "端口 Gig1/0/23 进入 err-disable 状态", Status: "resolved"},
-		{HostName: "web-server-Rack-B01-01", HostIP: "192.168.B.11", TriggerName: "HTTP响应时间过长", Severity: 3, SeverityName: "一般严重", Problem: "平均响应时间超过3秒", Status: "acknowledged"},
-		{HostName: "app-server-Rack-A01-01", HostIP: "192.168.A.12", TriggerName: "SSL证书即将过期", Severity: 2, SeverityName: "警告", Problem: "证书将在15天后过期", Status: "problem"},
+		{HostName: "web-server-Rack-B01-01", HostIP: "192.0.2.28", TriggerName: "HTTP响应时间过长", Severity: 3, SeverityName: "一般严重", Problem: "平均响应时间超过3秒", Status: "acknowledged"},
+		{HostName: "app-server-Rack-A01-01", HostIP: "192.0.2.4", TriggerName: "SSL证书即将过期", Severity: 2, SeverityName: "警告", Problem: "证书将在15天后过期", Status: "problem"},
 	}
 
 	for i, alert := range alerts {
@@ -285,6 +301,27 @@ func timeNow() *time.Time {
 
 func timePtr(t time.Time) *time.Time {
 	return &t
+}
+
+// demoSiteNets 演示数据使用的三个 **RFC 5737 文档网段**（TEST-NET-1/2/3）。
+//
+// 这三段被标准保留给示例与文档，**永远不会出现在真实网络中、也永远不会被路由** ——
+// 演示数据选它们，既保证地址合法，又不可能与任何真实设备撞址。
+//
+// 缺陷背景（TODO G-24）：原实现用 fmt.Sprintf("192.168.%s.10", rack.Row) 拼 IP，
+// 而 rack.Row 是机柜排字母（A/B）→ 生成 "192.168.A.10" 这种**非法 IPv4**。
+// 000013 把 asset_networks.ipv4_address 从 inet 改成 varchar(45) 之前，这类插入是
+// 硬失败（被 fail() 记成日志、进程仍 exit 0）；改名后静默入库。同一机房下 A01/A02/A03
+// 三排机柜的 Row 都是 "A"，还会拿到完全相同的地址。机房数与网段数必须一一对应。
+var demoSiteNets = [3]string{"192.0.2", "198.51.100", "203.0.113"}
+
+// demoIPv4 生成演示用 IPv4：第三段按机房取网段，第四段按「机柜/服务器/网卡」编码。
+//
+// 主机段 = rackIdx*9 + serverIdx*3 + nicIdx + 1 —— 三个下标各自独立进位，
+// 机房内天然唯一（当前规模 4 机柜 × 3 服务器 × 3 网卡 = 36 个地址，远小于 /24）。
+// 不引入计数器是为了避免「seed 长大以后静默溢出到 192.0.2.300」。
+func demoIPv4(siteIdx, rackIdx, serverIdx, nicIdx int) string {
+	return fmt.Sprintf("%s.%d", demoSiteNets[siteIdx], rackIdx*9+serverIdx*3+nicIdx+1)
 }
 
 func generateMAC() string {

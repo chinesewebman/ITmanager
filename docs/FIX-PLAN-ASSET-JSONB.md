@@ -294,3 +294,7 @@ ALTER TABLE assets ALTER COLUMN custom_fields DROP DEFAULT;
   `rack.Row` 是字母（`A`/`B`），生成 `192.168.A.10`。000013 把 `asset_networks.ipv4_address`
   从 inet 改成 varchar 后不再报错，于是这类垃圾值静默入库（改名前它是硬失败）。
   影响面：演示数据的可信度（监控平台演示 IP 不可路由）；不阻塞 G-20，登记为 **G-24**。
+  → **已由 G-24 轮修复（2026-09-10）**：改用 RFC 5737 文档网段（TEST-NET-1/2/3），
+  第三段按机房取网段、第四段按「机柜×服务器×网卡」编码 —— 顺带消除「同机房 A01/A02/A03
+  三排共用同一批地址」的重复问题；`alerts.HostIP` 同源字面量一并改。回归用例
+  `TestSeed_演示IP合法且不重复` / `TestSeed_演示IP限定在RFC5737文档网段`。

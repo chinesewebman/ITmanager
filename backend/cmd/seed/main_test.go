@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"testing"
 
 	"network-monitor-platform/internal/models"
@@ -469,6 +470,112 @@ func TestSeed_不panic_空DB再跑一次(t *testing.T) {
 	db := newTestDB(t)
 	assert.NotPanics(t, func() { seedData(db) }, "seed 跑一次不应 panic")
 	assert.NotPanics(t, func() { seedData(db) }, "seed 跑两次不应 panic")
+}
+
+// TestSeed_演示IP合法且不重复 是缺陷 G-24 的回归测试。
+//
+// 原实现用 fmt.Sprintf("192.168.%s.10", rack.Row) 拼 IP，而 rack.Row 是机柜排字母
+// （A/B）→ 产出 "192.168.A.10" 这种**非法 IPv4**；且同一机房下 A01/A02/A03 三排的
+// Row 都是 "A"，9 台服务器 × 3 张网卡会共用同一批地址。两类问题都要钉住：
+// ① 每个非空地址必须能被 net.ParseIP 解析（旧拼法直接红在这里）；
+// ② 全局不得有重复地址（旧拼法在这里也会红 —— 只修「合法」不修「唯一」挡不住）。
+func TestSeed_演示IP合法且不重复(t *testing.T) {
+	db := newTestDB(t)
+	require.Equal(t, 0, seedData(db), "seedData 不应有任何失败处")
+
+	// 注：sqlite 测试库里 assets.id 恒为零值（GORM 对带 default 标签的零值主键不发列，
+	// 而 sqlite 的 TEXT PRIMARY KEY 允许多个 NULL —— 既有测试台特性，与 G-24 无关），
+	// 所以这里的归属描述用 interface_name，不用 asset_id。
+	byIP := map[string][]string{} // ip → 占用它的网卡名列表
+
+	var nets []models.AssetNetwork
+	require.NoError(t, db.Find(&nets).Error)
+	require.NotEmpty(t, nets, "seed 必须建出网卡，否则本用例空转")
+	nonEmpty := 0
+	for _, n := range nets {
+		if n.IPv4Address == "" {
+			continue // 交换机接入端口按设计无 IP
+		}
+		nonEmpty++
+		ip := net.ParseIP(n.IPv4Address)
+		require.NotNil(t, ip, "网卡 %s 的 ipv4_address=%q 不是合法 IPv4（G-24）",
+			n.InterfaceName, n.IPv4Address)
+		assert.True(t, ip.To4() != nil, "%q 必须是 IPv4 而非 IPv6", n.IPv4Address)
+		byIP[n.IPv4Address] = append(byIP[n.IPv4Address], n.InterfaceName)
+	}
+	require.NotZero(t, nonEmpty, "一个带 IP 的网卡都没有 —— 本用例在空转")
+	for ip, owners := range byIP {
+		assert.Len(t, owners, 1, "网卡地址 %s 被 %d 张网卡共用：%v", ip, len(owners), owners)
+	}
+	assert.Len(t, byIP, nonEmpty, "%d 张网卡应产出 %d 个互不相同的地址", nonEmpty, nonEmpty)
+	t.Logf("已校验 %d 张网卡的 %d 个唯一地址（%v 三段）", nonEmpty, len(byIP), demoSiteNets)
+
+	// 告警 HostIP 是同一族地址，同样不得是非法字面量（原先写死 192.168.A.10）
+	var alerts []models.Alert
+	require.NoError(t, db.Find(&alerts).Error)
+	require.NotEmpty(t, alerts)
+	ips := map[string]bool{}
+	for _, a := range alerts {
+		ips[a.HostIP] = true
+	}
+	assert.True(t, ips[""], "交换机那条告警的 HostIP 应保持为空（seed 未给交换机端口配 IP）")
+	for _, a := range alerts {
+		if a.HostIP == "" {
+			continue
+		}
+		assert.NotNil(t, net.ParseIP(a.HostIP),
+			"告警 %s 的 HostIP=%q 不是合法 IPv4（G-24）", a.AlertID, a.HostIP)
+	}
+}
+
+// TestSeed_演示IP限定在RFC5737文档网段 保证演示地址**不可能**撞上真实设备：
+// 192.0.2.0/24、198.51.100.0/24、203.0.113.0/24 被标准保留给示例与文档。
+// 只断言「合法」不够 —— 有人把拼法改成 192.168.1.10 一样合法，却可能指向真实资产。
+func TestSeed_演示IP限定在RFC5737文档网段(t *testing.T) {
+	db := newTestDB(t)
+	require.Equal(t, 0, seedData(db))
+
+	prefixes := make([]*net.IPNet, 0, len(demoSiteNets))
+	for _, p := range demoSiteNets {
+		_, block, err := net.ParseCIDR(p + ".0/24")
+		require.NoError(t, err)
+		prefixes = append(prefixes, block)
+	}
+	require.Len(t, prefixes, 3, "RFC 5737 只定义了 3 个文档网段")
+
+	inDemoNet := func(ipStr string) bool {
+		ip := net.ParseIP(ipStr)
+		for _, b := range prefixes {
+			if ip != nil && b.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var nets []models.AssetNetwork
+	require.NoError(t, db.Find(&nets).Error)
+	checked := 0
+	for _, n := range nets {
+		if n.IPv4Address == "" {
+			continue
+		}
+		assert.True(t, inDemoNet(n.IPv4Address),
+			"网卡地址 %s 不在 RFC 5737 文档网段内（演示数据不得使用可路由地址）", n.IPv4Address)
+		checked++
+	}
+
+	var alerts []models.Alert
+	require.NoError(t, db.Find(&alerts).Error)
+	for _, a := range alerts {
+		if a.HostIP == "" {
+			continue
+		}
+		assert.True(t, inDemoNet(a.HostIP),
+			"告警 %s 的 HostIP=%s 不在 RFC 5737 文档网段内", a.AlertID, a.HostIP)
+		checked++
+	}
+	assert.Greater(t, checked, 0, "一个地址都没校验到 —— 本用例在空转")
 }
 
 func TestSeed_生成MAC格式正确(t *testing.T) {
