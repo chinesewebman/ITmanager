@@ -10,6 +10,7 @@ import type { AlertListParams } from "../services/apiClient";
 import { PageHeader } from "../components/PageHeader";
 import { ErrorState } from "../components/ErrorState";
 import { AlertTable, type Alert } from "../components/AlertTable";
+import { AlertCard } from "../components/AlertCard";
 import {
   AlertStatsCards,
   type AlertStats,
@@ -17,6 +18,7 @@ import {
 import { useApiMutation, useApiQuery, queryKeys } from "../hooks/useApiQuery";
 import { useState, useCallback } from "react";
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
+import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 
 // W1：假数据兜底已删除。统计卡的 0 值只是「无数据时占位」，不是虚构数字。
 const EMPTY_STATS: AlertStats = {
@@ -41,6 +43,8 @@ function Alerts() {
 
   useDocumentTitle('告警中心')
   const { token } = theme.useToken()
+  // M13：移动端 (xs) 用卡片列表替代表格，避免 AlertTable 横向溢出（桌面端不变）
+  const { isMobile } = useResponsiveTable()
   // W1：删掉 queryFn 内的 `?? MOCK_ALERTS / ?? DEFAULT_STATS` 兜底 ——
   // 原写法让 React Query 的 isError 恒为 false，失败被渲染成一屏假告警。
   const { data, isLoading, isError, error, refetch } = useApiQuery<AlertsResp>(
@@ -273,15 +277,31 @@ function Alerts() {
             </Space>
           </div>
 
-          <AlertTable
-            data={list}
-            loading={isLoading}
-            onAck={handleAck}
-            onResolve={handleResolve}
-            onMarkFP={handleMarkFP}
-            selectedIds={selectedIds}
-            onSelectionChange={setSelectedIds}
-          />
+          {isMobile ? (
+            <MobileCardList
+              data={list}
+              loading={isLoading}
+              emptyText="暂无告警"
+              renderCard={(alert: Alert) => (
+                <AlertCard
+                  alert={alert}
+                  onAck={handleAck}
+                  onResolve={handleResolve}
+                  onMarkFP={handleMarkFP}
+                />
+              )}
+            />
+          ) : (
+            <AlertTable
+              data={list}
+              loading={isLoading}
+              onAck={handleAck}
+              onResolve={handleResolve}
+              onMarkFP={handleMarkFP}
+              selectedIds={selectedIds}
+              onSelectionChange={setSelectedIds}
+            />
+          )}
         </>
       )}
 

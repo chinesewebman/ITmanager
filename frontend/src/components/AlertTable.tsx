@@ -34,6 +34,42 @@ export interface AlertTableProps {
   onSelectionChange?: (ids: string[]) => void;
 }
 
+export interface AlertActionHandlers {
+  onAck: (id: string) => void;
+  onResolve: (id: string) => void;
+  onMarkFP?: (id: string, isFP: boolean) => void;
+}
+
+export interface AlertAction {
+  key: string;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+// M13：抽「操作按钮决策」为纯函数，桌面端（AlertTable 操作列）与移动端（AlertCard）共用，
+// 避免两处 status/is_false_positive 分支漂移（H9 教训：Assets 移动端与 AssetTable 桌面端渲染不一致导致 maintenance 标错）。
+export function getAlertActions(
+  record: Alert,
+  { onAck, onResolve, onMarkFP }: AlertActionHandlers,
+): AlertAction[] {
+  const actions: AlertAction[] = [];
+  if (record.status === "problem") {
+    actions.push({ key: "ack", label: "确认", onClick: () => onAck(record.id) });
+    actions.push({ key: "resolve", label: "解决", onClick: () => onResolve(record.id) });
+  } else if (record.status === "acknowledged") {
+    actions.push({ key: "resolve", label: "解决", onClick: () => onResolve(record.id) });
+  }
+  if (onMarkFP) {
+    if (!record.is_false_positive) {
+      actions.push({ key: "mark-fp", label: "标记误报", onClick: () => onMarkFP(record.id, true) });
+    } else {
+      actions.push({ key: "unmark-fp", label: "取消误报", danger: true, onClick: () => onMarkFP(record.id, false) });
+    }
+  }
+  return actions;
+}
+
 export const AlertTable = memo(function AlertTable({
   data,
   loading,
@@ -81,51 +117,14 @@ export const AlertTable = memo(function AlertTable({
       key: "action",
       width: 280,
       fixed: "right",
+      // M13：操作按钮决策抽到 getAlertActions，与移动端 AlertCard 共用（避免分支漂移）
       render: (_, record) => (
         <Space>
-          {record.status === "problem" && (
-            <>
-              <Button type="link" size="small" onClick={() => onAck(record.id)}>
-                确认
-              </Button>
-              <Button
-                type="link"
-                size="small"
-                onClick={() => onResolve(record.id)}
-              >
-                解决
-              </Button>
-            </>
-          )}
-          {record.status === "acknowledged" && (
-            <Button
-              type="link"
-              size="small"
-              onClick={() => onResolve(record.id)}
-            >
-              解决
+          {getAlertActions(record, { onAck, onResolve, onMarkFP }).map((a) => (
+            <Button key={a.key} type="link" size="small" danger={a.danger} onClick={a.onClick}>
+              {a.label}
             </Button>
-          )}
-          {/* 小改进 #2：误报标记 */}
-          {onMarkFP && !record.is_false_positive && (
-            <Button
-              type="link"
-              size="small"
-              onClick={() => onMarkFP(record.id, true)}
-            >
-              标记误报
-            </Button>
-          )}
-          {onMarkFP && record.is_false_positive && (
-            <Button
-              type="link"
-              size="small"
-              danger
-              onClick={() => onMarkFP(record.id, false)}
-            >
-              取消误报
-            </Button>
-          )}
+          ))}
         </Space>
       ),
     },
