@@ -1263,6 +1263,8 @@ export interface components {
                     acknowledged?: number;
                     resolved?: number;
                 };
+                /** @description 过滤后总数（分页器「共 X 条」），区别于 stats.total 全表总数 */
+                total?: number;
                 /** @description 还有下一页时返回（items 长度等于 limit 时） */
                 next_cursor?: string;
             };
@@ -1742,6 +1744,10 @@ export interface operations {
                 limit?: number;
                 /** @description v2.0 游标分页，取上一页响应的 next_cursor；解码失败时降级为忽略 */
                 cursor?: string;
+                /** @description 页码（>0 走 offset 分页；不传走 limit 上限语义，向后兼容） */
+                page?: number;
+                /** @description 每页条数，默认 20，上限 500 */
+                page_size?: number;
             };
             header?: never;
             path?: never;

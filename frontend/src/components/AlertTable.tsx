@@ -32,6 +32,11 @@ export interface AlertTableProps {
   // C-P6: 批量勾选（undefined 时不开启）
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
+  // M3/P5: 服务端分页受控。total 传入时启用受控分页（current/pageSize/onChange 由父组件持有）
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  onPageChange?: (page: number, pageSize: number) => void;
 }
 
 export interface AlertActionHandlers {
@@ -78,6 +83,10 @@ export const AlertTable = memo(function AlertTable({
   onMarkFP,
   selectedIds,
   onSelectionChange,
+  total,
+  page,
+  pageSize,
+  onPageChange,
 }: AlertTableProps) {
   // P4：columns useMemo 缓存，render 闭包引用的 onAck/onResolve/onMarkFP 引用稳定则 columns 不重建
   const columns = useMemo<ColumnsType<Alert>>(() => [
@@ -137,7 +146,23 @@ export const AlertTable = memo(function AlertTable({
       dataSource={data}
       loading={loading}
       scroll={{ x: 1000 }}
-      pagination={{ showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+      pagination={
+        total !== undefined
+          ? {
+              current: page ?? 1,
+              pageSize: pageSize ?? 20,
+              total,
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+              pageSizeOptions: ['10', '20', '50', '100'],
+              onChange: (p, ps) => onPageChange?.(p, ps),
+            }
+          : {
+              showSizeChanger: true,
+              showTotal: (t) => `共 ${t} 条`,
+              pageSizeOptions: ['10', '20', '50', '100'],
+            }
+      }
       locale={{
         emptyText: (
           <EmptyState

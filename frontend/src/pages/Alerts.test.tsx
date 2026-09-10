@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
   // M14：共享 mutate spy —— 断言「确认后才调用」，不关心是哪个 mutation 的 mutate
   mutate: vi.fn(),
   mutateAsync: vi.fn(),
+  // M3/P5：记录 queryKey，供分页/筛选断言
+  lastKey: null as unknown,
 }))
 
 const mockAlerts = [
@@ -32,29 +34,35 @@ const mockAlerts = [
     created_at: "2026-02-14 09:30:00",
   },
 ];
-// Alerts 的 useApiQuery 返回 {items, stats}（page 自己在 fetcher 里 wrap）
+// Alerts 的 useApiQuery 返回 {items, stats, total}。
+// total=100 是「过滤后总数」（分页器「共 X 条」），stats.total=15 是「全表总数」（统计卡）——语义分离（M3/P5 方案 B）。
 const mockResp = {
   items: mockAlerts,
   stats: { total: 15, problem: 8, acknowledged: 3, resolved: 4 },
+  total: 100,
 };
 
 vi.mock("../hooks/useApiQuery", () => ({
-  useApiQuery: () => ({
-    data: mockResp,
-    isLoading: false,
-    isError: false,
-    error: undefined,
-    refetch: h.refetch,
-    ...h.override,
-  }),
+  useApiQuery: (key: unknown) => {
+    h.lastKey = key
+    return {
+      data: mockResp,
+      isLoading: false,
+      isError: false,
+      error: undefined,
+      refetch: h.refetch,
+      ...h.override,
+    }
+  },
   useApiMutation: () => ({ mutate: h.mutate, mutateAsync: h.mutateAsync, isPending: false }),
-  queryKeys: { alerts: { list: () => ["alerts", "list"] } },
+  queryKeys: { alerts: { list: (f?: Record<string, unknown>) => ["alerts", "list", f ?? {}] } },
 }));
 
 beforeEach(() => {
   h.override = {}
   h.refetch.mockClear()
   h.mutate.mockClear()
+  h.lastKey = null
 })
 
 describe("Alerts page", () => {
@@ -147,6 +155,36 @@ describe("Alerts page", () => {
 
     await waitFor(() => {
       expect(h.mutate).toHaveBeenCalledWith(["1"]);
+    });
+  });
+
+  // M3/P5：服务端分页——分页器显示过滤后 total（100），而非当前页 items.length（2）。
+  it("M3/P5：分页器显示服务端 total（共 100 条），而非当前页条数", () => {
+    render(<Alerts />);
+    // mockResp total=100 / items=2 → 分页器「共 100 条」，不是「共 2 条」
+    expect(screen.getByText("共 100 条")).toBeInTheDocument();
+    expect(screen.queryByText("共 2 条")).toBeNull();
+  });
+
+  // M3/P5：翻页更新 queryKey 的 page，筛选变化重置回第 1 页。
+  it("M3/P5：翻页更新 queryKey 的 page，筛选变化重置回第 1 页", async () => {
+    const { container } = render(<Alerts />);
+    // 初始 queryKey 含 page:1/pageSize:20
+    expect((h.lastKey as any)[2]).toMatchObject({ page: 1, pageSize: 20 });
+
+    // 点「下一页」→ onPageChange(2, 20) → setPage(2) → queryKey page 变 2
+    const next = container.querySelector(".ant-pagination-next");
+    expect(next).toBeTruthy();
+    fireEvent.click(next as Element);
+    await waitFor(() => {
+      expect((h.lastKey as any)[2]).toMatchObject({ page: 2 });
+    });
+
+    // 切状态筛选 → 重置 page 回 1，status 下沉进 queryKey
+    fireEvent.mouseDown(screen.getAllByRole("combobox")[0]);
+    fireEvent.click(await screen.findByTitle("已解决"));
+    await waitFor(() => {
+      expect((h.lastKey as any)[2]).toMatchObject({ status: "resolved", page: 1 });
     });
   });
 });

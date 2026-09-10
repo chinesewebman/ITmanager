@@ -31,12 +31,16 @@ const EMPTY_STATS: AlertStats = {
 interface AlertsResp {
   items: Alert[];
   stats: AlertStats | null;
+  total: number;
 }
 
 function Alerts() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [severityFilter, setSeverityFilter] = useState<string>("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // M3/P5：服务端分页——page/pageSize 由本组件持有；筛选变化时重置回第 1 页
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   // C-P9: 列表 + stats 合并到 React Query，filter 变化走 queryKey 隔离缓存
   const filters = { status: statusFilter, severity: severityFilter };
@@ -48,21 +52,25 @@ function Alerts() {
   // W1：删掉 queryFn 内的 `?? MOCK_ALERTS / ?? DEFAULT_STATS` 兜底 ——
   // 原写法让 React Query 的 isError 恒为 false，失败被渲染成一屏假告警。
   const { data, isLoading, isError, error, refetch } = useApiQuery<AlertsResp>(
-    queryKeys.alerts.list(filters),
+    queryKeys.alerts.list({ ...filters, page, pageSize }),
     async () => {
       // antd Select onChange 给 string，但 spec 要求 literal union
       // 调用方负责 narrow（业务已知：只有 3 个合法值）
       const params = {
+        page,
+        page_size: pageSize,
         ...(statusFilter && {
           status: statusFilter as AlertListParams["status"],
         }),
         ...(severityFilter && { severity: severityFilter }),
       } as AlertListParams;
       const res: any = await alertApi.list(params);
-      const items = res?.data?.data?.items;
+      const body = res?.data?.data;
+      const items = body?.items;
       return {
         items: Array.isArray(items) ? items : [],
-        stats: res?.data?.data?.stats ?? null,
+        stats: body?.stats ?? null,
+        total: body?.total ?? 0,
       };
     },
   );
@@ -186,7 +194,13 @@ function Alerts() {
   const list = data?.items ?? [];
   // 200 + 空 data 时 stats 为 null，直接读 stats.problem 会 TypeError 白屏
   const stats = data?.stats ?? EMPTY_STATS;
+  const total = data?.total ?? 0;
   const hasSelection = selectedIds.length > 0;
+  // M3/P5：受控分页回调（引用稳定，供 memo 化的 AlertTable 使用）
+  const handlePageChange = useCallback((p: number, ps: number) => {
+    setPage(p);
+    setPageSize(ps);
+  }, []);
 
   return (
     <div>
@@ -254,7 +268,7 @@ function Alerts() {
                 placeholder="状态"
                 allowClear
                 value={statusFilter || undefined}
-                onChange={(v) => setStatusFilter(v ?? "")}
+                onChange={(v) => { setStatusFilter(v ?? ""); setPage(1); }}
                 style={{ width: 120 }}
                 options={[
                   { label: "未处理", value: "problem" },
@@ -266,7 +280,7 @@ function Alerts() {
                 placeholder="严重级别 ≥"
                 allowClear
                 value={severityFilter || undefined}
-                onChange={(v) => setSeverityFilter(v ?? "")}
+                onChange={(v) => { setSeverityFilter(v ?? ""); setPage(1); }}
                 style={{ width: 140 }}
                 options={[
                   { label: "灾难 (≥5)", value: "5" },
@@ -300,6 +314,10 @@ function Alerts() {
               onMarkFP={handleMarkFP}
               selectedIds={selectedIds}
               onSelectionChange={setSelectedIds}
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={handlePageChange}
             />
           )}
         </>
