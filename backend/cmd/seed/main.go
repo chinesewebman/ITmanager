@@ -277,7 +277,7 @@ func seedData(db *gorm.DB) int {
 	// ========== 创建工单 ==========
 	tickets := []models.Ticket{
 		{TicketNumber: "TICKET-20260215-A", Title: "Web服务器CPU使用率异常", Description: "web-server-01 CPU使用率持续在95%以上，需要检查处理", TicketType: "incident", Priority: "high", Status: "open", RequesterName: "张三", RequesterEmail: "zhangsan@company.com", Category: "服务器故障", Source: "manual"},
-		{TicketNumber: "TICKET-20260215-B", Title: "数据库存储扩容申请", Description: "数据库存储空间不足，申请扩容500GB", TicketType: "request", Priority: "medium", Status: "in_progress", RequesterName: "李四", RequesterEmail: "lisi@company.com", Category: "资源申请", Source: "manual"},
+		{TicketNumber: "TICKET-20260215-B", Title: "数据库存储扩容申请", Description: "数据库存储空间不足，申请扩容500GB", TicketType: "request", Priority: "normal", Status: "in_progress", RequesterName: "李四", RequesterEmail: "lisi@company.com", Category: "资源申请", Source: "manual"},
 		{TicketNumber: "TICKET-20260214-A", Title: "网络交换机端口故障", Description: "Cisco交换机端口23进入err-disable状态", TicketType: "incident", Priority: "high", Status: "resolved", RequesterName: "王五", RequesterEmail: "wangwu@company.com", Category: "网络故障", Source: "zabbix", Resolution: "已重启端口，恢复正常", ResolvedAt: timePtr(time.Now().Add(-24 * time.Hour))},
 		{TicketNumber: "TICKET-20260213-A", Title: "新服务器上线部署", Description: "新采购的Dell R740服务器需要安装部署", TicketType: "request", Priority: "low", Status: "closed", RequesterName: "赵六", RequesterEmail: "zhaoliu@company.com", Category: "新业务部署", Source: "manual", Resolution: "已完成部署并交付使用", ResolvedAt: timePtr(time.Now().Add(-48 * time.Hour)), ClosedAt: timePtr(time.Now().Add(-47 * time.Hour))},
 	}

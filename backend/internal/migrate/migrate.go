@@ -92,6 +92,11 @@ type migration struct {
 	name    string
 	upSQL   string
 	downSQL string
+	// upFile / downFile 记「该方向的文件是否已读到」，不用 upSQL != "" 兼作标志位：
+	// 0 字节的 SQL 文件会让内容判断失效，同号文件就被静默吞掉一个。
+	// 存文件名而不是 bool，是为了报错时能指名道姓说撞的是哪个文件。
+	upFile   string
+	downFile string
 }
 
 // Load 解析 embed.FS 中的所有 migration（按版本号排序）
@@ -127,10 +132,26 @@ func Load() ([]migration, error) {
 			return nil, fmt.Errorf("read %s: %w", base, err)
 		}
 		if strings.HasSuffix(base, ".up.sql") {
+			// 同版本号出现第二个 up 文件时**必须报错**：下面这行赋值会静默覆盖前者，
+			// 结果是其中一个迁移永不执行，而 schema_migrations 照样记下该版本 ——
+			// 没有报错、没有日志、没有测试会红。宁可启动失败也不要这种静默丢失。
+			if m.upFile != "" {
+				return nil, fmt.Errorf(
+					"duplicate migration version %d: %q 与已加载的 %q 撞号（同号会被静默覆盖，其中一个永不执行）",
+					ver, base, m.upFile)
+			}
 			m.upSQL = string(content)
+			m.upFile = base
 			m.name = strings.TrimSuffix(strings.TrimSuffix(base, ".up.sql"), strconv.FormatInt(ver, 10)+"_")
 		} else if strings.HasSuffix(base, ".down.sql") {
+			// down 撞号同样是静默丢失，代价是回滚链少一段。
+			if m.downFile != "" {
+				return nil, fmt.Errorf(
+					"duplicate migration version %d: %q 与已加载的 %q 撞号（同号会被静默覆盖，回滚链会少一段）",
+					ver, base, m.downFile)
+			}
 			m.downSQL = string(content)
+			m.downFile = base
 		}
 	}
 

@@ -169,6 +169,21 @@ WHERE u.username = 'legacy_admin' AND r.code = 'admin';
 INSERT INTO assets (asset_type, asset_name, tags, custom_fields) VALUES
     ('server', 'legacy-null-jsonb', NULL, NULL),
     ('server', 'legacy-json-jsonb', '["x"]'::jsonb, '{"k":"v"}'::jsonb);
+
+-- M16: 预置两行「升级前就存在」的工单。
+--   LEGACY-M16-1 (medium): 必须被 000023 归一为 normal。
+--     没有它, `UPDATE ... WHERE priority='medium'` 恒命中 0 行, 用例会变成
+--     「把迁移整个删掉也是绿」的假绿 —— 与 000014 回填踩过的坑同型。
+--   LEGACY-M16-2 (high): 对照组, 必须原样保留。
+--     没有它, 把 up 的 WHERE 去掉(全表一律改成 normal)也能让上面那条断言通过 ——
+--     等于没有验证「只动 medium 这一个同义词」。
+-- 列名用 pre-000013 的名字(ticket_no / creator_id), 000013 才 RENAME 成 ticket_number / requester_id。
+INSERT INTO tickets (ticket_no, ticket_type, priority, title, status, creator_id)
+SELECT 'LEGACY-M16-1', 'incident', 'medium', '存量 medium 工单', 'open', u.id
+  FROM users u WHERE u.username = 'legacy_admin'
+UNION ALL
+SELECT 'LEGACY-M16-2', 'incident', 'high', '存量 high 工单(对照)', 'open', u.id
+  FROM users u WHERE u.username = 'legacy_admin';
 SQL
 
 # ---- 5. 跑 Go 冒烟测试(两条路径) ----
@@ -187,7 +202,7 @@ if [[ "$rc" -eq 0 ]]; then
   log "② 存量升级路径: 只应用 000013 之后的迁移, 校验 role/jsonb 回填 + 回滚不丢旧列"
   ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$UPGRADE_DSN" SMOKE_EXPECT_UPGRADE=1 "$GO_BIN" test \
       -tags dbsmoke -count=1 -v \
-      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_DownPreservesLegacyColumns' ./tests/ ) || rc=$?
+      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_TicketPriorityNormalize|TestDBSmoke_DownPreservesLegacyColumns' ./tests/ ) || rc=$?
 fi
 
 if [[ "$rc" -eq 0 ]]; then

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"sort"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,61 @@ func TestLoad_空FS返空切片不panic(t *testing.T) {
 	migs, err := Load()
 	require.NoError(t, err)
 	assert.Empty(t, migs)
+}
+
+// TestLoad_同版本号撞号必须报错 守 M16 §7 那条静默事故路径。
+//
+// Load 用 byVer[ver] 聚合同号文件，第二个 up 会**静默覆盖**第一个：那个迁移永不执行，
+// 而 schema_migrations 照样记下该版本 —— 没有报错、没有日志、没有测试会红。
+// 真发生过：M16 的迁移差点写成 000022，与 P20 计划占用的号撞上。
+//
+// 用独立的 fstest.MapFS 而不是往 testdata/migrations/ 里塞第二个同号文件 ——
+// 那个目录被本文件 6 个用例共用（setupFS），塞进去会让它们集体变红。
+func TestLoad_同版本号撞号必须报错(t *testing.T) {
+	// 反面：0 字节的文件也要算「已加载」。用 upSQL != "" 兼作标志位会漏检，
+	// 于是「0 字节 + 有内容」这组被静默吞掉一个 —— 这正是 upFile/downFile 存在的理由。
+	// up / down 两个分支都要盖：漏掉 down 那一侧的代价是回滚链少一段。
+	cases := []struct {
+		name string
+		a    string
+	}{
+		{"两个文件都有内容", "SELECT 1;"},
+		{"第一个文件是 0 字节", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			FS = fstest.MapFS{
+				"migrations/0001_alpha.up.sql": &fstest.MapFile{Data: []byte(tc.a)},
+				"migrations/0001_beta.up.sql":  &fstest.MapFile{Data: []byte("SELECT 2;")},
+			}
+			_, err := Load()
+			require.Error(t, err, "同版本号两个 up 文件必须报错，否则其中一个被静默丢弃")
+			assert.Contains(t, err.Error(), "duplicate migration version 1")
+		})
+	}
+	for _, tc := range cases {
+		t.Run("down/"+tc.name, func(t *testing.T) {
+			FS = fstest.MapFS{
+				"migrations/0001_alpha.up.sql":   &fstest.MapFile{Data: []byte("SELECT 1;")},
+				"migrations/0001_alpha.down.sql": &fstest.MapFile{Data: []byte(tc.a)},
+				"migrations/0001_beta.down.sql":  &fstest.MapFile{Data: []byte("SELECT 2;")},
+			}
+			_, err := Load()
+			require.Error(t, err, "同版本号两个 down 文件必须报错，否则回滚链少一段")
+			assert.Contains(t, err.Error(), "duplicate migration version 1")
+		})
+	}
+
+	// 正面：正常形态不得误伤 —— 同版本的 up+down 配对、以及不同版本同名文件。
+	FS = fstest.MapFS{
+		"migrations/0001_alpha.up.sql":   &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"migrations/0001_alpha.down.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"migrations/0002_alpha.up.sql":   &fstest.MapFile{Data: []byte("SELECT 2;")},
+		"migrations/0002_alpha.down.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
+	}
+	migs, err := Load()
+	require.NoError(t, err, "同号 up+down 配对是正常形态，不得报撞号")
+	assert.Len(t, migs, 2)
 }
 
 // ==================== Status 测试 ====================

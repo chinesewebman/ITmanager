@@ -4,6 +4,21 @@
 **HEAD**: `bcb406d`（覆盖率表快照）→ 当前 `main`
 **状态**: ✅ 998 backend 测试函数全过（`go test ./... -count=1`，27 个包）+ 176 frontend 测试全过（`npx vitest run`，27 文件）+ `db_smoke.sh` 两条真 PG 路径绿
 
+## 🆕 2026-09-10 增量（M16 工单优先级词表归一，见 `docs/FIX-PLAN-M16-PRIORITY.md`）
+
+| 维度 | 数值 / 说明 |
+|---|---|
+| Backend 测试函数 | **1031**（`grep -rh "^func Test" --include=*_test.go`；含 **20** 个 `dbsmoke` 标签用例 —— 注意本节以下各 dated 快照里的「12 个」是当时口径，此后已增到 19，本轮 +1 = 20） |
+| 新增守门测试 | `internal/integration/glpi_e2e_test.go` 的 `TestGLPIE2E_ConvertToTicket_优先级限定契约词表`（**GLPI 映射的 1/2/3/5/6 号档此前零覆盖**，只喂过 `Priority: 4`）、`internal/service` 的 `TestPriorityFromSeverity_输出限定在契约词表内`、`internal/migrate` 的 `TestLoad_同版本号撞号必须报错`（表驱动含「第一个 up 是 0 字节」+ 两条不误伤）、`tests/db_smoke_test.go` 的 `TestDBSmoke_TicketPriorityNormalize`（存量归一 / high 对照行不动 / 全表无词表外值） |
+| 既有断言同步 | `ticket_from_alert_test.go` 两处 `medium`→`normal`；`ticket_service_test.go` 的 `Create_成功_默认值生效` 补 `Priority` 默认断言、`Create_传值保留` 补「已传值不被覆盖」；`rack_ticket_handler_test.go` 的 mock 夹具 `medium`→`normal` |
+| dbsmoke 升级路径 | `scripts/db_smoke.sh` 预置两行存量工单（`LEGACY-M16-1` medium / `LEGACY-M16-2` high，插在 users 之后因 `creator_id` 是 FK），新用例已加进**升级路径**那行的 `-run` 白名单；`TestDBSmoke_DownPreservesLegacyColumns` 由九次 Down 改十次（23→21→…→13）并补**首尾正向断言** |
+| 变异反证 | **V-1..V-9 九条全红在业务断言上**（脚本 `/tmp/m16_mut.py`，逐条校验「不是编译错」+ 还原后 sha256 逐字节一致）：V-1 去掉 `Create` 的 priority 兜底、V-2 `priorityFromSeverity` 回退 medium、V-3 GLPI 映射回退 medium、V-4 `Load()` 的 up 撞号守卫失效、V-9 `Load()` 的 down 撞号守卫失效、V-5 迁移去掉 WHERE、V-6 迁移删掉 UPDATE、V-7 回滚链多滚一层、V-8 回滚链少滚一层 |
+| 真 PG 实测 | `scripts/db_smoke.sh` 全新 + 升级两条路径全绿（含新增用例**确实执行**而非 skip） |
+| 附带修复 | `migrate.Load()` 同版本号撞号由**静默覆盖**改为**报错**（up/down 两侧都守；判据用文件名 `upFile`/`downFile`，`upSQL != ""` 兼作标志位会在 0 字节 SQL 文件上漏检）；登记 `docs/TRAPS.md` T-41 |
+| 残余（另立任务） | `POST/PUT /tickets` 的 priority **取值**校验（`PUT` 是任意 `map` 直落 `Updates()`，mass-assignment 面更宽）；前端两处同义词字典按设计保留一个版本，且**无测试覆盖**（删掉不会红，靠注释守） |
+
+> 验证口径：`go test ./... -count=1` 全绿、`go vet -tags dbsmoke ./tests/` 干净；frontend `tsc --noEmit` + `eslint` + `vitest run` 干净。
+
 ### 续：M3 企微 `wechat` sender 端到端（rev7.1，TODO G-36 关闭）
 
 | 维度 | 数值 / 说明 |

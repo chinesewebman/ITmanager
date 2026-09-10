@@ -173,7 +173,7 @@ func TestTicketCreateFromAlert_新建返回201(t *testing.T) {
 	svc := &mockTicketService{
 		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
 			gotAlertID, gotUser = alertID, userID
-			return &models.Ticket{Title: "core-sw-01 CPU 高", Source: "alert", Priority: "medium"}, true, nil
+			return &models.Ticket{Title: "core-sw-01 CPU 高", Source: "alert", Priority: "normal"}, true, nil
 		},
 	}
 	r := newAlertTicketRouter(svc)

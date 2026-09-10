@@ -177,7 +177,9 @@ formatRelativeTime(iso?: string | null): string   // '3 分钟前'，空/非法 
 
 M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（全站零 `sorter`）、M3 分页口径、M7 升级策略 JSON textarea（先改异常文案，结构化编辑器属新功能）、M11 严重度配色两套、M12 已并入 W2、M13 移动端（Sider `breakpoint` + `AlertTable` 双渲染）、M14 批量操作确认与取消、M15 空态/加载态统一。
 
-**M16（rev4 新增，待决策，不在本轮范围）**：工单**优先级域跨层不一致**。契约 `openapi.yaml:2368` 的 priority enum 是 `[critical, high, normal, low]`，前端表单默认值/筛选/标签都按 `normal`；但 `cmd/seed/main.go:264` 与 `integration/glpi.go:158` 写入的是 `medium`（`models/ticket.go:20` 注释也是 medium）。后果：GLPI/seed 工单在列表里显示英文原值、用「普通」筛选筛不到。本轮只加了显示兜底（`medium: '普通'`），**未改域** —— 改哪边涉及存量数据与后端校验，需先定契约。同一类问题还有 `TicketStatsCards` 的档位（已在 W1 按契约修正为 5 档）。
+**M16（rev4 新增）→ 2026-09-10 已收口，见 `docs/FIX-PLAN-M16-PRIORITY.md`**：工单**优先级域跨层不一致**。契约 `openapi.yaml:2448-2450` 的 priority enum 是 `[critical, high, normal, low]`，前端表单默认值/筛选/标签都按 `normal`；但 `cmd/seed/main.go:280` 与 `integration/glpi.go:161` 写入的是 `medium`（`models/ticket.go:17` 注释也是 medium）。后果：GLPI/seed 工单用「普通」筛选筛不到。当时只加了显示兜底（`medium: '普通'`），**未改域**。
+
+**收口内容（选项 (a)：以契约为准）**：迁移 `000023` 把存量 `medium` 归一为 `normal`；三个写入方（glpi 映射 / `priorityFromSeverity` / seed 字面量）同批改 `normal`；`models/ticket.go` 注释同步；`Create` 补 `priority=''` 的兜底（`POST /tickets` 不传 priority 原会落空串，是活路径）。两处前端同义词字典按设计**保留**为未迁移行的安全网（注释已写明保留原因与删除条件）。回归网：两个映射函数的「输出 ∈ 契约词表」断言 + dbsmoke 升级路径的存量行归一/对照行不动/全表无词表外值三条断言 + `Load()` 撞号报错。同一类问题还有 `TicketStatsCards` 的档位（已在 W1 按契约修正为 5 档）。
 
 ---
 
@@ -399,6 +401,7 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
 | 批 2 · M3/P5 服务端分页（资产页） | ✅ 完成 | 资产页 `assetApi.list()` 原不带参数默认截断 20 条、`total` 丢弃、antd 假分页 → openapi 补 `keyword` 参数 + Assets.tsx 加 page/pageSize 下沉 page/page_size/keyword/type + 删前端 filtered + AssetTable 受控分页（total/page/pageSize/onPageChange）；2 用例绿（副标题用服务端 total / 翻页筛选更新 queryKey）；两条变异（subtitle 改 items.length / 删 onChange）均红在断言。**剩告警页** |
 | 批 2 · M3/P5 服务端分页（工单页） | ✅ 完成 | 工单页 `ticketApi.list()` 原不带 page 参数默认截断 20 条、`total` 丢弃、antd 假分页 → openapi 补 `page`/`page_size` 参数 + `apiClient.ts` 加 `TicketListParams` + `api.ts` `ticketApi.list` 改 `TicketListParams` + Tickets.tsx 加 page/pageSize 下沉 page/page_size/status/priority + `fetchTickets` 返回 `{items,total}` + TicketTable 受控分页（total/page/pageSize/onPageChange）；10 用例绿（含 M3/P5 翻页/筛选更新 queryKey + 副标题用服务端 total）；两条变异（删 onChange / 副标题改 list.length）均红在断言。**剩告警页** |
 | 批 2 · M3/P5 服务端分页（告警页） | ✅ 完成 | 方案 B 三小步全收口：小步 1 后端 offset 分页（`AlertFilter` 加 `Page/PageSize`，`List` 三元→四元 `(items, stats, total, err)`，switch 三路径 cursor→offset→limit，offset 分支过滤后 Count + Offset/Limit，pageSize 20/500 对齐 asset/ticket；handler 解析 `page/page_size` 响应加 `total` 过滤后 + `cursorMode` 门控 `next_cursor`；gRPC 适配四元）；小步 2 openapi 契约（`/alerts` GET 补 `page/page_size` + `AlertList` 补 `total` → gen:api）；小步 3 前端受控分页（`Alerts.tsx` 加 `page/pageSize` + fetcher 下沉 + 筛选重置 page 1；`AlertTable` 加 `total/page/pageSize/onPageChange`）。语义分离钉住：`stats.Total` 全表 vs `total` 过滤后。后端单测 + 前端 11 用例绿（含 2 分页用例），变异全红在断言；`tsc` + `eslint` + 全量 vitest 303 用例全绿。**M3/P5 三页全收口** |
+| **M16 工单优先级词表归一**（后端驱动，不在 W 系列内） | ✅ **完成** | 见下面「下一步」1.6 |
 | 批 2 · M13 移动端（告警页 AlertTable 双渲染） | ✅ 完成 | 抽 `getAlertActions` 纯函数（操作按钮决策桌面+移动共用，避免 status/is_false_positive 分支漂移）+ 新建 `AlertCard` 移动卡片 + `Alerts.tsx` `isMobile ? MobileCardList(renderCard=AlertCard) : AlertTable` 双渲染；6 用例绿 + 两条变异红（onAck 传错 id / 反转误报条件）。**Sider breakpoint 豁免**（jsdom 测不到响应式）。**预存在失败**：`Assets.mobile.test.tsx`（rev47 改 data 结构后 mock 未同步）已修 rev53 |
 
 **下一步（按顺序）**：
@@ -408,12 +411,22 @@ M1 标题体系统一（`PageHeader` 只覆盖 5/12 页）、M2 表格排序（�
    - **前端**（本轮）：入口挂在 `getAlertActions`（`AlertTable.tsx` 纯函数，桌面表格与移动卡片共用，一处实现两界面生效）——**不是**原先假设的「告警详情抽屉」，实测该页没有抽屉，已纠正设计记录 §6/§7。`Alert` 补 `ticket_id` 字段；`ticket_id` 非空渲染 disabled 的「已建单」，否则可点的「建单」。提示分流抽成纯函数 `ticketResultMessage`（`Alerts.tsx` 具名导出）：`created=true`→`success`，`created=false`→**`info`**「该告警已建单」（幂等不是失败，写成 error 会让运维反复重试）。**可见性判断只用来省一次请求，正确性由后端幂等兜底**——让前端判断承担防重职责会在并发下建出两张票。
    - **测试**：`AlertCard.test.tsx` +3（建单/已建单 disabled/未传不渲染）、`Alerts.test.tsx` +5（点击带对 id、created 两个分支的用户可见文案、纯函数 3 条）；4 条变异全部红在业务断言（V-1 已建单判断置 false / V-2 created=false 走 error / V-3 onSuccess 忽略 created / V-4 丢 disabled 透传），还原字节一致。
    - **测试基建**：`Alerts.test.tsx` 的 `useApiMutation` mock 由「忽略参数、共用一个 mutate spy」改为「每次调用一个独立 spy（转发到共享 spy）+ 留档 opts」——原先 onSuccess 回调分支**没有触发入口**；新写法按「哪个 spy 被点了」反查对应 opts，不依赖调用顺序（新增 mutation 不会悄悄错位）。`antd` 的 `message` 已在 `src/test/setup.ts` 全局 mock，断言打在调用上（jsdom 下静态 message 不落 DOM）。
-   - **未做（登记）**：`/tickets` 列表对 `source='alert'` 的筛选口径；M16 优先级域 normal vs medium（见上「已知阻塞」）。
+   - **未做（登记）**：`/tickets` 列表对 `source='alert'` 的筛选口径。（M16 优先级域已于 2026-09-10 收口，见 §4.1 与 `docs/FIX-PLAN-M16-PRIORITY.md`）
+1.6. **M16 工单优先级词表归一（2026-09-10 完成，出自 §4.1/§8「已知阻塞」，设计见 `docs/FIX-PLAN-M16-PRIORITY.md`）**
+   - **决策**：选项 (a) —— 以契约为准（`normal`），数据与写入方一起收敛。用户 2026-09-10 拍板。
+   - **迁移**：`000023_ticket_priority_normalize`（`UPDATE tickets SET priority='normal' WHERE priority='medium'`，down 显式声明不可逆）。序号取 000023 而非 000022（后者被 P20 预占）。
+   - **写入方 4 处**：`integration/glpi.go` 映射、`service/ticket_service.go` 的 `priorityFromSeverity`、`cmd/seed/main.go` 字面量、以及 `Create` 里 `priority=''` 的兜底（`POST /tickets` 不传 priority 原会落空串，属**活路径**，非历史脏数据）。
+   - **测试**：两个映射函数各加「输出 ∈ 契约词表」+「不产出 medium」断言（GLPI 侧此前**零覆盖**）；`ticket_service_test.go` 补默认值/传值保留断言；dbsmoke 升级路径新增 `TestDBSmoke_TicketPriorityNormalize`（存量 medium 归一 + high 对照行不动 + 全表无词表外值三条断言，seed 行由 `scripts/db_smoke.sh` 预置）。
+   - **回滚链**：`TestDBSmoke_DownPreservesLegacyColumns` 由九次 Down 改十次（23→21→…→13），并在**首尾各加一条正向断言**——链上全是 `assert.False(索引还在)`，多滚/少滚都不会被它发现，首钉「第一次 Down 滚的确实是 000023」、尾钉「000012 必须还在」。
+   - **附带修复**：`migrate.Load()` 同版本号撞号由「静默覆盖」改为**报错**，up/down 两侧都守，判据用文件名而非 `SQL != ""`（0 字节文件会漏检）；配 `fstest.MapFS` 用例。登记 `docs/TRAPS.md` T-41。
+   - **变异反证**：9 条（V-1..V-9）全红在业务断言上，含「up 去掉 WHERE」「up 删掉 UPDATE」「Down 多滚/少滚」「Load 撞号守卫失效（up / down 各一条）」。
+   - **未做（登记）**：`POST/PUT /tickets` 的 priority **取值**校验（`PUT` 是任意 map 直落 `Updates()`，mass-assignment 面更宽，单封 priority 会造成「已封住」的错觉）；前端两处同义词字典按设计保留一个版本。
+
 2. ~~W2 剩余 `Settings:923`~~ → 已完成（rev8）。**W2 全部 7 个调用点收口**。
 3. ~~W4-H6 cssVar 实测~~ → 已完成（rev9，方案①）。~~W4-H8~~ → 已完成（rev10）。~~W4-H9~~ → 已完成（rev11）。~~W4-H10~~ → 已完成（rev12）。~~W4-M4 AlertSuppressions~~ → 已完成（rev13）。~~W4-M4 Oncall~~ → 已完成（rev14）。~~W4-M4 Runbook~~ → 已完成（rev15）。~~W4-M4 Settings~~ → 已完成（rev16）。~~W4-M5 AlertSuppressions~~ → 已完成（rev17）。~~W4-M5 Runbook~~ → 已完成（rev18）。~~W4-M5 Oncall~~ → 已完成（rev19）。~~W4-M6 Settings~~ → 已完成（rev20）。~~W4-M6 Oncall~~ → 已完成（rev21）。~~W4-M6 TicketFormModal/AssetFormModal~~ → 豁免（rev22，死代码）。**W4 批 1 全部收口（H1/H6/H8/H9/H10/M4/M5/M6）**。
 4. ~~W6 批 1 逐索引推进~~ → **W6 批 1 全部收口（P13–P19：迁移 000016–000021 六个索引 + ticket_service cursor Count）**。
 5. ~~批 2 启动~~ → **M14（rev30）+ M7（rev31）+ M11 三处（rev32/33/34）+ M1 五页（rev35–39）+ M2 七表（rev40–46）+ M3/P5 资产页服务端分页（rev47）+ M3/P5 工单页服务端分页（rev48）+ P4 表格 memo（rev49 AssetTable + rev50 AlertTable）+ P7 key 稳定（rev51）+ M13 移动端双渲染（rev52）+ P6 进度节流豁免（rev54）+ M3/P5 告警页服务端分页（rev55）已完成（M3/P5 三页全收口）**；剩 M15 空态/加载态（登记待决策，见 §8 已知阻塞）。
 
-**已知阻塞/待确认**：M16（工单优先级域 normal vs medium）待定契约后才能改，本轮只做显示兜底。M3/P5 keyword 口径（资产页）：后端 `keyword` 匹配 `name/asset_tag/sn`（assets 表无 IP 列，IP 在 asset_networks 一对多），与 M9 placeholder「搜索名称 / IP」的「IP」承诺有口径差——改前前端 `ip_address` 在真实列表本就 undefined（后端未返回该字段），故「搜 IP」实为死逻辑，下沉后仅由「死逻辑」变「明确不支持」，未造成可感知回退；是否补后端 join 搜 IP 属独立决策，登记待确认。**M3/P5 告警页分页**：方案 B 已拍板（详见 `docs/FIX-PLAN-ALERT-PAGINATION.md`），三小步全收口（后端 offset 分页 + openapi 契约 + 前端受控分页，rev55），M3/P5 三页全完成。**M15 空态/加载态统一**：空态已收口（EmptyState 12 处、无裸 Empty）；「加载态统一」指把 Topology/Racks/AssetTimeline 的裸 Skeleton/Spin 换成已有 LoadingSkeleton（现只 2 处使用），属「重构非修 bug」+ 收益低（代码一致性），是否做待拍板。
+**已知阻塞/待确认**：~~M16（工单优先级域 normal vs medium）~~ 已于 2026-09-10 收口（以契约为准，迁移 `000023` + 三个写入方归一，见 `docs/FIX-PLAN-M16-PRIORITY.md`）。M3/P5 keyword 口径（资产页）：后端 `keyword` 匹配 `name/asset_tag/sn`（assets 表无 IP 列，IP 在 asset_networks 一对多），与 M9 placeholder「搜索名称 / IP」的「IP」承诺有口径差——改前前端 `ip_address` 在真实列表本就 undefined（后端未返回该字段），故「搜 IP」实为死逻辑，下沉后仅由「死逻辑」变「明确不支持」，未造成可感知回退；是否补后端 join 搜 IP 属独立决策，登记待确认。**M3/P5 告警页分页**：方案 B 已拍板（详见 `docs/FIX-PLAN-ALERT-PAGINATION.md`），三小步全收口（后端 offset 分页 + openapi 契约 + 前端受控分页，rev55），M3/P5 三页全完成。**M15 空态/加载态统一**：空态已收口（EmptyState 12 处、无裸 Empty）；「加载态统一」指把 Topology/Racks/AssetTimeline 的裸 Skeleton/Spin 换成已有 LoadingSkeleton（现只 2 处使用），属「重构非修 bug」+ 收益低（代码一致性），是否做待拍板。
 
 **测试盲区（W1 系列共有）**：本批单测 mock 掉 `useApiQuery`，故 `queryFn` 内的形状归一（`Array.isArray(items) ? items : []`）与 `catch` 删除不被单测覆盖。防回归靠两点：① `MOCK_*` 常量已从源码删除，重新引入无法通过编译；② `isError` 分支有断言。接口真实形状逐页核对 handler——`oncall_handler.go:35/124/135` 均返回 `{code,data:[...]}` 裸数组，`apiGet` 解包后即数组。

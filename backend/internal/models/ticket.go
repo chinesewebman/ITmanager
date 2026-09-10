@@ -14,7 +14,7 @@ type Ticket struct {
 	Title          string     `json:"title" gorm:"size:255;not null"`
 	Description    string     `json:"description" gorm:"type:text"`
 	TicketType     string     `json:"ticket_type" gorm:"size:20"`         // incident, request, problem, change
-	Priority       string     `json:"priority" gorm:"size:20"`            // low, medium, high, critical
+	Priority       string     `json:"priority" gorm:"size:20"`            // low, normal, high, critical（= openapi Ticket.priority；M16 归一并迁移 000023）
 	Status         string     `json:"status" gorm:"size:20;default:open"` // open, in_progress, resolved, closed
 	RequesterID    *uuid.UUID `json:"requester_id" gorm:"type:uuid"`
 	RequesterName  string     `json:"requester_name" gorm:"size:100"`

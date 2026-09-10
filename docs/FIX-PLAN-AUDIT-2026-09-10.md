@@ -23,7 +23,7 @@
 
 ### P1-2 ⚠️ `internal/api/testdata/migrations/` 缺 14 个迁移(含 9/9-9/10 全部 9 个新索引) — 路由集成测试跑的是陈旧 schema
 
-- **位置**:`backend/internal/api/testdata/migrations/` 目录(实有 7 个:`000001/2/3/4/8/9/12`)vs `backend/migrations/`(实有 21 个)
+- **位置**:`backend/internal/api/testdata/migrations/` 目录(实有 7 个:`000001/2/3/4/8/9/12`)vs `backend/migrations/`(实有 22 个，含 M16 的 000023；000022 空缺)
 - **缺失清单**:`000005/6/7/10/11/13/14/15/16/17/18/19/20/21`(14 个 — 不只是 9 个新索引,还包括 5 个之前就缺的)
 - **证据**:
   - `backend/internal/api/routes_integration_test.go:86` `//go:embed testdata/migrations/*.sql` 只 embed 7 个老迁移

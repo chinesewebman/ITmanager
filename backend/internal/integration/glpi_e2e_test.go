@@ -191,3 +191,35 @@ func TestGLPIE2E_SessionError(t *testing.T) {
 		t.Fatal("expected error on 500")
 	}
 }
+
+// TestGLPIE2E_ConvertToTicket_优先级限定契约词表 守 M16。
+//
+// 改 glpi.go 的 priorityMap 之前，这些分支在整套测试里**零覆盖**：
+// glpi_e2e_test.go 只喂过 Priority 4（断言 high），其余档位写成什么都行、
+// 没有用例会红。而 3 号档原先写的 medium 与契约的 normal 是同一个「普通」的
+// 两套拼法，后果是工单页按「普通」筛选（WHERE priority='normal'）查不到这些票。
+func TestGLPIE2E_ConvertToTicket_优先级限定契约词表(t *testing.T) {
+	// 与 openapi.yaml 的 Ticket.priority enum 一一对应，改动需同步契约
+	vocab := map[string]bool{"low": true, "normal": true, "high": true, "critical": true}
+	want := map[int]string{1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical"}
+
+	for p, exp := range want {
+		got := (&GLPITicket{ID: 1, Name: "t", Status: 1, Priority: p}).ConvertToTicket().Priority
+		if got != exp {
+			t.Errorf("GLPI priority=%d → %q, want %q", p, got, exp)
+		}
+		if !vocab[got] {
+			t.Errorf("GLPI priority=%d 产出 %q, 不在契约词表内", p, got)
+		}
+		if got == "medium" {
+			t.Errorf("GLPI priority=%d 产出了 medium —— 该拼法已由迁移 000023 归一为 normal, 不得再引入", p)
+		}
+	}
+
+	// 越界档位（真实 GLPI 只发 1~6）：记录当前行为是「原样落空串」，不是静默兜底成某一档。
+	// 落空串会被 ticket_service.Create 的 M16 兜底接成 normal（HTTP 建单路径），
+	// 但 GLPI 同步走的是 upsert，不经 Create —— 真出现越界值应当看得见。
+	if got := (&GLPITicket{Priority: 0}).ConvertToTicket().Priority; got != "" {
+		t.Errorf("越界 priority=0 → %q, 期望空串（当前行为）", got)
+	}
+}

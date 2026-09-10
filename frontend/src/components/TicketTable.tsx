@@ -19,13 +19,16 @@ const PRIORITY_LABEL: Record<string, string> = {
   critical: '紧急',
   high: '高',
   normal: '普通',
-  // 契约（openapi.yaml:2368）写 normal，但 GLPI 同步写入 medium（integration/glpi.go:158）
-  // —— 见 §4.1 M16，这里是显示兜底，避免把英文原值直接怼给用户
+  // M16 已归一：契约（openapi.yaml:2448-2450）与三个写入方都是 normal，
+  // 迁移 000023 也把存量 medium 改了。这条是**遗留同义词安全网** ——
+  // 未跑迁移的库、以及外部直接写库的行仍可能带 medium，留着免得把英文原值怼给用户。
+  // 一个版本后可删（删前先确认没有 priority='medium' 的行）。
   medium: '普通',
   low: '低',
 }
 
-// M2：优先级按严重度权重排序（critical 最高）。medium 与 normal 同权（见 M16 域不一致）。
+// M2：优先级按严重度权重排序（critical 最高）。medium 与 normal 同权 ——
+// 归一后它只是上面的安全网条目，权重仍需一致，否则遗留行的排序会跳档。
 const PRIORITY_WEIGHT: Record<string, number> = {
   critical: 4,
   high: 3,

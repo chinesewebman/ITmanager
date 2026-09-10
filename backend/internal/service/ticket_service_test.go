@@ -151,6 +151,9 @@ func TestTicketService_Create_成功_默认值生效(t *testing.T) {
 	assert.Equal(t, "open", tk.Status, "Status 默认 open")
 	assert.Equal(t, "manual", tk.Source, "Source 默认 manual")
 	assert.Equal(t, "[]", tk.Tags, "Tags 默认 []")
+	// M16：不传 priority 的 POST /tickets 原来会落一行 priority=''（既筛不出也不显示，
+	// 表格里优先级列空白）。handler 直接 bind 模型不校验，兜底只能落在这里。
+	assert.Equal(t, "normal", tk.Priority, "Priority 默认 normal（契约词表内的值）")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -179,6 +182,7 @@ func TestTicketService_Create_传值保留(t *testing.T) {
 	assert.Equal(t, "in_progress", tk.Status, "已传 Status 不覆盖")
 	assert.Equal(t, "alert", tk.Source)
 	assert.Equal(t, `["p1"]`, tk.Tags)
+	assert.Equal(t, "high", tk.Priority, "已传 Priority 不得被默认值覆盖")
 }
 
 func TestTicketService_Create_nil指针返回ErrInvalidInput(t *testing.T) {

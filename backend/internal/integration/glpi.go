@@ -155,7 +155,10 @@ func (t *GLPITicket) GetPriorityName() string {
 
 func (t *GLPITicket) ConvertToTicket() *LocalTicket {
 	statusMap := map[int]string{1: "open", 2: "in_progress", 3: "pending", 4: "resolved", 5: "closed"}
-	priorityMap := map[int]string{1: "low", 2: "low", 3: "medium", 4: "high", 5: "critical", 6: "critical"}
+	// M16：取值必须是 openapi Ticket.priority 的词表（low/normal/high/critical）。
+	// 原先是 medium —— 与契约和手工建单表单用的 normal 是同一个「普通」的两套拼法，
+	// 导致工单页按「普通」筛选查不到这些票。迁移 000023 已把存量 medium 归一为 normal。
+	priorityMap := map[int]string{1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical"}
 	return &LocalTicket{
 		ExternalID:  fmt.Sprintf("%d", t.ID),
 		Title:       t.Name,

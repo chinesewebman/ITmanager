@@ -275,6 +275,24 @@
 **残留边界**：撞号时用户看到 5xx 而非「自动重试后成功」。根因是 `generateTicketNumber` 仍是 count-based（同 T-39 残留边界），撞号在「删过工单」后是必然的而非偶发。
 **推广**：看到一个「失败后重试」的循环被搬进 `Transaction(...)` 里，先问一句：**这条失败语句自己有没有事务？** 没有的话，重试在那个位置就是死代码 —— 它永远不会执行第二次。
 
+### T-41. 迁移文件撞号 = 静默丢一个迁移
+**状态**: FIXED (2026-09-10, M16) | **类别**: 迁移 / 数据完整性
+**现象**: `backend/migrations/` 里出现两个 `0000NN_*.up.sql`（例如两个人都以为下一个号是自己的）。
+`internal/migrate` 的 `Load()` 按版本号归并到 `byVer[ver]`，后读到的（`fs.ReadDir` 字典序）**直接覆盖**前一个 ——
+**其中一个迁移永不执行**，而 `schema_migrations` 照样记下该版本。没有报错、没有日志、没有测试会红。
+**为什么难查**: 表现出来是「半年前加的索引/回填根本没生效」，没人会想到去怀疑迁移执行器；
+而 `migrate.Up` 又因为 `appliedSet[m.version]` 命中而跳过该版本，看起来一切正常。
+**解法**:
+1. `Load()` 现在**撞号即返回 error**（启动即失败），不再覆盖；up / down 两侧都守，
+   判据用文件名（`upFile`/`downFile`）而不是 `upSQL != ""` —— 0 字节的 SQL 文件会让内容判据漏检；
+2. 新增迁移前先 `ls backend/migrations/ | sort | tail`，用**实际存在的最大号 + 1**，不要用「计划里预留的号」。
+
+**注意**: 「让号」会留下版本号空洞，这是无害的 —— `Up` 按版本升序、`Down` 只回滚**已应用的最大版本**。
+但**给 Down 链加断言时要数清楚**：`backend/tests/db_smoke_test.go` 的 `TestDBSmoke_DownPreservesLegacyColumns`
+按「当前最高版本」逐次 Down，且链上断言全是 `assert.False(索引还在)` —— **多滚一层也是全绿**。
+该用例已补首尾两条正向断言（000023 被滚掉 / 000012 必须还在）堵住这一点。
+**登记**: `docs/FIX-PLAN-M16-PRIORITY.md` §7。
+
 
 ---
 
@@ -348,8 +366,6 @@
 **现象**: `old_string: "}"` 或 `"if err != nil"` 之类短 snippet 命中 8+ matches → patch 拒绝。
 **解法**: 包含 2-3 行 surrounding context, 或 `replace_all=true` (有意全改时)。
 
----
-
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -411,6 +427,7 @@
 | — (G-33 M3) | T-38 | FIXED |
 | — (G-25 轮) | T-39 | FIXED |
 | — (D-3 轮) | T-40 | ACTIVE |
+| — (M16 轮) | T-41 | FIXED |
 
 ---
 

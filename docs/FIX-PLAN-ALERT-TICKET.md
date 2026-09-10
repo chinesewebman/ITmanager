@@ -85,7 +85,7 @@ POST /api/alerts/{id}/ticket
 | `title` | `[主机名] 触发器名` | 触发器名为空退化用 `problem`，再空退化用 `告警 <alert_id>`；**按 rune 截断到 255**（`varchar(255)` 在 PG 里数字符，但触发器名最长 500） |
 | `description` | 固定模板 | 来源告警 ID / 主机 / 触发器 / 级别 / 开始时间 / 现象，纯文本 |
 | `ticket_type` | `incident` | 告警即故障 |
-| `priority` | severity 映射 | 0,1→`low`；2,3→`medium`；4→`high`；5→`critical`。**原写「与前端 Tickets 页下拉一致」是错的**（实测下拉是 `normal`，见 M16）——本函数跟的是 GLPI 同步的 `medium`，代价是工单页按「普通」筛选查不到这些票 |
+| `priority` | severity 映射 | 0,1→`low`；2,3→`normal`；4→`high`；5→`critical`。**本节初稿写的是 `medium`**：当时如实记录了实现，但那个值与 openapi 契约、手工建单表单的 `normal` 是同一个「普通」的两套拼法，代价是工单页按「普通」筛选查不到这些票（M16）。**2026-09-10 已归一**：本函数改为 `normal`，存量 `medium` 由迁移 `000023` 收敛，见 `docs/FIX-PLAN-M16-PRIORITY.md` |
 | `status` | `open` | 由 `Create` 默认值填 |
 | `source` | `alert` | 模型注释的枚举 `manual, email, api, glpi` 之外**新增 `alert`**，需同步注释 |
 | `asset_id` / `asset_name` | 告警的 `asset_id` / `host_name` | 资产关联能带上就带上 |

@@ -109,6 +109,13 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	if t.Tags == "" {
 		t.Tags = "[]"
 	}
+	// M16：不传 priority 的创建请求（POST /tickets 直接 bind 模型，handler 不校验）
+	// 原来会落一行 priority=''——既筛不出也不显示，比落个默认值糟得多。
+	// 与上面 Status/Source/Tags 同款兜底；值取契约词表里的 normal。
+	// 注：非空但词表外的值（如 "urgent"）仍原样入库，堵它要动契约，不在本轮。
+	if t.Priority == "" {
+		t.Priority = "normal"
+	}
 	// 工单号在 BeforeCreate 里按「当天已建数量」生成，并发下两个请求可能算出同一个号。
 	// 唯一索引拒绝后重新生成并重试（最多 5 次），彻底消除竞态（缺陷 D-2）。
 	//
@@ -252,11 +259,10 @@ func ticketFromAlert(a *models.Alert, userID string) *models.Ticket {
 
 // priorityFromSeverity Zabbix 0-5 严重级别 → tickets.priority。
 //
-// 取值 low/medium/high/critical，与真实写入方（GLPI 同步 integration/glpi.go:158）一致。
-// **已知分歧（M16）**：openapi.yaml 的 Ticket.priority enum 与前端工单表单/筛选下拉用的是
-// normal，本函数与 GLPI 用的是 medium —— 同一个「普通」概念两套词。后果是 /tickets 按
-// 「普通」筛选查不到本函数建出来的票。改哪一边是契约决策（可能牵扯存量数据迁移），
-// 未定案前不要单方面改这里，详见 docs/FIX-PLAN-UI-PERF.md M16。
+// 取值限定在 openapi.yaml 的 Ticket.priority enum（low/normal/high/critical），
+// 与 GLPI 同步（integration/glpi.go）、手工建单表单（TicketFormModal）一致。
+// 原先本函数返回 medium —— 与契约的 normal 是同一个「普通」的两套拼法，后果是
+// /tickets 按「普通」筛选查不到这里建出来的票（M16）。迁移 000023 已把存量归一。
 func priorityFromSeverity(sev int) string {
 	switch {
 	case sev >= 5: // Disaster
@@ -264,7 +270,7 @@ func priorityFromSeverity(sev int) string {
 	case sev == 4: // High
 		return "high"
 	case sev >= 2: // Warning / Average
-		return "medium"
+		return "normal"
 	default: // 0 Not classified / 1 Information
 		return "low"
 	}

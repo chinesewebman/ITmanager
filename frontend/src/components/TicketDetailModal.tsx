@@ -7,7 +7,7 @@ const PRIORITY_LABEL: Record<string, string> = {
   critical: '紧急',
   high: '高',
   normal: '普通',
-  medium: '普通', // GLPI 同步值，见 TicketTable.tsx 同名字典注释
+  medium: '普通', // M16 遗留同义词安全网（写入方已归一为 normal），见 TicketTable.tsx 同名字典注释
   low: '低',
 }
 

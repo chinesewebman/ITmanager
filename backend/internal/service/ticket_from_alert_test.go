@@ -97,7 +97,7 @@ func TestTicketService_CreateFromAlert_建单并回写关联(t *testing.T) {
 	// 派生字段
 	assert.Equal(t, "core-sw-01 CPU 使用率超过 90%", tk.Title)
 	assert.Equal(t, "incident", tk.TicketType)
-	assert.Equal(t, "medium", tk.Priority, "severity=3 应映射 medium")
+	assert.Equal(t, "normal", tk.Priority, "severity=3 应映射 normal（M16 归一到契约词表）")
 	assert.Equal(t, "alert", tk.Source)
 	assert.Equal(t, "yanru", tk.RequesterName)
 	require.NotNil(t, tk.AssetID)
@@ -268,11 +268,26 @@ func TestTicketService_CreateFromAlert_标题退化(t *testing.T) {
 func TestPriorityFromSeverity_映射表(t *testing.T) {
 	want := map[int]string{
 		0: "low", 1: "low", // Not classified / Information
-		2: "medium", 3: "medium", // Warning / Average
+		2: "normal", 3: "normal", // Warning / Average
 		4: "high", 5: "critical", // High / Disaster
 		6: "critical", // 越界按最高级别兜底
 	}
 	for sev, exp := range want {
 		assert.Equal(t, exp, priorityFromSeverity(sev), "severity=%d", sev)
+	}
+}
+
+// M16：本函数的输出必须落在 openapi Ticket.priority 的词表内。
+// 原先返回 medium —— 与契约的 normal 是同一个「普通」的两套拼法，后果是工单页按
+// 「普通」筛选（WHERE priority='normal'）查不到这里建出来的票。这条断言把词表钉死：
+// 日后有人再加一个拼法（'中' / 'moderate'），这里先红。
+func TestPriorityFromSeverity_输出限定在契约词表内(t *testing.T) {
+	// 与 openapi.yaml 的 Ticket.priority enum 一一对应，改动需同步契约
+	vocab := map[string]bool{"low": true, "normal": true, "high": true, "critical": true}
+	for sev := -1; sev <= 8; sev++ {
+		got := priorityFromSeverity(sev)
+		assert.True(t, vocab[got], "severity=%d 产出 %q，不在契约词表内", sev, got)
+		assert.NotEqual(t, "medium", got,
+			"severity=%d 产出了 medium —— 该拼法已由迁移 000023 归一为 normal，不得再引入", sev)
 	}
 }
