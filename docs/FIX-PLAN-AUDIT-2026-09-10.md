@@ -151,12 +151,12 @@
 - [x] **P2-3** apierr TraceID 死字段 → `008a122` (前后端各删 1 行,X-Request-ID 由 audit/recovery 已承担)
 - [~] **P1-2** testdata/migrations 同步 → **主人决定搁置**,9 个新索引仍由 `db_smoke_test.go` 真库冒烟守 000013-000015(000016-000021 6 个无 CI 守门,**已接受为技术债**)
 
-### 仍 OPEN(4 项)
+### 豁免(4 项,评估不值得修,理由如下)
 
-- [ ] **P2-2** metrics.GET 加 canRead
-- [ ] **P2-4** `RequireRole\(` 在 routes.go 应该 0 命中的 lint 规则
-- [ ] **P2-5** TestRoutes_所有路由都已分类按 source 而非 method 跳过 gin internals
-- [ ] **Pre-3** routes_integration_test.go:122-126 Cleanup race 修复(显式 defer 顺序)
+- [~] **P2-2** metric-snapshots GET 加 canRead → **豁免**：`metric-snapshots` 组在 `protected` 内（routes.go:437,已认证才可达）,read 是地板（`Can(role, CapRead)` 恒 true）。加显式 `canRead` 只是语义标注,不改变行为,无安全增益。
+- [~] **P2-4** `RequireRole\(` 在 routes.go 0 命中的 lint 规则 → **豁免**：`routes.go:285` 那行是历史注释（解释"修复前挂 RequireRole"）,非活代码。`RequireRole` 已 deprecate,当前无活调用。加 CI 规则防"未来 reintroduce"属"为将来可能写代码"。
+- [~] **P2-5** 按 source 而非 method 跳过 gin internals → **豁免**：理论性。按 method 跳过 HEAD/OPTIONS 合理（gin 自动为 GET 生成 HEAD,OPTIONS 是 CORS 预检）。当前无手写 HEAD handler 挂 admin 守护,属未来潜在风险而非当前缺陷。
+- [~] **Pre-3** Cleanup race → **豁免**：`SetDBForTest(oldDB)` 与 `sqlDB.Close()` 是**同一个 `t.Cleanup` 闭包内的两行**（routes_integration_test.go:123-126）,按语句顺序执行（先恢复全局指针、再关本测试 sqlDB）,不存在"顺序无保证"。审计疑似误读为两个独立 t.Cleanup;且这些测试非 `t.Parallel`。
 
 ### 验证汇总(本 pull)
 
