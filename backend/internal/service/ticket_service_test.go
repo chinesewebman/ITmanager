@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"network-monitor-platform/internal/models"
@@ -125,6 +126,102 @@ func TestTicketService_Update_空updates返当前(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "unchanged", got.Title)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// newTicketSQLiteDB 真 sqlite（手写 DDL，列必须与 models.Ticket 全字段一一对应，
+// 少一列 gorm 的 INSERT 就会报 "no such column"）。
+// 不用 AutoMigrate：models.Ticket.ID 带 `default:gen_random_uuid()`，sqlite 上没有
+// 该函数，AutoMigrate 必炸（同 channel_service_test.go / cmd/seed/main_test.go 的既有做法）。
+func newTicketSQLiteDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(`CREATE TABLE tickets (
+		id TEXT PRIMARY KEY,
+		ticket_number TEXT,
+		title TEXT,
+		description TEXT,
+		ticket_type TEXT,
+		priority TEXT,
+		status TEXT,
+		requester_id TEXT,
+		requester_name TEXT,
+		requester_email TEXT,
+		assignee_id TEXT,
+		assignee_name TEXT,
+		category TEXT,
+		tags TEXT,
+		asset_id TEXT,
+		asset_name TEXT,
+		external_id TEXT,
+		source TEXT,
+		resolution TEXT,
+		resolved_at DATETIME,
+		closed_at DATETIME,
+		due_date DATETIME,
+		created_at DATETIME,
+		updated_at DATETIME
+	)`).Error)
+	return db
+}
+
+// 安全审计 H-1 同款（channel_service.go 的先例）：handler 把请求体绑成 map 直接进
+// gorm 的 Updates(map)，gorm 对每个键走 Schema.LookUpField —— 先列名、再 Go 字段名。
+// 于是 {"id": …} 改主键（D-3 的 alerts.ticket_id 随即悬空）、{"TicketNumber": …}
+// 走 Go 字段名那条路改工单号；{"CreatedAt": …} 让审计时间线失真。
+func TestTicketService_Update_禁改列被拒(t *testing.T) {
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	seed := func(t *testing.T) (*gorm.DB, TicketService, uuid.UUID) {
+		t.Helper()
+		db := newTicketSQLiteDB(t)
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Ticket{ //nolint:exhaustruct
+			ID: id, TicketNumber: "TICKET-20260101-A", Title: "原标题", Status: "open",
+			CreatedAt: created, UpdatedAt: created,
+		}).Error)
+		return db, NewTicketService(db), id
+	}
+
+	for _, tc := range []struct {
+		name    string
+		updates map[string]interface{}
+	}{
+		{"小写主键id", map[string]interface{}{"id": uuid.New().String()}},
+		{"Go字段名ID", map[string]interface{}{"ID": uuid.New().String()}},
+		{"小写工单号", map[string]interface{}{"ticket_number": "TICKET-20260101-Z"}},
+		{"Go字段名TicketNumber", map[string]interface{}{"TicketNumber": "TICKET-20260101-Z"}},
+		{"小写created_at", map[string]interface{}{"created_at": "2020-01-01T00:00:00Z"}},
+		{"Go字段名CreatedAt", map[string]interface{}{"CreatedAt": "2020-01-01T00:00:00Z"}},
+		{"Go字段名UpdatedAt", map[string]interface{}{"UpdatedAt": "2020-01-01T00:00:00Z"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, svc, id := seed(t)
+			_, err := svc.Update(context.Background(), id.String(), tc.updates)
+			require.ErrorIs(t, err, ErrInvalidInput)
+
+			var after models.Ticket
+			require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+			assert.Equal(t, id, after.ID, "主键不得被改写")
+			assert.Equal(t, "TICKET-20260101-A", after.TicketNumber, "工单号不得被改写")
+			assert.Equal(t, created.UTC(), after.CreatedAt.UTC(), "created_at 不得被改写")
+		})
+	}
+
+	t.Run("正控_业务列用Go字段名写法照常更新", func(t *testing.T) {
+		db, svc, id := seed(t)
+		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
+			"Title": "新标题", "Status": "closed",
+		})
+		require.NoError(t, err)
+
+		var after models.Ticket
+		require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+		assert.Equal(t, "新标题", after.Title)
+		assert.Equal(t, "closed", after.Status)
+		// 归一化后 closed_at 判定也认 Go 字段名写法（改前 {"Status":"closed"} 不写 closed_at）
+		assert.NotNil(t, after.ClosedAt, "关闭走 Go 字段名写法也必须写 closed_at")
+	})
 }
 
 // modelsTicket 测试辅助已用真 models.Ticket，hack helper 删

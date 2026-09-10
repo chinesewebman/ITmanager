@@ -139,6 +139,12 @@ func (h *TicketHandler) UpdateTicket(c *gin.Context) {
 			apierr.NotFound(c, "工单不存在")
 			return
 		}
+		if errors.Is(err, service.ErrInvalidInput) {
+			// 请求里带了 id/ticket_number/created_at/updated_at 等系统维护的列 →
+			// 400 而不是 500（这是调用方的请求错，不是服务端故障）
+			apierr.BadRequest(c, err.Error())
+			return
+		}
 		apierr.Internal(c, "更新工单失败", err)
 		return
 	}

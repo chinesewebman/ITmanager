@@ -292,3 +292,24 @@ func TestTicketUpdate_关闭工单_updates透传给service(t *testing.T) {
 	assert.Equal(t, "closed", capturedUpdates["status"])
 	// 注："关闭工单自动写入 closed_at"是 service 层的职责，应在 service 单元测试中验证
 }
+
+// 请求体带了 id/ticket_number/created_at 等系统维护列时，service 返回 ErrInvalidInput；
+// handler 必须落 400 —— 漏了这个分支会变成 500，把「调用方写错字段」报成服务端故障，
+// 运维看到 500 只会重试同样的请求。
+func TestTicketUpdate_不可变字段返回400(t *testing.T) {
+	svc := &mockTicketService{
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Ticket, error) {
+			return nil, service.ErrInvalidInput
+		},
+	}
+	r := newTicketRouter(svc)
+
+	body, _ := json.Marshal(map[string]interface{}{"id": "11111111-1111-1111-1111-111111111111"})
+	req := httptest.NewRequest("PUT", "/api/tickets/t-1", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "bad_request")
+}

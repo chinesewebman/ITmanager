@@ -287,6 +287,28 @@ func truncateRunes(s string, max int) string {
 	return string(r[:max])
 }
 
+// immutableTicketUpdateFields Update 禁止修改的列：身份列与审计列（键为小写形态）。
+//
+// 为什么必须有这道闸：handler 把请求体绑成 map[string]interface{} 直接交给
+// gorm 的 Updates(map)，而 gorm 对每个键走 Schema.LookUpField(k) —— 先按列名、
+// 再按 Go 字段名解析。于是 {"id": …} 会改写主键，{"TicketNumber": …} 会改工单号。
+// 主键被改写后，D-3 建立的 alerts.ticket_id 外键就指向一个不存在的工单（悬空）；
+// created_at/updated_at 被改则审计时间线失真。同款缺陷已在 channel_service.go
+// 实测并收口（安全审计 H-1），这里沿用同一套判据。
+//
+// 用「禁改集合」而不是「可改白名单」：tickets 有 20 个业务列，绝大多数本就该可改
+// （status / assignee / priority / resolution / due_date …），列白名单既维护不起，
+// 也会把外部对接要写的列（external_id / resolved_at）静默丢掉；真正不能碰的只有这 4 个。
+//
+// 键同时收「列名」与「Go 字段名」两种小写形态（ticket_number / ticketnumber）——
+// 只挡列名会让 {"TicketNumber": …} 从 Go 字段名那条路进来。
+var immutableTicketUpdateFields = map[string]bool{
+	"id":           true,
+	"ticketnumber": true, "ticket_number": true,
+	"createdat": true, "created_at": true,
+	"updatedat": true, "updated_at": true,
+}
+
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {
 	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，统一为 1 次 First
 	var t models.Ticket
@@ -299,6 +321,28 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	// 空 updates 直接返当前记录（不写库）
 	if len(updates) == 0 {
 		return &t, nil
+	}
+	// 键归一化到小写 + 挡掉禁改列：保证「校验的键 == 落库的键」（同 channel_service.go）。
+	// 归一化顺带修掉一处既有不一致：{"Status":"closed"} 走 gorm 能写列，但下面
+	// updates["status"] 取不到 → closed_at 不写；小写化后两者一致。
+	//
+	// 两阶段而不是「另建一张 norm map」：既有用例钉住了「调用方拿到的这张 map 里能看到
+	// 注入的 closed_at」（Update 原地改），换成新 map 会悄悄改掉这个约定。
+	// 阶段 1 只读不改（避免 range 中增删 map），阶段 2 才落地重命名。
+	var renames [][2]string
+	for k := range updates {
+		lk := strings.ToLower(k)
+		if immutableTicketUpdateFields[lk] {
+			// 不回显键名：键是调用方可控字符串，会原样进 400 body
+			return nil, fmt.Errorf("%w: id / ticket_number / created_at / updated_at 由系统维护，不可修改", ErrInvalidInput)
+		}
+		if lk != k {
+			renames = append(renames, [2]string{k, lk})
+		}
+	}
+	for _, r := range renames {
+		updates[r[1]] = updates[r[0]]
+		delete(updates, r[0])
 	}
 	// 关闭工单时自动写入 closed_at
 	if status, ok := updates["status"].(string); ok && status == "closed" {
