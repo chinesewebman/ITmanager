@@ -14,6 +14,9 @@ import type { components, paths } from './api.types'
 
 // ==================== Schema 类型别名 ====================
 
+/** User 用户对象（components.schemas.User）—— role union 单一源头，勿在别处手维护（P1-4） */
+export type User = components['schemas']['User']
+
 /** Asset 资产对象（components.schemas.Asset） */
 export type AssetDTO = components['schemas']['Asset']
 

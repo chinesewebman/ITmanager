@@ -1,14 +1,14 @@
 // 用户相关类型
-export interface User {
-  id: string
-  username: string
-  nickname: string
-  email?: string
-  // 权威词表见 docs/FIX-PLAN-AUTHZ.md §3.1（后端 middleware.Role* 常量）；
-  // 旧值 operator/viewer 仅存量库可见，服务端会折叠为 ops_user/readonly。
-  role: 'admin' | 'ops_admin' | 'ops_user' | 'auditor' | 'readonly' | 'user'
-  created_at?: string
-}
+// User 由 openapi.yaml 生成（api.types.ts components.schemas.User），
+// 从 apiClient 单一源头 re-export，避免手维护 role union 漂移（P1-4）。
+import type { User, User as ApiClientUser } from '../services/apiClient'
+export type { User }
+
+// P1-4 单一源头断言：User 必须与 apiClient.User 同型（角色词表唯一来源）。
+// 手写本地 User（漏/错角色）会让下面这行 tsc 报错，防 role union 漂移。
+type _Equal<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false
+type _Assert<T extends true> = T
+export type UserSourceOK = _Assert<_Equal<User, ApiClientUser>>
 
 // 认证相关类型
 export interface LoginParams {
