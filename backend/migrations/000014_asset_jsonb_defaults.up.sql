@@ -17,7 +17,12 @@
 -- 幂等：SET DEFAULT 重复执行无害；回填只动 IS NULL 行（第二次 UPDATE 0 行）。
 
 -- 抢不到锁就失败退出（事务回滚、api 启动报错），不要无限期挂住启动。
-SET lock_timeout = '5s';
+--
+-- 必须 SET LOCAL（TODO G-26）：不带 LOCAL 的 SET 在**事务 COMMIT 后仍留在会话上**——
+-- execInTx 结束后该连接被归还连接池，后续所有业务语句都带 5s 锁超时，高并发/长事务下
+-- 会莫名抛 55P03 lock_timeout，且报错点与本迁移毫无关联、极难定位。
+-- SET LOCAL 的作用域止于本事务，对同步执行的上述语句保护不变。
+SET LOCAL lock_timeout = '5s';
 
 -- 回填存量 NULL 行。NULL 只可能来自非 gorm 写入（模型此前写 '' 会直接失败）。
 -- 含 retired 行（assets 无软删除，退役行仍在表内）：NULL 与 []/{} 对全部消费方等价

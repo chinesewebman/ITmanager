@@ -467,6 +467,79 @@ func TestDBSmoke_MigrationReapply(t *testing.T) {
 	assert.Equal(t, "10.9.9.9", gotNet.IPv4Address, "重放不得把地址变成 10.9.9.9/32")
 }
 
+// TestDBSmoke_MigrationNoSessionGUCLeak 钉住 000014 的 lock_timeout 作用域（TODO G-26）：
+// 迁移必须用 SET LOCAL，绝不能把会话级 GUC 泄漏到连接池。
+//
+// 为什么不复用 migrate.Up 复现：GUC 落在「执行迁移的那条物理连接」上，而 migrate.Up
+// 期间至少占两条连接（acquireLock 的会话级 advisory lock 单独持一条，见 migrate.go:54-79），
+// 归还顺序是 LIFO —— 迁移结束后裸查 SHOW lock_timeout 大概率拿到 acquireLock 那条干净连接，
+// 从而**假绿**。所以这里显式独占一条连接，在同一事务里跑完迁移文件，再在同一条连接上验证。
+func TestDBSmoke_MigrationNoSessionGUCLeak(t *testing.T) {
+	db := openSmokeDB(t)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	// 前置：连接必须处于 PG 默认值，否则断言无从谈起（也挡住「跑在脏连接上」的假绿）
+	var before string
+	require.NoError(t, conn.QueryRowContext(ctx, "SHOW lock_timeout").Scan(&before))
+	require.Equal(t, "0", before, "前置不满足：本连接不是默认 lock_timeout（实为 %q）", before)
+
+	sqlText, err := fs.ReadFile(network_monitor_platform.MigrationsFS,
+		"migrations/000014_asset_jsonb_defaults.up.sql")
+	require.NoError(t, err, "读不到 embed 里的 000014 —— 迁移文件改名或没进 embed？")
+
+	// 复刻 execInTx（internal/migrate/migrate.go:298-325）：整文件一个事务
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for _, stmt := range splitSimpleStatements(string(sqlText)) {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("执行 000014 语句失败 (%s):\n%v", firstSQLLine(stmt), err)
+		}
+	}
+	require.NoError(t, tx.Commit(),
+		"000014 必须可重入（重复 SET DEFAULT / 第二次回填 0 行）")
+
+	var after string
+	require.NoError(t, conn.QueryRowContext(ctx, "SHOW lock_timeout").Scan(&after))
+	assert.NotEqual(t, "5s", after,
+		"000014 把会话级 lock_timeout 泄漏到了连接上（TODO G-26）——须用 SET LOCAL；"+
+			"泄漏后连接归还池，后续业务写入会莫名 55P03")
+}
+
+// splitSimpleStatements 只服务「无 DO 块、无字符串内分号」的迁移文件（当前即 000014）。
+// 生产执行器用的是 internal/migrate.splitStatements（要处理 $$ 块与引号转义），
+// 此处刻意不重复实现它 —— 本用例要验证的是 GUC 作用域，不是语句切分。
+func splitSimpleStatements(sqlText string) []string {
+	var out []string
+	for _, raw := range strings.Split(sqlText, ";") {
+		var kept []string
+		for _, ln := range strings.Split(raw, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(ln), "--") {
+				continue // 丢弃纯注释行，使「只剩注释」的碎片自然变空
+			}
+			kept = append(kept, ln)
+		}
+		if s := strings.TrimSpace(strings.Join(kept, "\n")); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// firstSQLLine 取语句首行，用于失败信息里定位是 000014 的哪一条。
+func firstSQLLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
 // assertNetBoxIDIndexUnique 断言 assets.net_box_id 上索引的唯一性形态。
 //
 // 用 pg_indexes.indexdef 而不是 pg_constraint：000015 建的是**唯一索引**，不是 UNIQUE 约束
