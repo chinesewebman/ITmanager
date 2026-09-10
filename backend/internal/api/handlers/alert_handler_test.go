@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,10 @@ func (m *mockAlertService) ListFalsePositives(ctx context.Context, since *time.T
 }
 
 // newAlertTestRouter 挂 /alerts 路由
+//
+// **方法必须与生产 routes.go 一致**：M22 之前这里把 ack/resolve 注册成 POST，
+// 而 production 是 PUT（routes.go:323-324）—— 用例全绿，但测的是一个线上不存在的
+// 路由形状，等于给了假信心。改一处方法要同步改这里，反之亦然。
 func newAlertTestRouter(svc service.AlertService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -134,8 +139,8 @@ func newAlertTestRouter(svc service.AlertService) *gin.Engine {
 	{
 		api.GET("", h.ListAlerts)
 		api.GET("/:id", h.GetAlert)
-		api.POST("/:id/ack", h.AcknowledgeAlert)
-		api.POST("/:id/resolve", h.ResolveAlert)
+		api.PUT("/:id/ack", h.AcknowledgeAlert) // 同 routes.go: PUT 不是 POST
+		api.PUT("/:id/resolve", h.ResolveAlert) // 同 routes.go: PUT 不是 POST
 		api.GET("/stats", h.GetAlertStats)
 		api.GET("/rules", h.ListAlertRules)
 		api.POST("/rules", h.CreateAlertRule)
@@ -207,7 +212,7 @@ func TestAlertHandler_Acknowledge_服务返错返500(t *testing.T) {
 	}
 	r := newAlertTestRouter(svc)
 
-	req := httptest.NewRequest(http.MethodPost, "/alerts/"+uuid.NewString()+"/ack", nil)
+	req := httptest.NewRequest(http.MethodPut, "/alerts/"+uuid.NewString()+"/ack", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -224,7 +229,7 @@ func TestAlertHandler_Acknowledge_状态冲突返409带原因(t *testing.T) {
 	}
 	r := newAlertTestRouter(svc)
 
-	req := httptest.NewRequest(http.MethodPost, "/alerts/"+uuid.NewString()+"/ack", nil)
+	req := httptest.NewRequest(http.MethodPut, "/alerts/"+uuid.NewString()+"/ack", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -241,11 +246,79 @@ func TestAlertHandler_Resolve_状态冲突返409(t *testing.T) {
 	}
 	r := newAlertTestRouter(svc)
 
-	req := httptest.NewRequest(http.MethodPost, "/alerts/"+uuid.NewString()+"/resolve", nil)
+	req := httptest.NewRequest(http.MethodPut, "/alerts/"+uuid.NewString()+"/resolve", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+// ==================== M22：路径 :id 校验 ====================
+
+// M22：`:id` 是裸字符串，直接进 gorm 与 **UUID 列**比较会让 Postgres 报
+// 22P02（invalid input syntax for type uuid，已实测）；该错误既不是
+// ErrRecordNotFound 也不是任何哨兵，于是经 apierr.Internal 变成 **500** ——
+// 把「调用方把 id 写错了」报成「服务端故障」，调用方只会照着原样重试。
+//
+// 这组用例锁死两件事：非法 id 一律 400，且**根本不进 service**（进了就说明
+// 守卫位置不对 —— 先查库再校验等于白修，500 照样出得来）。
+func TestAlertHandler_非法id一律400且不触达service(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"GetAlert", http.MethodGet, "/alerts/not-a-uuid"},
+		{"AcknowledgeAlert", http.MethodPut, "/alerts/not-a-uuid/ack"},
+		{"ResolveAlert", http.MethodPut, "/alerts/not-a-uuid/resolve"},
+		{"UpdateAlertRule", http.MethodPut, "/alerts/rules/not-a-uuid"},
+		{"DeleteAlertRule", http.MethodDelete, "/alerts/rules/not-a-uuid"},
+		{"MarkFalsePositive", http.MethodPost, "/alerts/not-a-uuid/mark-fp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			svc := &mockAlertService{
+				getFunc: func(context.Context, string) (*models.Alert, error) {
+					called = true
+					return nil, service.ErrNotFound
+				},
+				ackFunc: func(context.Context, string, string) error {
+					called = true
+					return nil
+				},
+				resolveFunc: func(context.Context, string, string) error {
+					called = true
+					return nil
+				},
+				updateRuleFunc: func(context.Context, string, map[string]interface{}) (*models.AlertRule, error) {
+					called = true
+					return nil, nil
+				},
+				deleteRuleFunc: func(context.Context, string) error {
+					called = true
+					return nil
+				},
+				markFPFunc: func(context.Context, string, string, string, bool) (*models.Alert, error) {
+					called = true
+					return nil, service.ErrNotFound
+				},
+			}
+			r := newAlertTestRouter(svc)
+
+			var body io.Reader
+			if tc.method == http.MethodPost || tc.method == http.MethodPut {
+				body = strings.NewReader("{}") // UpdateAlertRule/MarkFalsePositive 先解析 body 再校验 id
+			}
+			req := httptest.NewRequest(tc.method, tc.path, body)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code, "非法 id 必须是 400，不能是 500")
+			assert.False(t, called, "非法 id 必须在 handler 层短路，不能进 service")
+		})
+	}
 }
 
 func TestAlertHandler_BulkAck_成功返200(t *testing.T) {

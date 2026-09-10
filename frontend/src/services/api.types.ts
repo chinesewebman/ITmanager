@@ -1819,6 +1819,20 @@ export interface operations {
                     "application/json": components["schemas"]["Alert"];
                 };
             };
+            /** @description ID 格式错误（必须是 UUID） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 告警不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     acknowledgeAlert: {
@@ -1839,6 +1853,27 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description ID 格式错误（必须是 UUID） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 告警不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 告警当前状态不允许确认（如已解决的告警） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     resolveAlert: {
@@ -1854,6 +1889,27 @@ export interface operations {
         responses: {
             /** @description 解决成功 */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description ID 格式错误（必须是 UUID） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 告警不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 告警当前状态不允许解决 */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1889,6 +1945,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Alert"];
                 };
+            };
+            /** @description ID 格式错误（必须是 UUID） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description 告警不存在 */
             404: {

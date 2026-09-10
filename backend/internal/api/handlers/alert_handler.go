@@ -13,6 +13,7 @@ import (
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // AlertHandler 告警相关 HTTP handler
@@ -22,6 +23,24 @@ type AlertHandler struct {
 
 func NewAlertHandler(svc service.AlertService) *AlertHandler {
 	return &AlertHandler{svc: svc}
+}
+
+// alertPathID 取并校验路径上的 :id，非法则写 400 并返回 false。
+//
+// 为什么要校验：`:id` 是裸字符串，直接进 gorm 的 `WHERE id = ?` 会与 **UUID 列**比较，
+// Postgres 报 `22P02 invalid input syntax for type uuid`（已实测）。该错误既不是
+// ErrRecordNotFound 也不是哨兵错误，于是经 apierr.Internal 变成 **500** ——
+// 把「调用方把 id 写错了」报成「服务端故障」，调用方只会重试同样的请求。
+// 正确动作是改请求，所以是 400（同 oncall_handler.go 等既有端点的做法）。
+//
+// 只校验不转换：service 层签名收的是 string，这里不做无谓的类型改写。
+func alertPathID(c *gin.Context) (string, bool) {
+	id := c.Param("id")
+	if _, err := uuid.Parse(id); err != nil {
+		apierr.BadRequest(c, "ID 格式错误")
+		return "", false
+	}
+	return id, true
 }
 
 // ListAlerts 告警列表（带统计, v2.0 支持 cursor 分页）
@@ -75,7 +94,11 @@ func (h *AlertHandler) ListAlerts(c *gin.Context) {
 
 // GetAlert 告警详情
 func (h *AlertHandler) GetAlert(c *gin.Context) {
-	alert, err := h.svc.Get(c.Request.Context(), c.Param("id"))
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	alert, err := h.svc.Get(c.Request.Context(), id)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在")
@@ -92,11 +115,15 @@ func (h *AlertHandler) GetAlert(c *gin.Context) {
 
 // AcknowledgeAlert 确认告警
 func (h *AlertHandler) AcknowledgeAlert(c *gin.Context) {
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
 	userID := c.GetString("username") // JWT 中间件写入
 	if userID == "" {
 		userID = "unknown"
 	}
-	if err := h.svc.Acknowledge(c.Request.Context(), c.Param("id"), userID); err != nil {
+	if err := h.svc.Acknowledge(c.Request.Context(), id, userID); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在")
 			return
@@ -119,11 +146,15 @@ func (h *AlertHandler) AcknowledgeAlert(c *gin.Context) {
 
 // ResolveAlert 解决告警
 func (h *AlertHandler) ResolveAlert(c *gin.Context) {
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
 	userID := c.GetString("username")
 	if userID == "" {
 		userID = "unknown"
 	}
-	if err := h.svc.Resolve(c.Request.Context(), c.Param("id"), userID); err != nil {
+	if err := h.svc.Resolve(c.Request.Context(), id, userID); err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在")
 			return
@@ -199,7 +230,11 @@ func (h *AlertHandler) UpdateAlertRule(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	rule, err := h.svc.UpdateRule(c.Request.Context(), c.Param("id"), updates)
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	rule, err := h.svc.UpdateRule(c.Request.Context(), id, updates)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警规则不存在")
@@ -216,7 +251,11 @@ func (h *AlertHandler) UpdateAlertRule(c *gin.Context) {
 
 // DeleteAlertRule 删除
 func (h *AlertHandler) DeleteAlertRule(c *gin.Context) {
-	if err := h.svc.DeleteRule(c.Request.Context(), c.Param("id")); err != nil {
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	if err := h.svc.DeleteRule(c.Request.Context(), id); err != nil {
 		apierr.Internal(c, "删除告警规则失败", err)
 		return
 	}
@@ -327,7 +366,11 @@ func (h *AlertHandler) MarkFalsePositive(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	alert, err := h.svc.MarkFalsePositive(c.Request.Context(), c.Param("id"), userID, req.Note, req.IsFalsePositive)
+	id, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	alert, err := h.svc.MarkFalsePositive(c.Request.Context(), id, userID, req.Note, req.IsFalsePositive)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在")
