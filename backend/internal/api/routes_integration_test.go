@@ -576,8 +576,6 @@ var gatedRoutes = []struct {
 	{middleware.CapWrite, http.MethodPost, "/api/runbooks", false},
 	{middleware.CapWrite, http.MethodPut, "/api/runbooks/:id", false},
 	{middleware.CapWrite, http.MethodPost, "/api/metric-snapshots", false},
-	{middleware.CapWrite, http.MethodGet, "/api/diagnostics/ping", false},
-	{middleware.CapWrite, http.MethodGet, "/api/diagnostics/traceroute", false},
 }
 
 // matrixRoles 参与矩阵断言的令牌角色：6 个权威角色 + 2 个遗留别名 + 空角色（fail-safe 只读）。
@@ -645,6 +643,8 @@ var ungatedRoutes = map[string]string{
 	"GET /api/runbooks/:id":                    "Runbook 读",
 	"GET /api/runbooks/recommend":              "Runbook 推荐（只读）",
 	"GET /api/diagnostics/assets/:id/timeline": "资产时间线（只读）",
+	"GET /api/diagnostics/ping":                "Ping 探活（纯读，不写 DB）",
+	"GET /api/diagnostics/traceroute":          "Traceroute 探活（纯读，不写 DB）",
 	"GET /api/postmortem/assets/:id/report":    "复盘报告（只读，文件名 sanitize）",
 }
 
@@ -1146,6 +1146,15 @@ func TestRoutes_只读端点未被过度收紧(t *testing.T) {
 		w := requestAs(t, r, http.MethodGet, "/api/topology", middleware.RoleReadonly)
 		assert.NotEqual(t, http.StatusForbidden, w.Code, "只读身份不应被拒")
 	})
+
+	// P1-1：ping/traceroute 纯读探测（不写 DB），只读身份应能访问
+	// （无 host 参数会 400，但绝非 403 权限拦截——回归是 b5c46fd 误挂 canWrite）。
+	for _, p := range []string{"/api/diagnostics/ping", "/api/diagnostics/traceroute"} {
+		t.Run(p, func(t *testing.T) {
+			w := requestAs(t, r, http.MethodGet, p, middleware.RoleReadonly)
+			assert.NotEqual(t, http.StatusForbidden, w.Code, "只读身份不应被 ping/traceroute 拦截")
+		})
+	}
 
 	// 凭据例外：通知渠道响应体含明文 webhook token / SMTP 密码 → 已收紧到 manage
 	w := requestAs(t, r, http.MethodGet, "/api/notification-channels", middleware.RoleReadonly)

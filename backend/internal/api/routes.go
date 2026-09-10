@@ -376,9 +376,10 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			{
 				diagnostics.GET("/assets/:id/timeline", diagnosticH.GetAssetTimeline)
 				// ping/traceroute 是静态段，无 :id 冲突；放 group 末尾便于阅读。
-				// 服务端主动外连（内网可达性探测）→ 要 write，只读身份不应触发。
-				diagnostics.GET("/ping", canWrite, diagnosticH.PingAsset)
-				diagnostics.GET("/traceroute", canWrite, diagnosticH.TracerouteAsset)
+				// 纯读探测（不写 DB，仅 ICMP/TCP 探活）→ 走 read 地板默认放行；
+				// 只读/审计角色应能 ping 自己的网络（P1-1：b5c46fd 误挂 canWrite 的回归）。
+				diagnostics.GET("/ping", diagnosticH.PingAsset)
+				diagnostics.GET("/traceroute", diagnosticH.TracerouteAsset)
 			}
 
 			// 资产复盘 PDF 报告
