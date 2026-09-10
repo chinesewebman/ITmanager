@@ -774,11 +774,27 @@ func TestDBSmoke_TicketPriorityNormalize(t *testing.T) {
 
 	// 全表兜底：迁移跑完后不该再有契约词表外的值。种子/夹具漏改一处就会在这里现形，
 	// 不必等运维报「筛选少了几张票」。
+	// 非空前提：tickets 一行都没有时，下面两条 `NOT IN` 兜底恒真 —— 空库上的假绿
+	// （同本文件 TestDBSmoke_AssetJSONBBackfill 的「把迁移删掉也是绿」那类坑）。
+	var total int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM tickets`).Scan(&total).Error)
+	require.NotZero(t, total, "tickets 表为空 —— 词表兜底断言会退化成恒真, 不再守任何东西")
+
 	var off int64
 	require.NoError(t, db.Raw(
 		`SELECT count(*) FROM tickets WHERE priority NOT IN ('low','normal','high','critical')`).
 		Scan(&off).Error)
 	assert.Zero(t, off, "tickets.priority 出现 openapi Ticket.priority enum 之外的值")
+
+	// M18 扩展：status 是同一类缺陷的另一半 —— openapi Ticket.status enum 五个值，
+	// DB 里同样没有 CHECK 约束。词表外的状态在工单页也是**静默消失**：筛选器只有这
+	// 五档选不中它、TicketStatsCards 的 `if (t.status in acc)` 不计数。
+	// 这里守的是**存量**（种子/夹具/迁移写歪了会现形）；新增写入由 TicketService
+	// 的 validateTicketEnumValues 拦（service 单测覆盖），两条一起才是完整防线。
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM tickets WHERE status NOT IN ('open','in_progress','pending','resolved','closed')`).
+		Scan(&off).Error)
+	assert.Zero(t, off, "tickets.status 出现 openapi Ticket.status enum 之外的值")
 }
 
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。

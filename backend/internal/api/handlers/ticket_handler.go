@@ -88,7 +88,10 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 			return
 		}
 		if errors.Is(err, service.ErrInvalidInput) {
-			apierr.BadRequest(c, "工单标题不能为空")
+			// 空标题 / 枚举列取值超出契约词表（service 层校验）→ 400。
+			// 用 err.Error() 而不是写死文案：原来写死「工单标题不能为空」，
+			// 加了枚举校验后同一个分支会返回两种原因，写死的那句就成了假话。
+			apierr.BadRequest(c, err.Error())
 			return
 		}
 		apierr.Internal(c, "创建工单失败", err)

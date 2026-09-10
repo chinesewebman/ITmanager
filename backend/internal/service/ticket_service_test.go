@@ -224,6 +224,126 @@ func TestTicketService_Update_禁改列被拒(t *testing.T) {
 	})
 }
 
+// ==================== M18：枚举列取值收口 ====================
+
+// 与 openapi.yaml:2448-2453 的 Ticket.priority / Ticket.status enum 一一对应。
+// 断言的是**集合相等**（不是「包含于」）：日后往词表里加一个拼法（'moderate' / '紧急'）
+// 这里先红 —— M16 的 medium/normal 两套拼法就是这么来的。
+func TestTicketEnumValues_与契约词表一致(t *testing.T) {
+	assert.Equal(t, map[string]bool{
+		"critical": true, "high": true, "normal": true, "low": true,
+	}, ticketPriorityValues)
+	assert.Equal(t, map[string]bool{
+		"open": true, "in_progress": true, "pending": true, "resolved": true, "closed": true,
+	}, ticketStatusValues)
+}
+
+// 词表外的值此前不报错、照样落库，然后从用户视野里**静默消失**：
+// 工单页筛选器只有契约那几档选不中它，TicketStatsCards 的 `if (t.status in acc)`
+// 不计数，TicketTable 的 PRIORITY_WEIGHT 查不到键 → 排序垫底。
+func TestTicketService_Create_枚举列取值越界被拒(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*models.Ticket)
+	}{
+		{"priority 同义词 medium（M16 已归一，不得再引入）", func(tk *models.Ticket) { tk.Priority = "medium" }},
+		{"priority 自由文本 urgent", func(tk *models.Ticket) { tk.Priority = "urgent" }},
+		{"priority 大小写不宽容 HIGH", func(tk *models.Ticket) { tk.Priority = "HIGH" }},
+		{"priority 中文 紧急", func(tk *models.Ticket) { tk.Priority = "紧急" }},
+		{"status 自由文本 waiting", func(tk *models.Ticket) { tk.Status = "waiting" }},
+		// 收了 "Closed" 就回到「已关闭但无关闭时间」：closed_at 判定是精确比较
+		// status == "closed"（M17 修的就是这条裂缝的键侧，值侧同理）
+		{"status 大小写不宽容 Closed", func(tk *models.Ticket) { tk.Status = "Closed" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTicketSQLiteDB(t)
+			svc := NewTicketService(db)
+			tk := &models.Ticket{Title: "工单"} //nolint:exhaustruct
+			tc.mut(tk)
+
+			err := svc.Create(context.Background(), tk)
+			require.ErrorIs(t, err, ErrInvalidInput)
+
+			var n int64
+			require.NoError(t, db.Model(&models.Ticket{}).Count(&n).Error)
+			assert.Zero(t, n, "校验失败不得落库")
+		})
+	}
+}
+
+func TestTicketService_Create_枚举列契约值通过(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	tk := &models.Ticket{Title: "工单", Priority: "critical", Status: "in_progress"} //nolint:exhaustruct
+	require.NoError(t, svc.Create(context.Background(), tk))
+
+	var got models.Ticket
+	require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+	assert.Equal(t, "critical", got.Priority)
+	assert.Equal(t, "in_progress", got.Status)
+}
+
+func TestTicketService_Update_枚举列取值越界被拒(t *testing.T) {
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	seed := func(t *testing.T) (*gorm.DB, TicketService, uuid.UUID) {
+		t.Helper()
+		db := newTicketSQLiteDB(t)
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Ticket{ //nolint:exhaustruct
+			ID: id, TicketNumber: "TICKET-20260101-A", Title: "原标题",
+			Status: "open", Priority: "normal",
+			CreatedAt: created, UpdatedAt: created,
+		}).Error)
+		return db, NewTicketService(db), id
+	}
+
+	for _, tc := range []struct {
+		name    string
+		updates map[string]interface{}
+	}{
+		{"priority 小写键自由文本", map[string]interface{}{"priority": "urgent"}},
+		{"priority Go字段名写法", map[string]interface{}{"Priority": "urgent"}},
+		{"priority 同义词 medium", map[string]interface{}{"priority": "medium"}},
+		{"status 小写键自由文本", map[string]interface{}{"status": "waiting"}},
+		{"status Go字段名写法且大小写不符", map[string]interface{}{"Status": "Closed"}},
+		// fail-closed（docs/TRAPS.md T-36）：`if s, ok := v.(string); ok { 校验 }` 这种
+		// 写法会让下面这些形态静默放行 —— null 还会撞 status NOT NULL 变成 500。
+		{"status 为 null", map[string]interface{}{"status": nil}},
+		{"priority 为数字", map[string]interface{}{"priority": 3}},
+		{"priority 为布尔", map[string]interface{}{"priority": true}},
+		{"status 为对象", map[string]interface{}{"status": map[string]interface{}{"a": 1}}},
+		{"status 为数组", map[string]interface{}{"status": []string{"open"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, svc, id := seed(t)
+			_, err := svc.Update(context.Background(), id.String(), tc.updates)
+			require.ErrorIs(t, err, ErrInvalidInput)
+
+			var after models.Ticket
+			require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+			assert.Equal(t, "open", after.Status, "状态不得被改写")
+			assert.Equal(t, "normal", after.Priority, "优先级不得被改写")
+		})
+	}
+
+	t.Run("正控_契约值照常更新", func(t *testing.T) {
+		db, svc, id := seed(t)
+		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
+			"Priority": "high", "Status": "closed",
+		})
+		require.NoError(t, err)
+
+		var after models.Ticket
+		require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+		assert.Equal(t, "high", after.Priority)
+		assert.Equal(t, "closed", after.Status)
+		// 校验放在 closed_at 判定之前，但不能把正常路径挡住
+		assert.NotNil(t, after.ClosedAt, "契约值 closed 仍须写 closed_at")
+	})
+}
+
 // modelsTicket 测试辅助已用真 models.Ticket，hack helper 删
 
 // ==================== Create 补全 ====================

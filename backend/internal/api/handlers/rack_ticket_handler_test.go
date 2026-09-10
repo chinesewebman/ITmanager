@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -268,6 +269,29 @@ func TestTicketCreate_空标题_返回400(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "bad_request")
+}
+
+// M18：`ErrInvalidInput` 这个分支现在承载两种原因（空标题 / 枚举列取值越界），
+// 原先把文案写死成「工单标题不能为空」——枚举越界会被报成标题问题，调用方照着改标题
+// 永远改不好。这条钉住 400 body 必须带得出**真实原因**。
+func TestTicketCreate_枚举越界_返回400带原因(t *testing.T) {
+	svc := &mockTicketService{
+		createFunc: func(ctx context.Context, tk *models.Ticket) error {
+			return fmt.Errorf("%w: priority 取值超出契约词表", service.ErrInvalidInput)
+		},
+	}
+	r := newTicketRouter(svc)
+
+	body, _ := json.Marshal(models.Ticket{Title: "工单", Priority: "urgent"}) //nolint:exhaustruct
+	req := httptest.NewRequest("POST", "/api/tickets", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "bad_request")
+	assert.Contains(t, w.Body.String(), "priority 取值超出契约词表", "400 必须说明真实原因")
+	assert.NotContains(t, w.Body.String(), "标题", "不得再套用写死的标题文案")
 }
 
 func TestTicketUpdate_关闭工单_updates透传给service(t *testing.T) {

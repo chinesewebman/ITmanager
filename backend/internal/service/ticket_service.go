@@ -97,8 +97,13 @@ func (s *ticketService) Get(ctx context.Context, id string) (*models.Ticket, err
 }
 
 func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
-	if t == nil || t.Title == "" {
+	if t == nil {
 		return ErrInvalidInput
+	}
+	if t.Title == "" {
+		// 带原因而不是裸 ErrInvalidInput：handler 直接把 err.Error() 当 400 body，
+		// 原来 handler 里写死「工单标题不能为空」，加了枚举校验后那句话会变成假话。
+		return fmt.Errorf("%w: title 不能为空", ErrInvalidInput)
 	}
 	if t.Status == "" {
 		t.Status = "open"
@@ -112,9 +117,21 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	// M16：不传 priority 的创建请求（POST /tickets 直接 bind 模型，handler 不校验）
 	// 原来会落一行 priority=''——既筛不出也不显示，比落个默认值糟得多。
 	// 与上面 Status/Source/Tags 同款兜底；值取契约词表里的 normal。
-	// 注：非空但词表外的值（如 "urgent"）仍原样入库，堵它要动契约，不在本轮。
 	if t.Priority == "" {
 		t.Priority = "normal"
+	}
+	// M18：枚举列取值必须落在契约词表内。放在默认值**之后** —— 缺省走的是 "open"/
+	// "normal"，本身就是契约值；客户端显式传的词表外取值（"urgent" / "medium" /
+	// "Closed"）在这里被拒，不再静默落库后从筛选器和统计卡里消失。
+	//
+	// 借道同一个校验函数（而不是再写两个 if）：判据只有一处，日后加枚举列不会漏。
+	// Create 走结构体绑定，值已是 Go string，不存在 T-36 那种非字符串形态 ——
+	// 但这里传的就是 map，形态判据同样适用，不必为「已知是 string」另开一条路径。
+	if err := validateTicketEnumValues(map[string]interface{}{
+		"priority": t.Priority,
+		"status":   t.Status,
+	}); err != nil {
+		return err
 	}
 	// 工单号在 BeforeCreate 里按「当天已建数量」生成，并发下两个请求可能算出同一个号。
 	// 唯一索引拒绝后重新生成并重试（最多 5 次），彻底消除竞态（缺陷 D-2）。
@@ -309,6 +326,63 @@ var immutableTicketUpdateFields = map[string]bool{
 	"updatedat": true, "updated_at": true,
 }
 
+// ticketPriorityValues / ticketStatusValues —— tickets 两个枚举列的契约词表
+// （openapi.yaml:2448-2453 的 Ticket.priority / Ticket.status enum）。
+//
+// 为什么需要它：这两列在 DB 里是裸 `VARCHAR(20) NOT NULL`，**全仓无 CHECK 约束**
+// （grep 过 migrations/），而 POST/PUT 写入口此前只校验「标题非空」，取值随便写。
+// 词表外的值不会报错，只会**静默消失**：
+//   - 工单页的优先级/状态筛选器只有契约那几档（Tickets.tsx 的 Select），选不中这些票；
+//   - TicketStatsCards 用 `if (t.status in acc)` 累加，词表外状态直接不计数；
+//   - TicketTable 的 PRIORITY_WEIGHT 查不到键 → 权重 0，排序静默垫底；
+//   - 超过 20 字符还会撞 VARCHAR(20) → PG 报错 → 500（本该是调用方的 400）。
+//
+// 判据以契约为准（同 M16：normal 而非 medium）。**拒绝而不是静默改写**——把它悄悄
+// 改成 normal 会把调用方的 bug 藏起来，而 400 + 契约词表是可行动的。
+//
+// 大小写严格：不接受 "Closed" / "HIGH"。宽容会造出「值合法但下游只认小写」的新裂缝——
+// 下面 closed_at 判定是精确比较 `status == "closed"`，收了 "Closed" 就又回到
+// M17 修掉的「已关闭但无关闭时间」。契约本身就是小写精确匹配。
+//
+// 覆盖面止于本 service：GLPI 同步（integration/service.go:270）与 seed 直连
+// CreateInBatches 不经过这里，它们各自持有词表（glpi.go ConvertToTicket）。
+var (
+	ticketPriorityValues = map[string]bool{"critical": true, "high": true, "normal": true, "low": true}
+	ticketStatusValues   = map[string]bool{"open": true, "in_progress": true, "pending": true, "resolved": true, "closed": true}
+)
+
+// ticketEnumFields Update 的枚举列校验清单。用切片不用 map：map 遍历序随机，
+// 两个字段同时越界时报错文案会跳变，用例钉不住。
+var ticketEnumFields = []struct {
+	name    string
+	allowed map[string]bool
+}{
+	{"priority", ticketPriorityValues},
+	{"status", ticketStatusValues},
+}
+
+// validateTicketEnumValues 校验 map 里出现的枚举列取值；字段缺省即不校验（PUT 是部分更新）。
+//
+// fail-closed：值不是字符串（数字/对象/数组/null）一律拒绝。写成
+// `if s, ok := v.(string); ok { 校验 }` 会让这些形态静默放行（docs/TRAPS.md T-36）；
+// 其中 null 还会撞 tickets.status 的 NOT NULL → 500。
+//
+// 报错只提**契约列名**（本方常量），不回显调用方的键或值——两者都是调用方可控字符串，
+// 会原样进 400 body（同 M17 的禁改列报错）。
+func validateTicketEnumValues(updates map[string]interface{}) error {
+	for _, f := range ticketEnumFields {
+		raw, present := updates[f.name]
+		if !present {
+			continue
+		}
+		s, isString := raw.(string)
+		if !isString || !f.allowed[s] {
+			return fmt.Errorf("%w: %s 取值超出契约词表", ErrInvalidInput, f.name)
+		}
+	}
+	return nil
+}
+
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Ticket, error) {
 	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，统一为 1 次 First
 	var t models.Ticket
@@ -343,6 +417,12 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	for _, r := range renames {
 		updates[r[1]] = updates[r[0]]
 		delete(updates, r[0])
+	}
+	// 枚举列取值校验放在归一化**之后**：Go 字段名写法（{"Status": …}）此刻已折成
+	// 小写键，与列名写法走同一条判据。放在 closed_at 判定**之前**：先确认 status
+	// 是契约词表里的值，那条 `status == "closed"` 精确比较才对得上。
+	if err := validateTicketEnumValues(updates); err != nil {
+		return nil, err
 	}
 	// 关闭工单时自动写入 closed_at
 	if status, ok := updates["status"].(string); ok && status == "closed" {

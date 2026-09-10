@@ -157,7 +157,7 @@ CI 的 `git diff --exit-code -- src/services/api.types.ts` 不会触发。
 
 | 不做 | 原因 |
 |------|------|
-| `POST/PUT /tickets` 的 priority **取值**校验 | 属 §1.4 的写入口缺陷。`PUT` 是任意 `map` 直落 `Updates()`（mass-assignment 可写任意列），比 priority 一个字段宽得多；只封 priority 会留下更大的洞却造成「已封住」的错觉。另立任务。（「空值」这一半本轮已修）<br>**2026-09-10 更新**：`PUT` 的 mass-assignment 面已由 **M17** 收口——`id`/`ticket_number`/`created_at`/`updated_at` 四类身份列与审计列改为拒绝（400），见 `docs/FIX-PLAN-UI-PERF.md` §8「下一步」1.7 与 `docs/TRAPS.md` T-37 复发段。**priority 取值校验仍未做**，登记项不因 M17 而消失。 |
+| `POST/PUT /tickets` 的 priority **取值**校验 | 属 §1.4 的写入口缺陷。`PUT` 是任意 `map` 直落 `Updates()`（mass-assignment 可写任意列），比 priority 一个字段宽得多；只封 priority 会留下更大的洞却造成「已封住」的错觉。另立任务。（「空值」这一半本轮已修）<br>**2026-09-10 更新**：`PUT` 的 mass-assignment 面已由 **M17** 收口——`id`/`ticket_number`/`created_at`/`updated_at` 四类身份列与审计列改为拒绝（400），见 `docs/FIX-PLAN-UI-PERF.md` §8「下一步」1.7 与 `docs/TRAPS.md` T-37 复发段。**priority 取值校验之后由 M18 收口**（连同 `status` 一起，`POST`/`PUT` 两路，以 openapi enum 为判据、拒绝而非改写、大小写严格），见 §8「下一步」1.8。**本登记项已关闭**；残余缺口移到同步侧：`integration/glpi.go` 的 `ConvertToTicket` 对 GLPI status 6 / priority 0 取不到键会落 `""`，见 §8 1.8「未做」①。 |
 | 删除前端同义词字典 | N-5：先留一个版本做未迁移行的安全网 |
 | `ticket_sla.priority` | 死表、零消费方、零数据来源。动它是无的放矢 |
 | 加 DB `CHECK` 约束 | N-6 |
