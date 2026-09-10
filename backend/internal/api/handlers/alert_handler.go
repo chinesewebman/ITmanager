@@ -28,32 +28,31 @@ func NewAlertHandler(svc service.AlertService) *AlertHandler {
 func (h *AlertHandler) ListAlerts(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 	severity, _ := strconv.Atoi(c.DefaultQuery("severity", "0")) // 🐛 BUG#13: severity 改 int
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "0"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "0"))
 
 	filter := service.AlertFilter{
-		Status:   c.Query("status"),
-		Severity: severity,
-		HostID:   c.Query("host_id"),
-		Limit:    limit,
+		Status:       c.Query("status"),
+		Severity:     severity,
+		HostID:       c.Query("host_id"),
+		Limit:        limit,
+		Page:         page,
+		PageSize:     pageSize,
+		IncludeStats: true, // HTTP 列表页需要 stats 全表聚合（统计卡）
 	}
 	// v2.0 cursor 分页: ?cursor=xxx (从 response.next_cursor 拿)
+	cursorMode := false
 	if cursorStr := c.Query("cursor"); cursorStr != "" {
 		ts, id, err := cursor.Decode(cursorStr)
 		if err == nil {
 			filter.CursorTS = ts
 			filter.CursorID = id
+			cursorMode = true
 		}
 		// err 时降级到 v1.x 行为 (忽略 cursor)
 	}
 
-	items, stats, err := h.svc.List(c.Request.Context(), service.AlertFilter{
-		Status:       c.Query("status"),
-		Severity:     severity,
-		HostID:       c.Query("host_id"),
-		Limit:        limit,
-		CursorTS:     filter.CursorTS,
-		CursorID:     filter.CursorID,
-		IncludeStats: true, // HTTP 列表页需要 stats 全表聚合
-	})
+	items, stats, total, err := h.svc.List(c.Request.Context(), filter)
 	if err != nil {
 		apierr.Internal(c, "获取告警列表失败", err)
 		return
@@ -62,9 +61,11 @@ func (h *AlertHandler) ListAlerts(c *gin.Context) {
 	resp := gin.H{
 		"items": items,
 		"stats": stats,
+		"total": total,
 	}
-	// v2.0: 返 next_cursor (用最后一条 item 的 created_at + id)
-	if len(items) == limit && !items[len(items)-1].CreatedAt.IsZero() {
+	// v2.0: 返 next_cursor (用最后一条 item 的 created_at + id)。只在 cursor 模式设置——
+	// offset 模式用 total + page 翻页，next_cursor 无意义（page_size 可能 == limit 造成误判）。
+	if cursorMode && len(items) == limit && !items[len(items)-1].CreatedAt.IsZero() {
 		last := items[len(items)-1]
 		resp["next_cursor"] = cursor.Encode(last.CreatedAt, last.ID)
 	}

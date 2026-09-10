@@ -26,6 +26,9 @@ type AlertFilter struct {
 	// 为空时走 v1.x 行为 (Limit only, no offset)
 	CursorTS time.Time
 	CursorID uuid.UUID
+	// 新增：offset 分页（Page > 0 时走 offset 路径；PageSize 每页条数，默认 20 上限 500，对齐 asset/ticket）
+	Page     int
+	PageSize int
 	// P2: 是否需要 stats 全表聚合 (默认 false, 减少分页路径多 1 次 DB roundtrip)
 	// HTTP 列表页设 true; gRPC 已弃用 stats 字段不设
 	IncludeStats bool
@@ -54,7 +57,7 @@ type HourlyStat struct {
 
 // AlertService 告警业务接口
 type AlertService interface {
-	List(ctx context.Context, f AlertFilter) (items []models.Alert, stats AlertStats, err error)
+	List(ctx context.Context, f AlertFilter) (items []models.Alert, stats AlertStats, total int64, err error)
 	Get(ctx context.Context, id string) (*models.Alert, error)
 	Acknowledge(ctx context.Context, id, userID string) error
 	Resolve(ctx context.Context, id, userID string) error
@@ -101,7 +104,7 @@ func (s *alertService) publish(topic string, payload any) {
 	}
 }
 
-func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert, AlertStats, error) {
+func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert, AlertStats, int64, error) {
 	q := s.db.WithContext(ctx).Model(&models.Alert{})
 
 	if f.Status != "" {
@@ -130,25 +133,49 @@ func (s *alertService) List(ctx context.Context, f AlertFilter) ([]models.Alert,
 		limit = 1000
 	}
 
-	var items []models.Alert
 	q = q.Order("created_at DESC, id DESC") // v2.0 cursor: 二元组排序
-	// v2.0 cursor 分页: 二元组 < (ts, id) 走 (created_at, id) 联合索引, O(log N)
-	if !f.CursorTS.IsZero() && f.CursorID != uuid.Nil {
+
+	var items []models.Alert
+	var total int64
+
+	switch {
+	case !f.CursorTS.IsZero() && f.CursorID != uuid.Nil:
+		// v2.0 cursor 路径（gRPC）：二元组 < 走联合索引, O(log N)；不跑 Count，total 留 0
 		q = q.Where("(created_at, id) < (?, ?)", f.CursorTS, f.CursorID)
-	}
-	if err := q.Limit(limit).Find(&items).Error; err != nil {
-		return nil, AlertStats{}, err
+		if err := q.Limit(limit).Find(&items).Error; err != nil {
+			return nil, AlertStats{}, 0, err
+		}
+	case f.Page > 0:
+		// offset 路径（HTTP 列表页）：过滤后 Count + Offset/Limit，对齐 asset/ticket service
+		pageSize := f.PageSize
+		if pageSize < 1 {
+			pageSize = 20
+		}
+		if pageSize > 500 {
+			pageSize = 500
+		}
+		if err := q.Count(&total).Error; err != nil {
+			return nil, AlertStats{}, 0, err
+		}
+		if err := q.Offset((f.Page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+			return nil, AlertStats{}, 0, err
+		}
+	default:
+		// limit 上限路径（dashboard 最近告警 limit=5）
+		if err := q.Limit(limit).Find(&items).Error; err != nil {
+			return nil, AlertStats{}, 0, err
+		}
 	}
 
 	// P2: statsInternal 仅在 IncludeStats=true 时调用 (gRPC 翻页场景可省 1 次 DB roundtrip)
 	if !f.IncludeStats {
-		return items, AlertStats{}, nil
+		return items, AlertStats{}, total, nil
 	}
 	stats, err := s.statsInternal(ctx)
 	if err != nil {
-		return nil, AlertStats{}, err
+		return nil, AlertStats{}, 0, err
 	}
-	return items, stats, nil
+	return items, stats, total, nil
 }
 
 func (s *alertService) statsInternal(ctx context.Context) (AlertStats, error) {

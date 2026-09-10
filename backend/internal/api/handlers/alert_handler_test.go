@@ -23,7 +23,7 @@ import (
 
 // mockAlertService 手写 mock，仿 mockAssetService 模式
 type mockAlertService struct {
-	listFunc        func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error)
+	listFunc        func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error)
 	getFunc         func(ctx context.Context, id string) (*models.Alert, error)
 	ackFunc         func(ctx context.Context, id, userID string) error
 	resolveFunc     func(ctx context.Context, id, userID string) error
@@ -39,11 +39,11 @@ type mockAlertService struct {
 	listFPFunc      func(ctx context.Context, since *time.Time) ([]models.Alert, error)
 }
 
-func (m *mockAlertService) List(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+func (m *mockAlertService) List(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 	if m.listFunc != nil {
 		return m.listFunc(ctx, f)
 	}
-	return nil, service.AlertStats{}, nil
+	return nil, service.AlertStats{}, 0, nil
 }
 func (m *mockAlertService) Get(ctx context.Context, id string) (*models.Alert, error) {
 	if m.getFunc != nil {
@@ -153,9 +153,9 @@ func newAlertTestRouter(svc service.AlertService) *gin.Engine {
 
 func TestAlertHandler_ListAlerts_成功(t *testing.T) {
 	svc := &mockAlertService{
-		listFunc: func(_ context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+		listFunc: func(_ context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 			assert.Equal(t, "problem", f.Status)
-			return []models.Alert{{ID: uuid.New(), Status: "problem"}}, service.AlertStats{Total: 1, Problem: 1}, nil
+			return []models.Alert{{ID: uuid.New(), Status: "problem"}}, service.AlertStats{Total: 1, Problem: 1}, 0, nil
 		},
 	}
 	r := newAlertTestRouter(svc)

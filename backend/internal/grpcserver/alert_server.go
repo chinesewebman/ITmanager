@@ -56,7 +56,7 @@ func (s *AlertServer) ListAlerts(ctx context.Context, req *alertv1.ListAlertsReq
 		filter.CursorID = uid
 	}
 
-	alerts, _, err := s.svc.List(ctx, filter)
+	alerts, _, _, err := s.svc.List(ctx, filter)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
@@ -65,7 +65,7 @@ func (s *AlertServer) ListAlerts(ctx context.Context, req *alertv1.ListAlertsReq
 	if req.Cursor == "" && req.Page > 1 {
 		offset := int((req.Page - 1)) * limit
 		filter.Limit = limit + offset
-		alerts, _, err = s.svc.List(ctx, filter)
+		alerts, _, _, err = s.svc.List(ctx, filter)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "%v", err)
 		}

@@ -237,11 +237,12 @@ func TestAlertService_List_成功_返items和stats(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
 		WillReturnRows(statsRows)
 
-	items, stats, err := svc.List(ctx, AlertFilter{IncludeStats: true})
+	items, stats, total, err := svc.List(ctx, AlertFilter{IncludeStats: true})
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 	assert.Equal(t, "CPU 100%", items[0].TriggerName)
 	assert.Equal(t, int64(1), stats.Total)
+	assert.Equal(t, int64(0), total, "limit 路径不跑 Count，total 应为 0")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -260,7 +261,7 @@ func TestAlertService_List_带severity筛选(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
 		WillReturnRows(statsRows)
 
-	items, _, err := svc.List(ctx, AlertFilter{Severity: 4})
+	items, _, _, err := svc.List(ctx, AlertFilter{Severity: 4})
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 	assert.Equal(t, 5, items[0].Severity)
@@ -282,7 +283,7 @@ func TestAlertService_List_limit超1000截断(t *testing.T) {
 	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
 		WillReturnRows(statsRows)
 
-	items, stats, err := svc.List(ctx, AlertFilter{Limit: 9999, IncludeStats: true})
+	items, stats, _, err := svc.List(ctx, AlertFilter{Limit: 9999, IncludeStats: true})
 	require.NoError(t, err)
 	_ = items
 	_ = stats
@@ -302,11 +303,48 @@ func TestAlertService_List_IncludeStatsFalse跳过stats(t *testing.T) {
 
 	// 注意: 这里不 expect COUNT(*) 查询, 验证 opt-out 路径跳过 statsInternal
 
-	items, stats, err := svc.List(ctx, AlertFilter{IncludeStats: false})
+	items, stats, _, err := svc.List(ctx, AlertFilter{IncludeStats: false})
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 	assert.Equal(t, int64(0), stats.Total, "IncludeStats=false 时 stats 应为空")
 	assert.NoError(t, mock.ExpectationsWereMet(), "不应有 COUNT(*) 查询")
+}
+
+// TestAlertService_List_offset分页_过滤后total小于全表stats (方案 B 语义钉住)
+// 两个「总数」语义分离：stats.Total 全表、total 过滤后（§8 核心语义决策）。
+// 若未来维护者把分页器绑到 stats.Total，此断言会红。
+func TestAlertService_List_offset分页_过滤后total小于全表stats(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	// 1) offset 路径先 Count（过滤 status=problem → 2 条）
+	countRows := sqlmock.NewRows([]string{"count"}).AddRow(2)
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "alerts" WHERE status = \$1`).
+		WillReturnRows(countRows)
+
+	// 2) 再 Find（OFFSET/LIMIT，返回 2 条）
+	rows := sqlmock.NewRows([]string{"id", "alert_id", "severity", "status"}).
+		AddRow(uuid.NewString(), "zab-1", 4, "problem").
+		AddRow(uuid.NewString(), "zab-2", 3, "problem")
+	mock.ExpectQuery(`SELECT \* FROM "alerts" WHERE status = \$1 ORDER BY created_at DESC`).
+		WillReturnRows(rows)
+
+	// 3) statsInternal（全表聚合 total=3 > 过滤后 2）
+	statsRows := sqlmock.NewRows([]string{"total", "problem", "acknowledged", "resolved"}).
+		AddRow(3, 2, 1, 0)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) AS total`).
+		WillReturnRows(statsRows)
+
+	items, stats, total, err := svc.List(ctx, AlertFilter{
+		Status: "problem", Page: 1, PageSize: 20, IncludeStats: true,
+	})
+	require.NoError(t, err)
+	assert.Len(t, items, 2)
+	assert.Equal(t, int64(2), total, "过滤后 total")
+	assert.Equal(t, int64(3), stats.Total, "全表 stats.total")
+	assert.Less(t, total, stats.Total, "过滤后 total 必须小于全表 stats.total（语义分离）")
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 // ==================== BulkResolve 补全 (现只有空ids) ====================

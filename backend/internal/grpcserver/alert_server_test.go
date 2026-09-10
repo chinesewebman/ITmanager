@@ -13,17 +13,17 @@ import (
 // fakeAlertService 是测试用 stub, 不依赖 gorm.DB
 type fakeAlertService struct {
 	service.AlertService
-	listFn    func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error)
+	listFn    func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error)
 	getFn     func(ctx context.Context, id string) (*models.Alert, error)
 	resolveFn func(ctx context.Context, id, userID string) error
 	ackFn     func(ctx context.Context, id, userID string) error
 }
 
-func (f *fakeAlertService) List(ctx context.Context, filter service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+func (f *fakeAlertService) List(ctx context.Context, filter service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 	if f.listFn != nil {
 		return f.listFn(ctx, filter)
 	}
-	return nil, service.AlertStats{}, nil
+	return nil, service.AlertStats{}, 0, nil
 }
 
 func (f *fakeAlertService) Get(ctx context.Context, id string) (*models.Alert, error) {
@@ -50,8 +50,8 @@ func (f *fakeAlertService) Acknowledge(ctx context.Context, id, userID string) e
 func TestListAlerts_EmptyResult(t *testing.T) {
 	srv := &AlertServer{
 		svc: &fakeAlertService{
-			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
-				return nil, service.AlertStats{}, nil
+			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
+				return nil, service.AlertStats{}, 0, nil
 			},
 		},
 	}
@@ -73,7 +73,7 @@ func TestListAlerts_WithCursor_HasNextPage(t *testing.T) {
 	uid2 := newUUID(t)
 	srv := &AlertServer{
 		svc: &fakeAlertService{
-			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 				if f.CursorID == (uuidZero()) {
 					t.Errorf("expected non-zero cursor id")
 				}
@@ -81,7 +81,7 @@ func TestListAlerts_WithCursor_HasNextPage(t *testing.T) {
 				return []models.Alert{
 					{ID: uid, Status: "pending", Severity: 2, CreatedAt: now},
 					{ID: uid2, Status: "acked", Severity: 3, CreatedAt: now.Add(-time.Second)},
-				}, service.AlertStats{}, nil
+				}, service.AlertStats{}, 0, nil
 			},
 		},
 	}
@@ -102,9 +102,9 @@ func TestListAlerts_WithCursor_HasNextPage(t *testing.T) {
 func TestListAlerts_InvalidCursor(t *testing.T) {
 	srv := &AlertServer{
 		svc: &fakeAlertService{
-			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 				t.Fatal("service.List should not be called with invalid cursor")
-				return nil, service.AlertStats{}, nil
+				return nil, service.AlertStats{}, 0, nil
 			},
 		},
 	}
@@ -118,9 +118,9 @@ func TestListAlerts_PartialPage_NoNextCursor(t *testing.T) {
 	uid := newUUID(t)
 	srv := &AlertServer{
 		svc: &fakeAlertService{
-			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, error) {
+			listFn: func(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
 				// 返回 1 条 (< limit=10) → 无 next_cursor
-				return []models.Alert{{ID: uid, Status: "resolved", CreatedAt: time.Now()}}, service.AlertStats{}, nil
+				return []models.Alert{{ID: uid, Status: "resolved", CreatedAt: time.Now()}}, service.AlertStats{}, 0, nil
 			},
 		},
 	}
