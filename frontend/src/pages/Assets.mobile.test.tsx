@@ -31,7 +31,8 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../hooks/useApiQuery', () => ({
   useApiQuery: () => ({
-    data: h.assets,
+    // M3/P5（rev47）后 Assets 的 data 结构改为 {items,total}（服务端分页），mock 同步
+    data: { items: h.assets, total: h.assets.length },
     isLoading: false,
     isError: false,
     error: undefined,
