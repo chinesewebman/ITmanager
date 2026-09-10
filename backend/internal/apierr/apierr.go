@@ -17,7 +17,6 @@ import (
 type ErrorResponse struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	TraceID string `json:"trace_id,omitempty"`
 }
 
 // 业务错误码常量（前端可基于 code 走分支逻辑）

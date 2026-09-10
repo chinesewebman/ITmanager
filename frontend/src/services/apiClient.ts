@@ -81,7 +81,6 @@ export type TicketListParams = typePath<'/tickets', 'get', 'parameters'> extends
 export type ApiError = {
   code: string // 'bad_request' | 'unauthorized' | 'not_found' | 'database_error' | ...
   message: string
-  trace_id?: string
 }
 
 /** 业务错误码常量（与 backend/apierr.go.Code* 对齐） */
