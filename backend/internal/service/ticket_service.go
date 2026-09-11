@@ -43,7 +43,7 @@ type Actor struct {
 type TicketService interface {
 	List(ctx context.Context, f TicketFilter) (items []models.Ticket, total int64, err error)
 	Get(ctx context.Context, id string) (*models.Ticket, error)
-	Create(ctx context.Context, t *models.Ticket) error
+	Create(ctx context.Context, t *models.Ticket, actor Actor) error
 	Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error)
 	// CreateFromAlert 从告警派生一张工单并把 alerts.ticket_id 指回去（TODO D-3）。
 	// created=false 表示该告警已有关联工单，直接返回既有那张（幂等）。
@@ -110,7 +110,7 @@ func (s *ticketService) Get(ctx context.Context, id string) (*models.Ticket, err
 	return &t, nil
 }
 
-func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
+func (s *ticketService) Create(ctx context.Context, t *models.Ticket, actor Actor) error {
 	if t == nil {
 		return ErrInvalidInput
 	}
@@ -166,7 +166,21 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket) error {
 	clientSuppliedNumber := t.TicketNumber != ""
 	const maxCreateAttempts = 5
 	for attempt := 1; ; attempt++ {
-		err := s.db.WithContext(ctx).Create(t).Error
+		// **每次尝试各开一个事务**，出生历史行写在同一事务里。
+		//
+		// 不能把整个重试循环包进一个长事务：真 PG 下第一次 ticket_number 唯一冲突会让
+		// **整个事务**进入 aborted 状态（25P02），后续尝试全部报 "current transaction is
+		// aborted" —— 自愈退化成硬 500。而 sqlite 单测基座看不出这个差异（它没有 PG 的
+		// 事务中止语义），所以这条只能靠形状守住，见 docs/FIX-PLAN-TICKET-HISTORY.md §2.4。
+		//
+		// 出生行与工单同事务的意义：冲突回滚时历史一并撤销，不会留下「工单没建成、
+		// 却记了一笔出生」的孤儿行，也不会出现「工单建成了、出生事件却缺失」。
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(t).Error; err != nil {
+				return err
+			}
+			return insertTicketBirth(tx, t.ID, uuid.New(), actor)
+		})
 		if err == nil {
 			return nil
 		}
@@ -533,6 +547,30 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 // source / request_id 暂不填（列可空）：它们的取值语义未定 —— 是「操作来路」还是
 // 「工单来路」，以及 API Key 路径算不算 api，都需要先拍板再写死。登记在
 // docs/FIX-PLAN-TICKET-HISTORY.md，不在这里替调用方决定。
+// insertTicketBirth 写「工单出生」那一行（kind=created）——建单即是一次经手。
+//
+// **只有一行、FieldName 为 NULL**：出生改的不是某个字段，而是「这张票存在了」。
+// 与 updated 行共用 batch_id 机制（出生永远独占一个批次，因为一次请求只会建一张票）。
+//
+// 必须与工单的 INSERT 同事务（调用方保证）：分开写会留下「工单在、出生事件不在」
+// 或「出生事件在、工单不在」两种孤儿状态，而这张表的存在意义就是可信。
+//
+// field_name/old_value/new_value 三列都留 NULL —— 顺带说明一个**已知缺口**：
+// ticket_number 被 diff 排除在系统列之外（它出生后不再变，记进 updated 是噪声），
+// 于是它**在整张历史表里不出现**。读端点若要展示「这张票出生时拿到的号」，
+// 得从 tickets 表现取，或在此处补一行。语义未定，登记待拍板，不在这里替调用方决定。
+func insertTicketBirth(tx *gorm.DB, ticketID, batchID uuid.UUID, actor Actor) error {
+	rows := []models.TicketHistory{{ //nolint:exhaustruct
+		ID:        uuid.New(),
+		TicketID:  ticketID,
+		BatchID:   batchID,
+		Kind:      models.TicketHistoryKindCreated,
+		ActorID:   actor.ID,
+		ActorName: actor.Name,
+	}}
+	return tx.Create(&rows).Error
+}
+
 func insertTicketHistory(tx *gorm.DB, ticketID, batchID uuid.UUID, actor Actor, changes []fieldChange) error {
 	rows := make([]models.TicketHistory, 0, len(changes))
 	for _, c := range changes {

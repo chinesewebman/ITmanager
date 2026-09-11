@@ -121,7 +121,7 @@ func TestRackGet_不存在_统一404结构(t *testing.T) {
 type mockTicketService struct {
 	listFunc      func(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error)
 	getFunc       func(ctx context.Context, id string) (*models.Ticket, error)
-	createFunc    func(ctx context.Context, t *models.Ticket) error
+	createFunc    func(ctx context.Context, t *models.Ticket, a service.Actor) error
 	updateFunc    func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error)
 	fromAlertFunc func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error)
 }
@@ -132,8 +132,8 @@ func (m *mockTicketService) List(ctx context.Context, f service.TicketFilter) ([
 func (m *mockTicketService) Get(ctx context.Context, id string) (*models.Ticket, error) {
 	return m.getFunc(ctx, id)
 }
-func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket) error {
-	return m.createFunc(ctx, t)
+func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket, a service.Actor) error {
+	return m.createFunc(ctx, t, a)
 }
 func (m *mockTicketService) Update(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error) {
 	return m.updateFunc(ctx, id, u, a)
@@ -254,7 +254,7 @@ func TestTicketCreateFromAlert_DB错误不泄露(t *testing.T) {
 
 func TestTicketCreate_空标题_返回400(t *testing.T) {
 	svc := &mockTicketService{
-		createFunc: func(ctx context.Context, t *models.Ticket) error {
+		createFunc: func(ctx context.Context, t *models.Ticket, a service.Actor) error {
 			return service.ErrInvalidInput // service 层校验标题
 		},
 	}
@@ -276,7 +276,7 @@ func TestTicketCreate_空标题_返回400(t *testing.T) {
 // 永远改不好。这条钉住 400 body 必须带得出**真实原因**。
 func TestTicketCreate_枚举越界_返回400带原因(t *testing.T) {
 	svc := &mockTicketService{
-		createFunc: func(ctx context.Context, tk *models.Ticket) error {
+		createFunc: func(ctx context.Context, tk *models.Ticket, a service.Actor) error {
 			return fmt.Errorf("%w: priority 取值超出契约词表", service.ErrInvalidInput)
 		},
 	}

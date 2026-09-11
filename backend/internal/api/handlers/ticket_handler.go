@@ -82,7 +82,7 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	if err := h.svc.Create(c.Request.Context(), &ticket); err != nil {
+	if err := h.svc.Create(c.Request.Context(), &ticket, actorFromContext(c)); err != nil {
 		if errors.Is(err, service.ErrAlreadyExists) {
 			apierr.Conflict(c, "工单已存在")
 			return

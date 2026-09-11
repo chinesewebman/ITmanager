@@ -62,7 +62,7 @@ func TestTicketService_Create_空title返回ErrInvalidInput(t *testing.T) {
 	ctx := context.Background()
 
 	tk := &models.Ticket{Title: ""} //nolint:exhaustruct
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
@@ -283,7 +283,7 @@ func TestTicketService_Create_枚举列取值越界被拒(t *testing.T) {
 			tk := &models.Ticket{Title: "工单"} //nolint:exhaustruct
 			tc.mut(tk)
 
-			err := svc.Create(context.Background(), tk)
+			err := svc.Create(context.Background(), tk, testActor())
 			require.ErrorIs(t, err, ErrInvalidInput)
 
 			var n int64
@@ -298,7 +298,7 @@ func TestTicketService_Create_枚举列契约值通过(t *testing.T) {
 	svc := NewTicketService(db)
 
 	tk := &models.Ticket{Title: "工单", Priority: "critical", Status: "in_progress"} //nolint:exhaustruct
-	require.NoError(t, svc.Create(context.Background(), tk))
+	require.NoError(t, svc.Create(context.Background(), tk, testActor()))
 
 	var got models.Ticket
 	require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
@@ -383,9 +383,12 @@ func TestTicketService_Create_成功_默认值生效(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "created", nil, nil, nil, nil, "tester", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectCommit()
 
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	require.NoError(t, err)
 	assert.Equal(t, "open", tk.Status, "Status 默认 open")
 	assert.Equal(t, "manual", tk.Source, "Source 默认 manual")
@@ -414,9 +417,12 @@ func TestTicketService_Create_传值保留(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "created", nil, nil, nil, nil, "tester", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectCommit()
 
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	require.NoError(t, err)
 	assert.Equal(t, "in_progress", tk.Status, "已传 Status 不覆盖")
 	assert.Equal(t, "alert", tk.Source)
@@ -427,7 +433,7 @@ func TestTicketService_Create_传值保留(t *testing.T) {
 func TestTicketService_Create_nil指针返回ErrInvalidInput(t *testing.T) {
 	gormDB, _ := newMockDB(t)
 	svc := NewTicketService(gormDB)
-	err := svc.Create(context.Background(), nil)
+	err := svc.Create(context.Background(), nil, testActor())
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
@@ -450,9 +456,12 @@ func TestTicketService_Create_唯一冲突后重试成功(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "created", nil, nil, nil, nil, "tester", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectCommit()
 
-	require.NoError(t, svc.Create(ctx, tk), "唯一冲突应重试而非直接失败（缺陷 D-2）")
+	require.NoError(t, svc.Create(ctx, tk, testActor()), "唯一冲突应重试而非直接失败（缺陷 D-2）")
 	// 关键断言：第 2 次必须真的**重新生成**了号（count=1 → B）。只断言 NoError 是假绿 ——
 	// 实现若忘了清空 TicketNumber，第 2 次 INSERT 会用同一个号，mock 照样返回成功。
 	assert.Equal(t, "TICKET-"+time.Now().Format("20060102")+"-B", tk.TicketNumber,
@@ -473,7 +482,7 @@ func TestTicketService_Create_客户端自带工单号冲突不重试(t *testing
 		WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
 	mock.ExpectRollback()
 
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	assert.ErrorIs(t, err, ErrAlreadyExists, "客户端指定的号冲突应 409，不得静默换号")
 	assert.Equal(t, "TICKET-20260101-A", tk.TicketNumber, "不得改写客户端传入的号")
 	assert.NoError(t, mock.ExpectationsWereMet(), "客户端自带号不应进入重试路径")
@@ -496,7 +505,7 @@ func TestTicketService_Create_持续唯一冲突返回ErrAlreadyExists(t *testin
 		mock.ExpectRollback()
 	}
 
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrAlreadyExists)
 	assert.NoError(t, mock.ExpectationsWereMet(), "应恰好重试 %d 次", maxAttempts)
@@ -515,7 +524,7 @@ func TestTicketService_Create_非唯一约束错误不重试(t *testing.T) {
 		WillReturnError(errors.New("connection reset"))
 	mock.ExpectRollback()
 
-	err := svc.Create(ctx, tk)
+	err := svc.Create(ctx, tk, testActor())
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrAlreadyExists, "非唯一冲突应原样透传，不重试")
 	assert.Contains(t, err.Error(), "connection reset")
@@ -986,7 +995,7 @@ func TestTicketService_Create_建单即关闭_写closed_at(t *testing.T) {
 			svc := NewTicketService(db)
 
 			tk := &models.Ticket{Title: "补录工单", Status: tc.status} //nolint:exhaustruct
-			require.NoError(t, svc.Create(context.Background(), tk))
+			require.NoError(t, svc.Create(context.Background(), tk, testActor()))
 
 			var got models.Ticket
 			require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
@@ -1005,11 +1014,112 @@ func TestTicketService_Create_建单即关闭_写closed_at(t *testing.T) {
 		t1 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
 
 		tk := &models.Ticket{Title: "回灌工单", Status: "closed", ClosedAt: &t1} //nolint:exhaustruct
-		require.NoError(t, svc.Create(context.Background(), tk))
+		require.NoError(t, svc.Create(context.Background(), tk, testActor()))
 
 		var got models.Ticket
 		require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
 		require.NotNil(t, got.ClosedAt)
 		assert.WithinDuration(t, t1, *got.ClosedAt, time.Second)
 	})
+}
+
+// ==================== M25 出生事件（真 sqlite 黑盒） ====================
+//
+// 出生行是「这张票存在了」的唯一留痕。它与工单的 INSERT **同事务** —— 这一组
+// 用真 sqlite 钉住三件事：内容对（kind/actor/批次）、失败不留孤儿行、历史写不进去
+// 时工单也不该存在。
+
+// 出生行的形状：kind=created、field_name/old/new 三列皆 NULL（出生改的不是某个字段，
+// 而是「这张票存在了」）、actor 两列是**快照**、batch_id 非零值（UI 靠它分组）。
+func TestTicketService_Create_留痕_出生行与actor快照(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	actorID := uuid.New()
+	tk := &models.Ticket{Title: "新工单"} //nolint:exhaustruct
+	require.NoError(t, svc.Create(context.Background(), tk, Actor{ID: &actorID, Name: "燕如"}))
+
+	var rows []models.TicketHistory
+	require.NoError(t, db.Where("ticket_id = ?", tk.ID).Find(&rows).Error)
+	require.Len(t, rows, 1, "建单恰好一行出生记录（一次请求建一张票，故独占一个批次）")
+
+	row := rows[0]
+	assert.Equal(t, models.TicketHistoryKindCreated, row.Kind)
+	assert.Nil(t, row.FieldName, "出生行不带字段名")
+	assert.Nil(t, row.OldValue)
+	assert.Nil(t, row.NewValue)
+	assert.NotEqual(t, uuid.Nil, row.BatchID, "batch_id 缺失会让 UI 无法把同批次的行分到一组")
+	require.NotNil(t, row.ActorID, "传了 actor 就必须落 id —— 只有姓名的话按人查历史查不到")
+	assert.Equal(t, actorID, *row.ActorID)
+	assert.Equal(t, "燕如", row.ActorName, "姓名是快照：用户改名后仍要看得见当时是谁")
+}
+
+// 内部调用（seed / 定时任务 / GLPI 同步）拿不到 user id，只留姓名也必须是**合法状态**
+// 而不是错误：宁可有名无 id，也不要把「谁经手」整个丢掉（同 D-5）。
+func TestTicketService_Create_留痕_无用户id时留姓名(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	tk := &models.Ticket{Title: "系统建单"} //nolint:exhaustruct
+	require.NoError(t, svc.Create(context.Background(), tk, testActor()))
+
+	var row models.TicketHistory
+	require.NoError(t, db.First(&row, "ticket_id = ?", tk.ID).Error)
+	assert.Nil(t, row.ActorID)
+	assert.Equal(t, "tester", row.ActorName)
+}
+
+// 每次尝试各开一个事务：撞号失败的那几次必须**整体回滚**（工单行与出生行都不留）。
+//
+// 这里让每次尝试都撞同一个号（占位行的号恰好等于按当天条数算出来的号），
+// 5 次尝试全部失败 → ErrAlreadyExists。若实现把循环包进一个长事务、或把出生行写在
+// 事务之外，这张表里就会多出 1 张票或若干行孤儿历史。
+func TestTicketService_Create_留痕_撞号重试失败不留任何行(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	// 基座的 tickets DDL 是手写的，**没有 ticket_number 唯一索引**（生产有）——
+	// 不补上的话撞号路径在 sqlite 上根本不可达，这条用例会假绿。补一个只属于本用例的索引，
+	// 让基座在这一列上与生产同构。（同族登记：模型外列在基座是宽松 TEXT、真 PG 带类型与外键。）
+	require.NoError(t, db.Exec(
+		"CREATE UNIQUE INDEX idx_test_tickets_number ON tickets(ticket_number)").Error)
+
+	// 占位行直接进库（不走 service，故不产生历史）。当天条数=1 → 生成的号是 B，
+	// 与占位行同号 → 每次尝试都撞唯一索引。
+	occupant := &models.Ticket{ //nolint:exhaustruct
+		ID: uuid.New(), TicketNumber: "TICKET-" + time.Now().Format("20060102") + "-B", Title: "占位",
+		Status: "open", Priority: "normal",
+	}
+	require.NoError(t, db.Create(occupant).Error)
+
+	tk := &models.Ticket{Title: "撞号工单"} //nolint:exhaustruct
+	require.ErrorIs(t, svc.Create(context.Background(), tk, testActor()), ErrAlreadyExists)
+
+	var tickets int64
+	require.NoError(t, db.Model(&models.Ticket{}).Count(&tickets).Error)
+	assert.EqualValues(t, 1, tickets, "失败的尝试必须整体回滚，只留占位那一行")
+
+	var history int64
+	require.NoError(t, db.Model(&models.TicketHistory{}).Count(&history).Error)
+	assert.Zero(t, history, "工单没建成就不该有出生记录 —— 出生行与 INSERT 同事务")
+}
+
+// 出生行**写不进去**时，工单也不该存在（失败即整单回滚）。
+//
+// 这是「出生行与工单同事务」的直接判据：若把 insertTicketBirth 挪到事务外（或用 s.db），
+// 这条会红成「工单建成了、出生记录没有」—— 那正是这张表最该避免的孤儿状态。
+// 与 Update 侧的同款用例（DROP 表后改单回滚）成对。
+func TestTicketService_Create_留痕_插历史失败整单回滚(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	require.NoError(t, db.Exec("DROP TABLE ticket_history").Error)
+
+	tk := &models.Ticket{Title: "不该存在的工单"} //nolint:exhaustruct
+	require.Error(t, svc.Create(context.Background(), tk, testActor()),
+		"留痕写不进去就必须整单回滚 —— 记不上历史的建单没有意义")
+
+	var tickets int64
+	require.NoError(t, db.Model(&models.Ticket{}).Count(&tickets).Error)
+	assert.Zero(t, tickets, "回滚必须连工单行一起撤销")
 }

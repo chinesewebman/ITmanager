@@ -13,6 +13,7 @@ import (
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,8 +34,37 @@ func newTicketRouterWithActor(svc service.TicketService, username, uid string) *
 		c.Next()
 	})
 	r.PUT("/api/tickets/:id", h.UpdateTicket)
+	r.POST("/api/tickets", h.CreateTicket)
 	r.POST("/api/alerts/:id/ticket", h.CreateTicketFromAlert)
 	return r
+}
+
+// 建单也要记「谁经手的」：出生行的 actor 与 Update 走同一个 helper，
+// 这里钉住 handler 真的把它传下去了 —— 漏传不会报错，只会让每次建单的出生记录
+// 都变成「无名人建的」，而事后无法补。
+func TestCreateTicket_经手人从ctx解析并传给service(t *testing.T) {
+	const uid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+	var got service.Actor
+	svc := &mockTicketService{
+		createFunc: func(ctx context.Context, tk *models.Ticket, a service.Actor) error {
+			got = a
+			tk.ID = uuid.MustParse(uid)
+			return nil
+		},
+	}
+	r := newTicketRouterWithActor(svc, "alice", uid)
+
+	body, _ := json.Marshal(models.Ticket{Title: "新工单"}) //nolint:exhaustruct
+	req := httptest.NewRequest("POST", "/api/tickets", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, "alice", got.Name)
+	if assert.NotNil(t, got.ID, "合法 user_id 必须解析成 Actor.ID") {
+		assert.Equal(t, uid, got.ID.String())
+	}
 }
 
 // 经手人解析的正路：JWT 中间件写的 username + user_id 都要落进 Actor，
