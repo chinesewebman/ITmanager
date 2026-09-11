@@ -118,12 +118,22 @@ func apiKeyRowWith(perms, ipWhitelist string, expiresAt interface{}) *sqlmock.Ro
 
 func doAPIKeyRequest(t *testing.T, db *gorm.DB, key, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAPIKeyRequestFrom(t, db, key, method, path, "")
+}
+
+// doAPIKeyRequestFrom 同 doAPIKeyRequest，但可指定 RemoteAddr（空串 = httptest 默认
+// 192.0.2.1:1234）。IP 白名单用例靠它控制 ClientIP。
+func doAPIKeyRequestFrom(t *testing.T, db *gorm.DB, key, method, path, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
 	r := gin.New()
 	r.Use(AuthMiddleware())
 	r.Handle(method, path, func(c *gin.Context) { c.String(http.StatusOK, "reached") })
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(method, path, nil)
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
 	req.Header.Set("Authorization", "X-API-Key "+key)
 	r.ServeHTTP(w, req)
 	return w
@@ -358,6 +368,114 @@ func TestAuthMiddleware_APIKey_IP在白名单内放行(t *testing.T) {
 
 	w := doAPIKeyRequest(t, db, readKey, http.MethodGet, "/api/assets")
 	assert.Equal(t, http.StatusOK, w.Code, "白名单内 IP 应放行")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== IP 白名单网段匹配（缺陷 G-11） ====================
+//
+// 修复前：鉴权侧用 `entry == clientIP` 精确比较字符串，而写入侧 validateIPWhitelist
+// 接受 CIDR 写法 → 填 CIDR 的白名单永不命中，表现为「莫名 403」。
+// 修复后：复用 parseTrustedNets/isTrustedPeer，裸 IP 与 CIDR 都按网段匹配。
+
+// TestIPAllowedByWhitelist 纯函数表驱动：不碰 DB，覆盖解析与匹配的边界。
+func TestIPAllowedByWhitelist(t *testing.T) {
+	cases := []struct {
+		name     string
+		list     []string
+		clientIP string
+		want     bool
+	}{
+		{"空名单不限制", nil, "203.0.113.9", true},
+		{"空切片不限制", []string{}, "203.0.113.9", true},
+		{"裸IP命中", []string{"10.20.31.7"}, "10.20.31.7", true},
+		{"裸IP不命中", []string{"10.20.31.7"}, "10.20.31.8", false},
+		{"CIDR命中", []string{"10.20.0.0/16"}, "10.20.31.7", true},
+		{"CIDR网段外", []string{"10.20.0.0/16"}, "10.21.0.1", false},
+		// 4-in-6：客户端是 v4-mapped，白名单是 v4 CIDR（G-7 同款语义）
+		{"v4映射客户端命中v4网段", []string{"10.20.0.0/16"}, "::ffff:10.20.31.7", true},
+		{"v4映射网段命中v4客户端", []string{"::ffff:10.20.0.0/112"}, "10.20.31.7", true},
+		// IPv6 文本形式差异：同一地址的两种写法必须都命中
+		{"IPv6全展开客户端命中缩写条目", []string{"::1"}, "0:0:0:0:0:0:0:1", true},
+		{"IPv6缩写客户端命中全展开条目", []string{"0:0:0:0:0:0:0:1"}, "::1", true},
+		{"IPv6 CIDR命中", []string{"2001:db8::/32"}, "2001:db8::1", true},
+		{"多条目任一命中即放行", []string{"10.0.0.0/8", "192.168.1.1"}, "192.168.1.1", true},
+		// fail-closed：脏数据与取不到的客户端 IP 一律不放行
+		{"脏条目跳过", []string{"garbage"}, "10.1.2.3", false},
+		{"空串条目跳过", []string{""}, "10.1.2.3", false},
+		{"脏条目与合法条目混合", []string{"garbage", "10.1.0.0/16"}, "10.1.2.3", true},
+		{"客户端IP非法", []string{"10.0.0.0/8"}, "", false},
+		{"客户端IP是垃圾串", []string{"10.0.0.0/8"}, "not-an-ip", false},
+		{"条目带空白", []string{" 10.20.0.0/16 "}, "10.20.31.7", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ipAllowedByWhitelist(c.list, c.clientIP))
+		})
+	}
+}
+
+// TestAuthMiddleware_APIKey_白名单CIDR命中放行
+// 承重用例：修复前此用例 403（CIDR 条目按字符串比较永不命中），修复后 200。
+func TestAuthMiddleware_APIKey_白名单CIDR命中放行(t *testing.T) {
+	db, mock := newAPIKeyAuthDB(t)
+	readKey, _ := setupAPIKeyAuth(t, db)
+
+	mock.ExpectQuery(`SELECT \* FROM "api_keys"`).
+		WillReturnRows(apiKeyRowWith(`["read"]`, `["10.20.0.0/16"]`, nil))
+	mock.ExpectQuery(`SELECT \* FROM "users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "role"}).
+			AddRow(uuid.NewString(), "carol", "operator"))
+
+	w := doAPIKeyRequestFrom(t, db, readKey, http.MethodGet, "/api/assets", "10.20.31.7:1234")
+	assert.Equal(t, http.StatusOK, w.Code, "CIDR 白名单命中同网段客户端应放行（G-11）")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAuthMiddleware_APIKey_白名单CIDR网段外返403 对照组：网段外仍须拒绝。
+func TestAuthMiddleware_APIKey_白名单CIDR网段外返403(t *testing.T) {
+	db, mock := newAPIKeyAuthDB(t)
+	readKey, _ := setupAPIKeyAuth(t, db)
+
+	mock.ExpectQuery(`SELECT \* FROM "api_keys"`).
+		WillReturnRows(apiKeyRowWith(`["read"]`, `["10.20.0.0/16"]`, nil))
+
+	w := doAPIKeyRequestFrom(t, db, readKey, http.MethodGet, "/api/assets", "10.21.0.1:1234")
+	assert.Equal(t, http.StatusForbidden, w.Code, "网段外客户端必须拒绝")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAuthMiddleware_APIKey_空名单不做IP检查 钉住既有行为：
+// ip_whitelist 为空/[] 时不参与 IP 判定（修复引入的 ipAllowedByWhitelist 空名单返回 true，
+// 若该分支写反会让所有没配白名单的 Key 被大面积 403）。
+func TestAuthMiddleware_APIKey_空名单不做IP检查(t *testing.T) {
+	db, mock := newAPIKeyAuthDB(t)
+	readKey, _ := setupAPIKeyAuth(t, db)
+
+	mock.ExpectQuery(`SELECT \* FROM "api_keys"`).
+		WillReturnRows(apiKeyRow(`["read"]`))
+	mock.ExpectQuery(`SELECT \* FROM "users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "role"}).
+			AddRow(uuid.NewString(), "carol", "operator"))
+
+	w := doAPIKeyRequestFrom(t, db, readKey, http.MethodGet, "/api/assets", "203.0.113.9:1234")
+	assert.Equal(t, http.StatusOK, w.Code, "空白名单不应做 IP 限制")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAuthMiddleware_APIKey_白名单IPv4映射IPv6命中 端到端复现 4-in-6 归一化：
+// 客户端以 ::ffff:10.20.31.7 形态出现，白名单写的是 v4 网段。
+func TestAuthMiddleware_APIKey_白名单IPv4映射IPv6命中(t *testing.T) {
+	db, mock := newAPIKeyAuthDB(t)
+	readKey, _ := setupAPIKeyAuth(t, db)
+
+	mock.ExpectQuery(`SELECT \* FROM "api_keys"`).
+		WillReturnRows(apiKeyRowWith(`["read"]`, `["10.20.0.0/16"]`, nil))
+	mock.ExpectQuery(`SELECT \* FROM "users"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "role"}).
+			AddRow(uuid.NewString(), "carol", "operator"))
+
+	w := doAPIKeyRequestFrom(t, db, readKey, http.MethodGet, "/api/assets", "[::ffff:10.20.31.7]:1234")
+	assert.Equal(t, http.StatusOK, w.Code, "v4-mapped 客户端应命中 v4 网段")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

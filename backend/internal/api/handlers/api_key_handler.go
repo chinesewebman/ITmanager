@@ -79,6 +79,11 @@ func validateRateLimit(rl int) error {
 }
 
 // 🐛 BUG#5: IP/CIDR 严格校验
+//
+// 裸 IP 与 CIDR 都接受。**鉴权侧按网段匹配**（middleware/ipAllowedByWhitelist，
+// 复用 trusted_proxies 的 parseTrustedNets/isTrustedPeer）：裸 IP 等价 /32 或 /128，
+// CIDR 按 Contains 判定，IPv4-mapped IPv6 归一化。
+// 历史缺陷 G-11：鉴权侧原用字符串精确比较，导致这里存进去的 CIDR 条目永不命中。
 func validateIPWhitelist(list []string) error {
 	if len(list) == 0 {
 		return nil

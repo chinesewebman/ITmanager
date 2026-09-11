@@ -1366,4 +1366,13 @@ func TestRoutes_APIKey白名单按真实客户端IP判定(t *testing.T) {
 	w = doJSONAsRawFrom(t, r, http.MethodGet, "/api/assets", keyForProxy, nil, proxyAddr, spoofedXFF)
 	assert.Equal(t, http.StatusForbidden, w.Code,
 		"ClientIP 应是真实客户端而非代理地址，白名单只含代理时必须 403")
+
+	// 白名单 = 真实客户端所在网段（CIDR 写法）→ 放行（G-11）。
+	// 写入侧 validateIPWhitelist 一直接受 CIDR，而鉴权侧修复前用字符串精确比较，
+	// CIDR 条目永不命中 → 该 Key 恒 403。realClient 形如 198.51.100.N（N∈1..250），
+	// 必落在 /24 内。
+	keyForCIDR := mintWriteKeyWithWhitelist(t, r, session, "wl-cidr", []string{"198.51.100.0/24"})
+	w = doJSONAsRawFrom(t, r, http.MethodGet, "/api/assets", keyForCIDR, nil, proxyAddr, spoofedXFF)
+	assert.Equal(t, http.StatusOK, w.Code,
+		"CIDR 白名单条目应命中同网段客户端（G-11），实际: %s", w.Body.String())
 }

@@ -503,4 +503,29 @@ F 项无代码，不单独占一次推送。
 
 ## 8. 实现记录
 
-（待填）
+### 8.1 A 项（G-11）— 已交付 2026-09-11
+
+**改动**（`git diff` 两文件，140 insertions / 14 deletions）：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/internal/middleware/auth.go` | :147-153 的 6 行精确比较循环 → 1 行 `ipAllowedByWhitelist(key.IPWhitelist, c.ClientIP())`；新增 `ipAllowedByWhitelist`（18 行，含注释）复用同包 `parseTrustedNets`/`isTrustedPeer` |
+| `backend/internal/middleware/auth_scope_test.go` | `doAPIKeyRequest` 拆出可指定 `RemoteAddr` 的 `doAPIKeyRequestFrom`；新增 `TestIPAllowedByWhitelist`（19 子例纯函数表）+ 4 个中间件级用例 |
+| `backend/internal/api/routes_integration_test.go` | `TestRoutes_APIKey白名单按真实客户端IP判定` 增第三块：CIDR 白名单 `198.51.100.0/24` 命中真实客户端 → 200 |
+
+**未新增 `internal/apikey.IPAllowed`**——rev1 的计划按审查结论作废，改为复用既有 helper（§7.2 #6）。`internal/apikey` 未改动。
+
+**验证**：
+- `go build ./...` / `go vet ./...` / `gofmt -l` 干净。
+- 全量 `go test ./...` **27 包全绿**。
+- 覆盖率：`ipAllowedByWhitelist` **100.0%**、`parseTrustedNets` 100.0%、`isTrustedPeer` 100.0%，`middleware` 包 91.0%（门槛 ≥80%）。
+- **变异反证（均确认红在断言上，非编译）**：
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M28-M1 | `ipAllowedByWhitelist` 的 `return isTrustedPeer(clientIP, parseTrustedNets(list))` → `return list[0] == clientIP`（可编译） | **红**：纯函数 9 个子例 + 中间件级 `白名单CIDR命中放行`、`白名单IPv4映射IPv6命中` + 集成级 `TestRoutes_APIKey白名单按真实客户端IP判定`（报错文案正是 G-11 的症状 `{"code":"forbidden","message":"IP地址不在允许列表中"}`） |
+| M28-M2 | `isTrustedPeer` 的 `n.Contains(ip)` → `n.IP.Equal(ip)`（`*net.IPNet` 有导出字段 `IP`，可编译） | **红**：CIDR 相关 7 个子例 + 2 个中间件级用例；裸 IP 子例保持绿（正确判别——`parseTrustedNets` 已把裸 IP 转成 `/32`，两个实现等价） |
+
+  每次变异后 `cp` 还原并以 `git diff --stat` 确认工作区只剩两个预期文件。
+
+**残余**：`handlers/api_key_handler.go` 的 `validateIPWhitelist` **只加了注释、语义未变**（仍接受 CIDR）。「过宽网段无护栏」登记为 **G-42**，本轮不做（§2.1 有理由）。

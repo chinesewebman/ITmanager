@@ -145,20 +145,10 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	}
 
 	// Check IP whitelist if configured
-	if len(key.IPWhitelist) > 0 {
-		clientIP := c.ClientIP()
-		ipAllowed := false
-		for _, ip := range key.IPWhitelist {
-			if ip == clientIP {
-				ipAllowed = true
-				break
-			}
-		}
-		if !ipAllowed {
-			apierr.Forbidden(c, "IP地址不在允许列表中")
-			c.Abort()
-			return
-		}
+	if !ipAllowedByWhitelist(key.IPWhitelist, c.ClientIP()) {
+		apierr.Forbidden(c, "IP地址不在允许列表中")
+		c.Abort()
+		return
 	}
 
 	// 校验 API Key 自身的 scope（缺陷 D-7：原先只按关联用户的 role 放行，
@@ -197,6 +187,24 @@ func handleAPIKeyAuth(c *gin.Context, apiKey string) {
 	c.Set("api_key_id", key.ID.String())
 
 	c.Next()
+}
+
+// ipAllowedByWhitelist 判断客户端 IP 是否命中 API Key 的 ip_whitelist。
+//
+// 条目可以是裸 IP（10.20.31.7）或 CIDR（10.20.0.0/16），解析与匹配复用 G-7 的
+// parseTrustedNets/isTrustedPeer（trusted_proxy_warn.go），口径与 server.trusted_proxies
+// 完全一致——包括裸 IP 等价 /32 或 /128、IPv4-mapped IPv6 归一化、脏条目跳过。
+//
+// 历史缺陷 G-11：这里原先用 `entry == clientIP` 精确比较字符串，而写入侧
+// validateIPWhitelist 接受 CIDR 写法 → 填 CIDR 的白名单永不命中，表现为「莫名 403」。
+//
+// 空名单 = 不限制（返回 true），与调用点原先的 `len(...) > 0` 守卫语义等价。
+// 注意 isTrustedPeer 对空表返回 false，与这里的期望相反，故必须先判空。
+func ipAllowedByWhitelist(list []string, clientIP string) bool {
+	if len(list) == 0 {
+		return true
+	}
+	return isTrustedPeer(clientIP, parseTrustedNets(list))
 }
 
 // apiKeyAllows 按 API Key 的 permissions 判定某个 HTTP 方法是否放行。
