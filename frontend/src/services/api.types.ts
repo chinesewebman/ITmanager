@@ -30,7 +30,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 用户登出 */
+        /**
+         * 用户登出
+         * @description 公开端点（未挂 AuthMiddleware）—— 服务端无会话可清，token 由客户端自行丢弃，
+         *     故无凭据也能调、恒 200。此前这里误标 `BearerAuth`，与实现不符，已改。
+         */
         post: operations["logout"];
         delete?: never;
         options?: never;
