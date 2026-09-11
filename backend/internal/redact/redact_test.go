@@ -2,6 +2,7 @@ package redact
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -166,6 +167,81 @@ func TestText_不误伤正常文本(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			assert.Equal(t, c.in, Text(c.in), "非敏感文本必须原样返回")
+		})
+	}
+}
+
+// ==================== StripControl ====================
+
+func TestStripControl_删控制字符保留可打印(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"CRLF 伪造行", "a\r\n[FAKE] forged", "a[FAKE] forged"},
+		{"NUL 与 DEL", "a\x00b\x7fc", "abc"},
+		{"HTAB 也删（既定口径，见函数注释）", "a\tb", "ab"},
+		{"其余 C0", "\x01\x02\x1f", ""},
+		{"保留可打印 ASCII", "GET /api/assets?page=2", "GET /api/assets?page=2"},
+		{"保留 CJK", "资产 中文名", "资产 中文名"},
+		{"保留 emoji", "🚨 告警", "🚨 告警"},
+		{"空串", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, StripControl(c.in))
+		})
+	}
+}
+
+// TestStripControl_输出必为合法UTF8 — 这是「关掉 PG 22021」的依据：
+// 非法字节经 rune 迭代变成 U+FFFD，落库不再被拒。
+func TestStripControl_输出必为合法UTF8(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"孤立高位字节", "abc\xff\xfe"},
+		{"被切断的多字节字符", "中"[0:1] + "文"},
+		{"截断的 emoji", "🚨"[0:2]},
+		{"纯非法字节", "\x80\x81"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := StripControl(c.in)
+			assert.True(t, utf8.ValidString(out), "输出必须是合法 UTF-8，实际 %q", out)
+		})
+	}
+}
+
+// TestStripControl_必须先Strip再Text — M29 §1.4 的顺序反例。
+//
+// 这不是「风格」问题：控制字符会截断 Text 的值类，先 Text 后 Strip 等于把被切开的
+// 凭据尾部接回去。此用例把两个方向都钉住，防止后人「顺手合并成一行」时改回错误顺序
+// （notification.markFailed 就是这么漏的）。
+func TestStripControl_必须先Strip再Text(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		leaked string // 错误顺序（Text→Strip）下会明文出现的尾巴
+	}{
+		{"值被换行切开", "password=YWJjZGVmZ2hp\namtsbW5vcHFy", "amtsbW5vcHFy"},
+		{"键被换行切开", "pass\nword=SECRET", "SECRET"},
+		{"Authorization 被切开", "Authorization: Bearer SEC\nRET", "RET"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// 正确顺序：先剥控制字符，凭据完整 → 完整遮盖。
+			right := Text(StripControl(c.in))
+			assert.NotContains(t, right, c.leaked, "先 Strip 再 Text 不得残留凭据尾巴")
+
+			// 错误顺序确实会泄漏 —— 若这条不再成立，说明 Text 的规则变了，
+			// 需要重新评估函数注释里的「顺序是安全边界」是否还准确。
+			wrong := StripControl(Text(c.in))
+			assert.Contains(t, wrong, c.leaked,
+				"反例失效：Text 已不再被控制字符截断，请复核 StripControl 的注释")
+			assert.NotEqual(t, right, wrong, "两种顺序结果不同即证明顺序是语义的一部分")
 		})
 	}
 }

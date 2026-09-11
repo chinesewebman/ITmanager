@@ -78,3 +78,30 @@ func Text(s string) string {
 	s = kvSecretRe.ReplaceAllString(s, "${1}${2}***")
 	return s
 }
+
+// StripControl 删除控制字符（C0：NUL/HTAB/CR/LF 等，以及 DEL）。
+//
+// 与 Text 的分工：Text 管「别泄漏凭据」，本函数管「别伪造行」——两者互不替代。
+// 反过来也不成立：剥控制字符不能替代脱敏（只有前者时凭据照样明文）。
+//
+// **顺序是安全边界**：必须先 StripControl 再 Text，不能反。
+// Text 的规则是「形状识别」，而控制字符会截断值类——`password=abc\nDEF` 在 Text 眼里
+// 值只到 `\n` 为止（遮成 `password=***\nDEF`），此后再剥掉 `\n`，等于把未遮盖的尾部
+// 接回一个已被认成凭据的串上，得到 `password=***DEF`；极端情形 `pass\nword=SECRET`
+// 更是整条泄漏（Text 先看不到 `password=` 这个键）。反过来先 Strip 则拼接发生在识别
+// 之前，凭据完整、遮盖完整。notification.markFailed 就曾因顺序反了而真泄漏（M29 修复）。
+//
+// 顺带保证输出是合法 UTF-8：strings.Map 把非法字节按 rune 迭代为 U+FFFD，
+// 于是 PostgreSQL 的 22021（invalid byte sequence）那一类也一并关掉。
+// 含 HTAB 是既定口径（与 notification.stripControlChars、sanitizeAuditUsername 一致）。
+func StripControl(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}

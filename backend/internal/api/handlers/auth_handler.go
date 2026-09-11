@@ -11,6 +11,7 @@ import (
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/redact"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -41,12 +42,12 @@ const maxFailedLoginAttempts = 5
 // 只影响审计展示值，不参与任何鉴权判定。
 func sanitizeAuditUsername(s string) string {
 	const maxBytes = 96 // < audit.go 的 100 字节截断，保证不触发二次截断
+	// M29：控制字符判据委托给 redact.StripControl（原先此处是第三份独立实现，T-52）。
+	// 按字节预算截断的逻辑保留 —— audit.go 现在改用 rune 截断后它已属保守冗余，
+	// 但它对登录路由的审计值有既成口径，改它属范围蔓延（见 FIX-PLAN-LOG-INJECTION §2.1）。
 	out := make([]rune, 0, maxBytes/3)
 	n := 0
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
+	for _, r := range redact.StripControl(s) {
 		size := utf8.RuneLen(r)
 		if n+size > maxBytes {
 			break

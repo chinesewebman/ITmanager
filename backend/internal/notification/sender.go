@@ -168,13 +168,12 @@ const maxRespSnippet = 200
 // NUL 让 PostgreSQL 直接拒收（22021 → 该行永远停在 pending 被无限重发），
 // CR/LF 可把行式消费的日志与 error_msg 伪造成多条记录（M2 安全审计 MEDIUM-1：
 // 本包新引入「第三方响应体进错误文本」这条通道，配套净化原先只做脱敏/UTF-8/截断）。
+//
+// M29：实现搬到 redact.StripControl（同一份判据在 redact / 本包 / audit 三处各写一遍
+// 会漂移，T-52）。此处保留薄封装以免动调用点，语义不变。
+// **调用顺序**：必须在本包的 redact.Text **之前**调用，理由见 redact.StripControl 注释。
 func stripControlChars(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
+	return redact.StripControl(s)
 }
 
 // sanitizeSnippet 把不可信文本（第三方响应体 / errmsg）规整成可安全嵌入错误文本的片段：
