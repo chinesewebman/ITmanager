@@ -339,6 +339,10 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			{
 				tickets.GET("", ticketH.ListTickets)
 				tickets.GET("/:id", ticketH.GetTicket)
+				// M25：经手历史。准入**故意与 GET /:id 同级**（「跟工单本身的可见性」，
+				// 燕如 2026-09-11 拍板③）—— 不挂 canAudit，与 GET /audit-logs 的
+				// 既有先例相反，属**有意放宽**，理由与数据面见 docs/FIX-PLAN-TICKET-HISTORY.md §2.6。
+				tickets.GET("/:id/history", ticketH.ListTicketHistory)
 				tickets.POST("", canWrite, ticketH.CreateTicket)
 				tickets.PUT("/:id", canWrite, ticketH.UpdateTicket)
 			}

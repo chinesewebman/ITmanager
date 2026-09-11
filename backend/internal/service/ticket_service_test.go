@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -1292,4 +1294,151 @@ func TestTicketService_Create_出生即解决_写resolved_at(t *testing.T) {
 		assert.Nil(t, got.ResolvedAt,
 			"closed 的语义是「保留已有的解决时间」，出生时本来就没有 —— 不能发明一个")
 	})
+}
+
+// ==================== M25：读端点 ListHistory ====================
+//
+// 读路径的判据只有三条，但每条都能把「看起来对」的实现打回去：
+// 全序（否则翻页重复/漏行）、clamp（否则可拖库）、不存在即 404（否则前端会
+// 渲染一个并不存在的工单详情页）。
+func TestTicketService_ListHistory_全序与分页(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+	batch := uuid.New()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// 五行的 created_at 刻意只落在两个时刻上（后两个时刻各有一对完全相同），
+	// 逼出 id DESC 这个次序键 —— 只按时间排的话，同一时刻的两行次序未定义（T-45），
+	// 翻页会在两页之间重复或漏掉它们。id 用可比较的固定值，让期望顺序是写死的。
+	mk := func(n int, at time.Time) models.TicketHistory {
+		field := "f" + strconv.Itoa(n)
+		old := "old"
+		return models.TicketHistory{ //nolint:exhaustruct
+			ID:        uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-%012d", n)),
+			TicketID:  id,
+			BatchID:   batch,
+			Kind:      models.TicketHistoryKindUpdated,
+			FieldName: &field,
+			OldValue:  &old,
+			ActorName: "燕如",
+			CreatedAt: at,
+		}
+	}
+	rows := []models.TicketHistory{
+		mk(1, base), mk(2, base),
+		mk(3, base.Add(time.Minute)), mk(4, base.Add(time.Minute)),
+		mk(5, base.Add(2*time.Minute)),
+	}
+	require.NoError(t, db.Create(&rows).Error)
+
+	ids := func(items []models.TicketHistory) []string {
+		out := make([]string, 0, len(items))
+		for _, it := range items {
+			out = append(out, it.ID.String())
+		}
+		return out
+	}
+	// 期望顺序：时间倒序；时间相同则 id 倒序。写成字面量而不是「按同样规则再排一遍」，
+	// 免得实现和用例用同一个错误假设互相印证。
+	wantOrder := []string{
+		"00000000-0000-0000-0000-000000000005",
+		"00000000-0000-0000-0000-000000000004",
+		"00000000-0000-0000-0000-000000000003",
+		"00000000-0000-0000-0000-000000000002",
+		"00000000-0000-0000-0000-000000000001",
+	}
+
+	t.Run("默认分页_最新在前", func(t *testing.T) {
+		items, total, err := svc.ListHistory(context.Background(), id.String(), 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, int64(5), total)
+		assert.Equal(t, wantOrder, ids(items), "page/pageSize 传 0 时按 1/20 兜底，且必须是全序")
+	})
+
+	t.Run("翻页不重不漏", func(t *testing.T) {
+		var seen []string
+		for page := 1; page <= 3; page++ {
+			items, total, err := svc.ListHistory(context.Background(), id.String(), page, 2)
+			require.NoError(t, err)
+			assert.Equal(t, int64(5), total, "total 是全量，不随页变化")
+			seen = append(seen, ids(items)...)
+		}
+		assert.Equal(t, wantOrder, seen, "逐页拼起来必须恰好是全序序列 —— 重复或漏行都会在这里露出来")
+	})
+
+	t.Run("越界页返回空而不是报错", func(t *testing.T) {
+		items, total, err := svc.ListHistory(context.Background(), id.String(), 99, 20)
+		require.NoError(t, err)
+		assert.Empty(t, items)
+		assert.Equal(t, int64(5), total)
+	})
+}
+
+// 页大小上限 500：契约层 page_size 没有 maximum（openapi.yaml），不 clamp 就是
+// 一句 `page_size=100000` 拖库。要观测 clamp 必须有超过上限的行数 —— 五行数据下
+// `LIMIT 10000` 与 `LIMIT 500` 结果完全一样，那条用例会假绿。
+func TestTicketService_ListHistory_页大小上限500(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+
+	rows := make([]models.TicketHistory, 0, 501)
+	for i := 0; i < 501; i++ {
+		field := "f" + strconv.Itoa(i)
+		rows = append(rows, models.TicketHistory{ //nolint:exhaustruct
+			ID:        uuid.New(),
+			TicketID:  id,
+			BatchID:   uuid.New(),
+			Kind:      models.TicketHistoryKindUpdated,
+			FieldName: &field,
+			CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, i, time.UTC),
+		})
+	}
+	require.NoError(t, db.CreateInBatches(&rows, 200).Error)
+
+	items, total, err := svc.ListHistory(context.Background(), id.String(), 1, 10000)
+	require.NoError(t, err)
+	assert.Equal(t, int64(501), total)
+	assert.Len(t, items, 500, "page_size 超过上限必须被夹到 500")
+}
+
+// 不存在的工单要 404，不能是空列表：空列表会让调用方把「这张票不存在」读成
+// 「这张票还没被改过」，前端据此渲染出一个并不存在的工单详情页。
+func TestTicketService_ListHistory_工单不存在(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	items, _, err := svc.ListHistory(context.Background(), uuid.New().String(), 1, 20)
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.Nil(t, items, "报错时不得同时返回一个空列表给调用方「将就用」")
+}
+
+// 黑盒：读端点拿到的必须是 Update 真正写下的东西（含出生行），不是另一套形状。
+func TestTicketService_ListHistory_读到Update写入的历史(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+	ctx := context.Background()
+
+	tk := &models.Ticket{Title: "读端点黑盒", Status: "open", Priority: "normal"} //nolint:exhaustruct
+	require.NoError(t, svc.Create(ctx, tk, Actor{Name: "燕如"}))
+	_, err := svc.Update(ctx, tk.ID.String(), map[string]interface{}{"title": "改过的标题"}, Actor{Name: "燕如"})
+	require.NoError(t, err)
+
+	items, total, err := svc.ListHistory(ctx, tk.ID.String(), 1, 20)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total, "出生行 + 一次字段变更 = 两行")
+	require.Len(t, items, 2)
+
+	newest := items[0]
+	assert.Equal(t, models.TicketHistoryKindUpdated, newest.Kind)
+	require.NotNil(t, newest.FieldName)
+	assert.Equal(t, "title", *newest.FieldName)
+	assert.Equal(t, "燕如", newest.ActorName, "读端点要能看到是谁改的")
+	require.NotNil(t, newest.NewValue)
+	assert.Equal(t, "改过的标题", *newest.NewValue)
+
+	oldest := items[1]
+	assert.Equal(t, models.TicketHistoryKindCreated, oldest.Kind)
+	assert.Nil(t, oldest.FieldName, "出生行改的不是某个字段，而是「这张票存在了」")
 }

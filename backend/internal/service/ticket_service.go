@@ -43,6 +43,8 @@ type Actor struct {
 type TicketService interface {
 	List(ctx context.Context, f TicketFilter) (items []models.Ticket, total int64, err error)
 	Get(ctx context.Context, id string) (*models.Ticket, error)
+	// ListHistory 某张工单的经手历史（最新在前，平铺行）。准入与 Get 同级。
+	ListHistory(ctx context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error)
 	Create(ctx context.Context, t *models.Ticket, actor Actor) error
 	Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error)
 	// CreateFromAlert 从告警派生一张工单并把 alerts.ticket_id 指回去（TODO D-3）。
@@ -94,6 +96,45 @@ func (s *ticketService) List(ctx context.Context, f TicketFilter) ([]models.Tick
 		return nil, 0, err
 	}
 	if err := q.Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+// ListHistory 某张工单的经手历史（append-only，最新在前）。
+//
+// 准入与 GET /tickets/:id 同级（燕如 2026-09-11 拍板③「跟工单本身的可见性」）：
+// 这里**不**另做归属过滤，判据留在 Get 一处 —— 端点可见性变了两个方法一起变，
+// 免得历史端点自己长出一套谁看不见谁的规则。
+//
+// 先做存在性检查再查历史：不存在的工单返回 ErrNotFound，而不是一个空列表 ——
+// 空列表会让调用方把「这张票不存在」读成「这张票还没被改过」，前端会据此渲染出
+// 一个并不存在的工单详情页。
+func (s *ticketService) ListHistory(ctx context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error) {
+	if _, err := s.Get(ctx, ticketID); err != nil {
+		return nil, 0, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	// 上限 500 与 List 同口径（见上）。契约层 page_size 没有 maximum，不能指望
+	// schema 兜底 —— 不 clamp 就是可拖库。
+	if pageSize > 500 {
+		pageSize = 500
+	}
+	q := s.db.WithContext(ctx).Model(&models.TicketHistory{}).Where("ticket_id = ?", ticketID)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var items []models.TicketHistory
+	// created_at DESC, id DESC 是**全序**（T-45）：同一批次的多行 created_at 完全相同，
+	// 只按时间排的话翻页会重复或漏行。
+	if err := q.Order("created_at DESC, id DESC").
+		Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil

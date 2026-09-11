@@ -15,6 +15,7 @@ import (
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,6 +122,7 @@ func TestRackGet_不存在_统一404结构(t *testing.T) {
 type mockTicketService struct {
 	listFunc      func(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error)
 	getFunc       func(ctx context.Context, id string) (*models.Ticket, error)
+	historyFunc   func(ctx context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error)
 	createFunc    func(ctx context.Context, t *models.Ticket, a service.Actor) error
 	updateFunc    func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error)
 	fromAlertFunc func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error)
@@ -131,6 +133,9 @@ func (m *mockTicketService) List(ctx context.Context, f service.TicketFilter) ([
 }
 func (m *mockTicketService) Get(ctx context.Context, id string) (*models.Ticket, error) {
 	return m.getFunc(ctx, id)
+}
+func (m *mockTicketService) ListHistory(ctx context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error) {
+	return m.historyFunc(ctx, ticketID, page, pageSize)
 }
 func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket, a service.Actor) error {
 	return m.createFunc(ctx, t, a)
@@ -149,6 +154,7 @@ func newTicketRouter(svc service.TicketService) *gin.Engine {
 	g := r.Group("/api/tickets")
 	g.GET("", h.ListTickets)
 	g.GET("/:id", h.GetTicket)
+	g.GET("/:id/history", h.ListTicketHistory)
 	g.POST("", h.CreateTicket)
 	g.PUT("/:id", h.UpdateTicket)
 	return r
@@ -336,4 +342,87 @@ func TestTicketUpdate_不可变字段返回400(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "bad_request")
+}
+
+// ListTicketHistory 是 M25 的读端点。这里只钉 handler 该负责的三件事：路由参数
+// 原样传下去、分页参数解析、以及错误码映射 —— 准入层（跟工单本身可见性）由
+// routes_integration_test.go 的分类闸门守。
+func TestListTicketHistory_参数解析与响应形状(t *testing.T) {
+	var gotID string
+	var gotPage, gotSize int
+	svc := &mockTicketService{
+		historyFunc: func(_ context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error) {
+			gotID, gotPage, gotSize = ticketID, page, pageSize
+			field := "status"
+			oldV, newV := "open", "resolved"
+			return []models.TicketHistory{{ //nolint:exhaustruct
+				TicketID:  uuid.MustParse(ticketID),
+				Kind:      models.TicketHistoryKindUpdated,
+				FieldName: &field, OldValue: &oldV, NewValue: &newV,
+				ActorName: "燕如",
+			}}, 42, nil
+		},
+	}
+	r := newTicketRouter(svc)
+	id := uuid.NewString()
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/tickets/"+id+"/history?page=3&page_size=50", nil))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, id, gotID, "路径参数要原样传给 service")
+	assert.Equal(t, 3, gotPage)
+	assert.Equal(t, 50, gotSize)
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []models.TicketHistory `json:"items"`
+			Total int64                  `json:"total"`
+			Page  int                    `json:"page"`
+			Size  int                    `json:"size"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, int64(42), resp.Data.Total)
+	assert.Equal(t, 3, resp.Data.Page)
+	assert.Equal(t, 50, resp.Data.Size)
+	require.Len(t, resp.Data.Items, 1)
+	assert.Equal(t, "燕如", resp.Data.Items[0].ActorName, "响应里要带上经手人 —— 这是这个端点的全部意义")
+}
+
+// 缺省分页参数：不传 page/page_size 时按 1/20 下发（与 ListTickets 同口径），
+// 而不是把 0 传进 service 让它去兜底。
+func TestListTicketHistory_缺省分页(t *testing.T) {
+	var gotPage, gotSize int
+	svc := &mockTicketService{
+		historyFunc: func(_ context.Context, _ string, page, pageSize int) ([]models.TicketHistory, int64, error) {
+			gotPage, gotSize = page, pageSize
+			return nil, 0, nil
+		},
+	}
+	r := newTicketRouter(svc)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/tickets/"+uuid.NewString()+"/history", nil))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, 1, gotPage)
+	assert.Equal(t, 20, gotSize)
+}
+
+// 工单不存在 → 404 而不是 200 空列表（否则前端会渲染出一个不存在的工单详情页）。
+func TestListTicketHistory_工单不存在返回404(t *testing.T) {
+	svc := &mockTicketService{
+		historyFunc: func(_ context.Context, _ string, _, _ int) ([]models.TicketHistory, int64, error) {
+			return nil, 0, service.ErrNotFound
+		},
+	}
+	r := newTicketRouter(svc)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/tickets/"+uuid.NewString()+"/history", nil))
+
+	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
 }

@@ -76,6 +76,32 @@ func (h *TicketHandler) GetTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": t})
 }
 
+// ListTicketHistory GET /tickets/:id/history —— 某张工单的经手历史。
+//
+// 返回**平铺行**（一行一个字段变更），前端按 batch_id 分组：后端不做展示层聚合，
+// 契约保持直白形状（docs/FIX-PLAN-TICKET-HISTORY.md §2.6）。准入与 GetTicket 同级 ——
+// 「跟工单本身的可见性」，不另收口到 canAudit（燕如 2026-09-11 拍板③）。
+func (h *TicketHandler) ListTicketHistory(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	items, total, err := h.svc.ListHistory(c.Request.Context(), c.Param("id"), page, pageSize)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "工单不存在")
+			return
+		}
+		apierr.Internal(c, "获取工单经手历史失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{
+		"items": items,
+		"total": total,
+		"page":  page,
+		"size":  pageSize,
+	}})
+}
+
 func (h *TicketHandler) CreateTicket(c *gin.Context) {
 	var ticket models.Ticket
 	if err := c.ShouldBindJSON(&ticket); err != nil {

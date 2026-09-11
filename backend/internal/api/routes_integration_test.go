@@ -624,6 +624,7 @@ var ungatedRoutes = map[string]string{
 	"GET /api/alert-suppressions/:id":          "抑制读",
 	"GET /api/tickets":                         "工单读",
 	"GET /api/tickets/:id":                     "工单读",
+	"GET /api/tickets/:id/history":             "工单经手历史读（准入与 GET /:id 同级，拍板③）",
 	"GET /api/sites":                           "机房读",
 	"GET /api/sites/:id":                       "机房读",
 	"GET /api/racks":                           "机柜读",
@@ -1157,6 +1158,17 @@ func TestRoutes_只读端点未被过度收紧(t *testing.T) {
 			assert.NotEqual(t, http.StatusForbidden, w.Code, "只读身份不应被 ping/traceroute 拦截")
 		})
 	}
+
+	// M25 经手历史：准入**故意**与 GET /tickets/:id 同级（燕如 2026-09-11 拍板③
+	// 「跟工单本身的可见性」）。这与 GET /audit-logs 收在 canAudit 的既有先例相反，
+	// 属有意放宽 —— 所以这里钉的是「不许被顺手收紧」：将来谁把它挂上 canAudit/canIdentity，
+	// 这个只读身份就会拿到 403，用例立刻红。
+	// 票号是随机 UUID 故业务上必然 404，这里只断言**不是 403**（同 /api/topology 的写法）。
+	t.Run("工单经手历史不被过度收紧", func(t *testing.T) {
+		w := requestAs(t, r, http.MethodGet, "/api/tickets/"+uuid.NewString()+"/history", middleware.RoleReadonly)
+		assert.NotEqual(t, http.StatusForbidden, w.Code,
+			"经手历史跟工单本身可见（拍板③），只读身份不应被拒")
+	})
 
 	// 凭据例外：通知渠道响应体含明文 webhook token / SMTP 密码 → 已收紧到 manage
 	w := requestAs(t, r, http.MethodGet, "/api/notification-channels", middleware.RoleReadonly)
