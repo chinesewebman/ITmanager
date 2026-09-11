@@ -56,9 +56,11 @@ for _, e := range existing {
 **先纠正本文档 v1 的一处事实错误**：v1 写「M26 之前 `problem_start` 写的是同步时刻（`now`），
 所以拿它当身份只会制造重复」。这是错的 —— 与 HEAD 代码和 M26 自己的文档都冲突：
 
-- `git show HEAD~:backend/internal/integration/service.go` 的 Zabbix INSERT 块里
-  **根本没有 `ProblemStart` 字段**（`grep -c ProblemStart` = 0）；
-- `docs/FIX-PLAN-SYNC-FIDELITY.md:29` 与 `TODO.md:302` 都记着「`problem_start` **从未被写入**
+- `git show HEAD~2:backend/internal/integration/service.go` 的 Zabbix INSERT 块里
+  **根本没有 `ProblemStart` 字段**（`grep -c ProblemStart` = 0）。
+  **注意是 `HEAD~2` 不是 `HEAD~`**：`HEAD~`（= M26 那笔）正是**引入** `ProblemStart` 的提交，
+  在那里 grep 会得到 1 —— 本文档 v2 初稿就写成了 `HEAD~`，是一条可复现但结论为假的断言；
+- `docs/FIX-PLAN-SYNC-FIDELITY.md:28` 与 `TODO.md:302` 都记着「`problem_start` **从未被写入**
   （落零值 `0001-01-01`）」。
 
 真实的机理因此是**另一个**：M26 之前所有 Zabbix 行共享同一个零值，拿它当键不区分任何东西，
@@ -109,7 +111,7 @@ Zabbix 的 `lastchange`（`service.go:192-196`）之后，它才第一次成为�
 数组（关联 item 的完整对象）。而 `Trigger.Items`（字段在 `zabbix.go:244`，
 `:259` 只是 `Item` 结构体里的一句注释）全仓**零读取点** —— `grep -rn "\.Items"` 在非测试 Go
 里**零命中**；`ConvertToAlert`（`zabbix.go:270-296`）只读 `Hosts[0].Host`（`:272`）、
-`Description`（`:274`）、`Priority`（`:275`）。
+`Description`（`:274`、`:275`）、`Priority`（`:277` 的 `Severity: t.Priority`）。
 
 > **【未实测】**具体放大倍数取决于环境里 trigger↔item 的关联数，本轮无真实 Zabbix 可测，
 > 不编数字。**但处置不依赖这个倍数**：字段零读取，删它在任何倍数下都是安全的。
@@ -145,12 +147,16 @@ var existing []models.Alert
 Where("trigger_id IN ? AND status = ?", triggerIDs, "problem").Find(&existing)
 existingSet := map[string]struct{}{}; existingSet[e.TriggerID] = ...
 
-// after —— 该 trigger 的行全取（判据要两种），但只取判据需要的三列
+// after —— 该 trigger 的 zabbix 行全取（判据要两种），但只取判据需要的三列
 var existing []models.Alert
-Where("trigger_id IN ?", triggerIDs).
+Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).
     Select("trigger_id", "problem_start", "status").
     Find(&existing)
 ```
+
+`source = 'zabbix'` 的理由与 §2.3 的索引谓词同源（两边必须一致，否则 Go 侧与库侧对
+「什么算同一身份」的判断会分叉）。既有代码没有这个条件，但 `Alert.TriggerID` 的非测试写入点
+只有本同步与 `cmd/seed`（`TRG-5000`.. 各自唯一），故今天行为等价 —— 这是为将来收窄，不是修现状。
 
 **为什么不再按 status 过滤**：新判据（§2.2）在 usable 分支需要看 `problem_start`，
 在 degraded 分支需要看 `status`。把 status 过滤留在 SQL 里会让 usable 分支看不到
@@ -237,8 +243,16 @@ D-1 把 `(trigger_id, problem_start)` 声明为一次故障发生的**身份**�
 ```sql
 CREATE UNIQUE INDEX IF NOT EXISTS uq_alerts_zabbix_identity
     ON alerts(trigger_id, problem_start)
-    WHERE trigger_id IS NOT NULL AND trigger_id <> '';
+    WHERE source = 'zabbix' AND trigger_id IS NOT NULL AND trigger_id <> '';
 ```
+
+**谓词里为什么有 `source = 'zabbix'`**（§2.2 的 Go 侧查询同步加同样的收窄，两边必须一致）：
+D-4 的原文是「与 GLPI 侧 M26/D-4 **同形**」，而 GLPI 的谓词正是一段 source 收窄
+（`WHERE source='glpi' AND external_id <> ''`）。不带 source 的后果是**静默**的：将来一旦出现
+第二个写 `trigger_id` 的来源（或人工告警带了 trigger_id），两边(trigger_id, problem_start)相撞
+→ `ON CONFLICT DO NOTHING` 把**真实的 Zabbix 告警悄悄跳过**，无日志、无返回差异 ——
+正是 M27 要消灭的失败类。带上 source 后，同类碰撞退化成**可见的重复行**（自检与巡检看得见）。
+反过来的代价（source 非 `'zabbix'` 的存量行不再参与抑制）登记为 §4 R16。
 
 前置自检（同 000026/D-5 的形态）：检测到重复则 `RAISE EXCEPTION` 并 `string_agg` 出最多 5 个
 重复键，**不删任何数据**。两条细节，写错任一条都会让自检变成永久性阻塞：
@@ -265,16 +279,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_alerts_zabbix_identity
 tx.Clauses(clause.OnConflict{
     Columns: []clause.Column{{Name: "trigger_id"}, {Name: "problem_start"}},
     TargetWhere: clause.Where{Exprs: []clause.Expression{
-        clause.Expr{SQL: "trigger_id IS NOT NULL AND trigger_id <> ''"},
+        clause.Expr{SQL: "source = 'zabbix' AND trigger_id IS NOT NULL AND trigger_id <> ''"},
     }},
     DoNothing: true,
 }).CreateInBatches(toInsert, 100)
 ```
 
-**`synced` 不能用 `res.RowsAffected`**（T-49）：`Alert.ID` 带 `default:gen_random_uuid()`，
-gorm 自动追加 `RETURNING "id"` → `RowsAffected == len(batch)`，恰好在 ON CONFLICT 存在的那
-个场景虚报。照 GLPI 的做法改用**同事务内 COUNT 前后差**（`tx.Model(&models.Alert{}).
-Where("trigger_id IN ?", triggerIDs).Count(...)`）。
+**`TargetWhere` 必须与上面索引谓词逐字一致（含 `source = 'zabbix'`）。** PG 只要求
+「ON CONFLICT 的推断谓词**蕴含**索引谓词」，方向上是安全的；但漏掉 `source` 就**不蕴含**，
+直接 42P10。本文档 v2 初稿这段漏了 `source`，而同一节的索引 SQL 有它 —— 自相矛盾，
+细节文档 §3.5 已是对的。两边必须同改。
+
+**`synced` 用同事务 COUNT 前后差，不用 `res.RowsAffected`。** 注意**论据要写对**：
+T-49 记录的虚报（`RowsAffected == len(batch)`）是 **`Ticket` 特有**的 —— `Ticket` 有
+`BeforeCreate` 钩子自己填 ID，gorm 因此不加 `RETURNING`，走的是另一条语句路径。
+**`Alert` 实测不虚报**（sqlite 3.45.1，1 冲突 + 2 新 → `RowsAffected=2`，与真实插入数一致）。
+保留 COUNT 的理由是另外两条，不是「会虚报」：① 它对 INSERT 语句路径的变化免疫
+（哪天给 `Alert` 加个 `BeforeCreate`，`RowsAffected` 的含义就会跟着变）；② 与同一文件里
+`SyncFromGLPI` 的计数法一致，读者不必去分辨两种写法的差别。计数语句同样要带 `source` 收窄
+（`Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs)`），否则非 Zabbix 的同
+trigger_id 行会被算进 `synced`。
 
 **为什么这个索引不会误伤存量**（已核实）：
 - `cmd/seed/main.go:218-230` 的 6 条告警 `TriggerID` 各异（`TRG-5000`..`TRG-5005`）、
@@ -289,7 +313,8 @@ Where("trigger_id IN ?", triggerIDs).Count(...)`）。
 ```go
 // zabbix.go
 // zabbixTriggerLimit 是 trigger.get 的**本条 API 自己的**上限，与 GetMetricItems 的 5000
-// 恰好同值但互不耦合（本包既有的做法就是每个请求写自己的上限，见 zabbixAuthTTL 一类常量）。
+// 恰好同值但互不耦合（本包既有的做法是每个请求**内联**写自己的上限：zabbix.go:133 的 5000、
+// :173 原本的 100 —— 这里提成常量只因为它在 service.go 的截断判定里还要再用一次）。
 const zabbixTriggerLimit = 5000
 
 Params: map[string]interface{}{
@@ -344,7 +369,7 @@ SyncFromZabbix → (synced, truncated, err)
 | 前端 | `frontend/src/pages/Settings.tsx` 的 `handleSyncZabbix` 提示文案（**不含数字**）+ 单测 | 与 `glpi_skipped` 同位置 |
 | 迁移 | **新增 000027**（部分唯一索引 + 前置自检 + down） | §2.3 |
 | OpenAPI | **不需要改** | spec 在 `backend/internal/api/openapi.yaml`（2729 行，`paths:` 段起于 `:48`）。`grep -in "integration\|zabbix\|sync"` 全文件**只有 1 处命中**（`:2599`，是 `audit_logs.source` 的一句 description），`paths:` 段里没有任何 integrations/zabbix/sync 路径 → 该端点整体未文档化。M26/D-6 已判定「gin.H 直出 → 不触发漂移」，`glpi_skipped` 当时也没进 spec |
-| 生成物 | **不需要改** | `frontend/src/services/api.ts` 的 `syncZabbix` 返回 `Promise<any>`，消费侧一律 `res: any` + `?.` 取值，不存在可改的类型声明 |
+| 生成物 | **不需要改** | `frontend/src/services/api.ts:239` 的 `syncZabbix` 无显式返回类型标注（推导为 `Promise<AxiosResponse<any>>`），消费侧一律 `res: any` + `?.` 取值，不存在可改的类型声明 |
 
 ## 4. Risk
 
@@ -436,6 +461,34 @@ alerts 的部分唯一索引，Zabbix 用例会红在 sqlite 的
 缓解：自检 `RAISE EXCEPTION` 时把重复键写进异常文本（运维一次定位）；D-9 已判定无真实存量
 数据，故这是纯保险；**不提供自动清理**（自动删告警数据比让迁移失败危险）。
 
+**R16（低）`source = 'zabbix'` 收窄会让 source 非 Zabbix、却带 trigger_id 的存量行不再参与抑制。**
+§2.3/§2.2 把「什么算同一身份」收窄到 `source='zabbix'`（照 GLPI 的谓词形态）。失败模式：若库里
+已存在一行 `trigger_id='100'` 但 `source` 为 `''`/`'manual'` 的告警，新代码**不再**因它而跳过，
+且库侧索引也不拦 → 多出一行 Zabbix 告警（**可见的重复**，不是静默丢弃）。
+缓解：`Alert.TriggerID` 的非测试写入点只有本同步与 `cmd/seed`（`TRG-5000..` 各自唯一），
+D-9 又判定无真实存量数据 → 现状下不可达。取此方向是因为它的失败方向**可见**，
+而不带 source 的那一侧失败是**静默跳过真实告警**（§2.3 已展开）。
+
+**R18（低）身份粒度是 1 秒，源侧「同一秒内恢复再触发」会被静默跳过。**
+`exact` 的键是 `trigger_id|problem_start.Unix()`，而 `lastchange` 是 Unix **秒**。
+源侧在同一秒内「恢复 → 再触发」时，新故障与旧行的 key 相同 → Go 侧预过滤跳过、
+库侧 `ON CONFLICT DO NOTHING` 兜住 → **无日志、无返回差异**。低频，但确实是静默丢告警 ——
+与 R9（并发）同属「收集键精度不足」这一类。缓解：D-1 的既定语义（身份就是「哪一次故障发生」，
+秒是 `lastchange` 能给的最细粒度）；登记备查，不修。
+
+**R19（低）`alerts.source` 有 DB 默认值 `'zabbix'`，不只模型 tag。**
+`migrations/000013_schema_align.up.sql:255` 给了该列默认值。失败模式：将来某个写入方
+漏设 `source`，落库就拿到 `'zabbix'` → 会被卷进本轮的 identity 判据与索引。今天不可达
+（唯一的另一写入方 `cmd/seed` 显式设了；冒烟里的裸 `INSERT INTO alerts` 都不带 `trigger_id`，
+落在索引谓词外）。登记备查。
+
+**R17（低）同事务 COUNT 差值在并发写入下会多计。**
+`synced = after - before` 统计的是「该批 trigger_id 的 zabbix 告警行数增量」。若另一个写入方
+在两次 COUNT 之间插入了同 trigger_id 的 zabbix 行，差值会把这部分算进本次 `synced`。
+这与 GLPI 侧 M26/D-4 的计数法是**同一个**已知性质（照抄即继承）。
+缓解：`synced` 只用于展示与日志，不参与任何写决策；并发同步本身由 §2.3 的索引兜住幂等。
+登记为残余。
+
 ## 5. 执行步骤
 
 0. **前置实测** ✅ 已完成（§2.2.1 键 round-trip、§1.6 NULL 扫描裁定）。
@@ -448,7 +501,7 @@ alerts 的部分唯一索引，Zabbix 用例会红在 sqlite 的
      T-42：**不加入白名单的新用例会静默不跑**，绿得毫无意义。
    - **`upsertTestSchema`（`upsert_test.go:61` 起）必须补上 `alerts` 的部分唯一索引**，
      谓词与迁移逐字相同（照它给 `tickets` 加 `uq_tickets_glpi_external_id` 的先例，
-     `:96-104`）。**漏了这一步，所有 Zabbix 用例会一起红在**
+     `:94-99`）。**漏了这一步，所有 Zabbix 用例会一起红在**
      `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint` ——
      那是**基座缺件，不是被测代码的问题**（schema 注释自己写着这句话）。
    - 同处 **`:48-60` 的 `upsertTestSchema` 注释必须重写**：它现在明说
@@ -461,7 +514,7 @@ alerts 的部分唯一索引，Zabbix 用例会红在 sqlite 的
    `n, err =`，末一个是 `n, err :=`。
    - **`:524` `TestSyncFromZabbix_本地已确认的告警会重复插入` —— 断言必翻。** fixture **不带
      lastchange**（服务端响应无该字段）→ 走降级分支 → `open` 命中 ack 行 → `n` **1→0**、
-     `len(rows)` **2→1**。用例名、`:520-523` 的说明段、`:556`/`:560` 的断言文案
+     `len(rows)` **2→1**。用例名、`:519-523` 的说明段、`:556`/`:560` 的断言文案
      （含 `TODO G-27`）全部失效，需一并改写为表达「本地已确认的告警不再重复插入」。
      `:561`「ack 行必须原样保留」保留，`:562`（断言 `rows[1].Status == "problem"`）删除。
    - **`:363-370` 与 `:404` —— 注释与诊断文案变成假话（断言本身不变）。**
@@ -553,6 +606,31 @@ alerts 的部分唯一索引，Zabbix 用例会红在 sqlite 的
 | 26 | 一致性 | §3 的 OpenAPI 证据行引的是**不存在的路径**（`backend/openapi.yaml`），等于未验证；实际 spec 在 `backend/internal/api/openapi.yaml` | 已用真实路径重验：全文件仅 `:2599`（`audit_logs.source` 的 description）命中，`paths:` 段确无该端点 → 结论「不需要改」仍成立，证据已换 |
 | 27 | 边界 | 自检若把 NULL `problem_start` 算作重复 → 同 trigger 的多个 NULL 行**永远无法满足**，迁移被永久阻塞（PG 唯一索引视 NULL 互不相等） | 已在 §2.3 写死 `problem_start IS NOT NULL` |
 | 28 | 一致性 | `TestDBSmoke_AlertsTriggerIDIndex`（`:1607`）只验证索引形态与 EXPLAIN，**不插入任何 alerts 行** → 不会与新索引冲突；但它注释里的查询形态「`trigger_id IN (...) AND status='problem'`」在本轮之后**不再是真实查询** | 已记入 §2.3 的存量核实；该注释留待步骤 3 顺带更新 |
+
+**细节文档审查补记（2026-09-11，`docs/IMPL-ZABBIX-SYNC.md` 的三路审查）**：
+
+| # | 来源 | 结论 | 处置 |
+|---|---|---|---|
+| 29 | 一致性/正确性 | §2.3 的 `TargetWhere` 片段**漏了 `source = 'zabbix'`**，与同节索引谓词矛盾 → 正是该节自己写的 42P10 | 已补（本轮最重要的一条：它会让每次同步 500） |
+| 30 | 正确性 | §2.3 的 COUNT 片段也漏 `source` 收窄 | 已补 |
+| 31 | 正确性 | §1.3 的证据命令 `git show HEAD~` 取错层（`HEAD~` 正是引入 `ProblemStart` 的 M26 提交，grep 得 1 而非 0） | 已改 `HEAD~2`，并把这处自纠写进正文 |
+| 32 | 正确性（**实测推翻**） | 「`RowsAffected` 虚报 → 故用 COUNT」的论据对 `Alert` **不成立**：实测 sqlite 3.45.1，1 冲突 + 2 新 → `RowsAffected=2`（= 真实插入数）。虚报是 `Ticket` 特有（`BeforeCreate` 填 ID → 不走 `RETURNING`） | 已保留 COUNT（D-8 不变，理由改为「对 INSERT 路径变化免疫 + 与 GLPI 侧一致」），并**把假论据从正文与将来的注释里删掉** |
+| 33 | 测试 | 变异 M5（`RowsAffected`）**不可证伪** —— 第二次同步在预过滤就早退，INSERT 根本不执行 | 已从变异表移除，改为一条**注入式**用例（照 `upsert_test.go:801` 的 `TestSyncFromGLPI_预查后漏进冲突行仍幂等`）：预过滤后注入冲突行 → 1 冲突 + 2 新 → 断言 `synced==2` |
+| 34 | 测试 | M1/M3/M9 的「应红行」写错或不可达 | 已逐条修正（M1 红在第 3、4 行；M3 需「同日不同秒」的 fixture；M9 需 NULL 行的裸 SQL） |
+| 35 | 测试 | 真 PG 用例④（NULL `problem_start` 不冲突）**用 `models.Alert`+`db.Create` 造不出来** —— 非指针 `time.Time` 落零值哨兵（非 NULL），第二行直接 23505 | 已在细节文档写明这是「不手写 INSERT」那条规矩的**例外**，该格必须显式写 NULL |
+| 36 | 正确性 | 迁移自检的 `problem_start IS NOT NULL` 意味着**零值**行（pre-M26 存量）**会**被算作重复 → 自检命中 → 启动阻塞。需求 v2 只讲了 NULL 那一半 | 已补：零值行命中自检**正是预期**（它们确实是重复），并把「自检触发时怎么办」写进细节文档 §2.1 |
+| 37 | 一致性 | 多处行号失准，其中 `:1274`/`:1280` 会把人引到 `TestDBSmoke_GLPITimeZoneWallClock` 里改坏代码（实际在 `:1498`/`:1504`）；`:1362`→`:1374`；`:1372-1378`→`:1385-1390`；`:96-104`→`:94-99`；`zabbixAuthTTL` 不是「每请求上限」的先例 | 已逐处更正 |
+| 38 | 测试 | 前端用例缺**触发前置**：默认 mock 下 `zabbix.enabled` 为 undefined → 按钮 disabled → 点击不触发 handler，断言读到 undefined | 已在细节文档 §6 写明三个 mock 前置 |
+| 39 | 测试 | `fakeZabbixServer` 表达能力不足（写死单行、单一 lastchange、`r.Body.Read` 单次短读） | 已在细节文档 §7.3 要求参数化 fake + `io.ReadAll` |
+
+**新增实测记录（2026-09-11，sqlite 3.45.1 / go-sqlite3 v1.14.22）**：
+
+- 基座缺索引时的报错**逐字**为 `ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`
+  —— 与细节文档 §7.1 的预测一致，且与 GLPI 侧 M26 的 E5b 同源。
+- `Alert` 路径 `RowsAffected` 与真实插入数一致（见 #32）。
+- sqlite 对 conflict target 的匹配是**解析树结构比较**（`sqlite3UpsertAnalyzeTarget`），
+  不是文本比较 —— 空白/引号风格/`!=` 与 `<>` 的差异不影响。故「谓词逐字一致」这个要求
+  实际比 sqlite 所需更严，方向安全。
 
 **审查确认无误的**（同样有价值，记录以免后人重复怀疑）：命名体系与既有习惯一致
 （`zabbixTriggerLimit` ↔ `zabbixAuthTTL`；`zabbix_truncated` ↔ `glpi_skipped`；日志前缀
