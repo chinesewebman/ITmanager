@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,9 +16,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"network-monitor-platform/internal/api"
@@ -1530,4 +1533,192 @@ func TestRoutes_APIKey白名单按真实客户端IP判定(t *testing.T) {
 	w = doJSONAsRawFrom(t, r, http.MethodGet, "/api/assets", keyForCIDR, nil, proxyAddr, spoofedXFF)
 	assert.Equal(t, http.StatusOK, w.Code,
 		"CIDR 白名单条目应命中同网段客户端（G-11），实际: %s", w.Body.String())
+}
+
+// ==================== M32 导出保真 ====================
+//
+// 缺陷：/api/assets/export 原实现是 List(Page:1, PageSize:500) —— 被 List 的 500
+// 硬顶截断、总数被丢弃，静默产出不完整的对账文件（运维会据此得出错误结论）。
+// 修复：ListAll 全量取数 + X-Total-Count/Content-Length 双声明 + 缓冲原子写。
+// 详见 docs/FIX-PLAN-EXPORT-FIDELITY.md、docs/IMPL-EXPORT-FIDELITY.md。
+
+// seedAssets 裸 SQL 播种 n 条资产（导出夹具）。
+//
+// 为什么不用 db.Create(&models.Asset{...})：测试 schema 的 assets 表列集与
+// models.Asset 不一致（缺 brand/vendor/warranty_end/retired_*/business_unit/source），
+// GORM 全列 INSERT 会 `no such column: brand`（同坑现成证据见本文件 /api/topology 注释）。
+//
+// id 必须显式给（表无默认值；gen_random_uuid() 只在驱动层注册为函数，不是列默认）。
+// asset_tag 留 NULL（UNIQUE 列，sqlite 允许多行 NULL）。
+//
+// created_at 递减：让「按 created_at 倒序」可判定 —— asset-0000 最新，应排第一行。
+// 前三条的 name 刻意含逗号 / 换行 / 公式前缀，覆盖 csv.Writer 转义与 safeCSV 两个分支
+// （否则这两条分支零覆盖，把缓冲实现换成字符串拼接也不会有用例变红）。
+func seedAssets(t *testing.T, n int) {
+	t.Helper()
+	db := database.GetDB() // setupTestRouter 已 SetDBForTest
+	require.NotNil(t, db)
+	base := time.Now().UTC()
+	tx := db.Begin()
+	require.NoError(t, tx.Error)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("asset-%04d", i)
+		switch i {
+		case 0:
+			name = "zw,comma" // csv.Writer 必须加引号
+		case 1:
+			name = "zw\nnewline" // 跨行记录：数 \n 会数错，必须用 csv.Reader 解析
+		case 2:
+			name = "=cmd()" // safeCSV 必须加前导单引号（DDE 防护）
+		}
+		require.NoError(t, tx.Exec(
+			`INSERT INTO assets (id, name, asset_type, status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), name, "server", "active",
+			base.Add(-time.Duration(i)*time.Second), base).Error)
+	}
+	require.NoError(t, tx.Commit().Error)
+}
+
+// exportCSV 发一次带凭据的导出请求，返回 recorder、解析后的 CSV 记录与原始 body。
+//
+// req.RemoteAddr = probeIP() 是必须的：导出端点有独立的 RL(10)，而桶是**包级**缓存、
+// 键 = ClientIP|FullPath（middleware/rate_limit.go），包内所有用例共享同一个桶，
+// reset 钩子又未导出。不换源 IP 的话 `go test -count=3` 会全线红（实测：-count=2 压线，
+// -count=3 爆）。这是既有模式，见本文件 rateLimitProbeSeq 注释。
+func exportCSV(t *testing.T, r *gin.Engine, tok string) (*httptest.ResponseRecorder, [][]string, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/assets/export", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.RemoteAddr = probeIP()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusTooManyRequests, w.Code,
+		"撞上导出端点 RL(10) 的桶 —— 不是导出逻辑坏了，检查 req.RemoteAddr = probeIP()")
+
+	// 必须先把 body 抓成 []byte：csv.NewReader(w.Body) 会把 httptest 的 buffer 读空，
+	// 之后再取 w.Body.Len() 恒为 0 → Content-Length 断言必然假红。
+	body := w.Body.Bytes()
+	recs, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
+	require.NoError(t, err, "body 应是合法 CSV: %q", string(body))
+	return w, recs, body
+}
+
+func TestM32_导出全量_1001行(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+	seedAssets(t, 1001)
+
+	w, recs, body := exportCSV(t, r, tok)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", string(body))
+	// 1001 数据行 + 1 表头。旧实现固定 501（500 数据 + 表头），且是静默的。
+	require.Len(t, recs, 1002, "导出必须是全量（旧实现固定 501）")
+	assert.Equal(t, "1001", w.Header().Get("X-Total-Count"))
+	assert.Equal(t, strconv.Itoa(len(body)), w.Header().Get("Content-Length"),
+		"Content-Length 必须等于实际写出的字节数（body>2KB 时不会自动带 CL）")
+	assert.Equal(t, "text/csv; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "assets.csv")
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
+
+	// 表头 + 顺序：created_at 递减 → asset-0000 最新，排第一条数据行
+	assert.Equal(t, []string{"ID", "Name", "Type", "Status"}, recs[0])
+	assert.Equal(t, "zw,comma", recs[1][1], "含逗号的字段应被引号包裹并解析回原值")
+	assert.Equal(t, "zw\nnewline", recs[2][1], "跨行记录必须由 csv.Reader 解析（数 \\n 会多算）")
+	assert.Equal(t, "'=cmd()", recs[3][1], "safeCSV 必须给公式前缀加前导单引号（DDE）")
+	assert.Equal(t, "asset-0003", recs[4][1])
+}
+
+// 501 是旧代码出错的最小判别点（旧行为静默少 1 行）
+func TestM32_导出_501行边界(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+	seedAssets(t, 501)
+
+	w, recs, _ := exportCSV(t, r, tok)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, recs, 502)
+	assert.Equal(t, "501", w.Header().Get("X-Total-Count"))
+}
+
+// 500 是新老行为应当一致的对照点
+func TestM32_导出_500行对照(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+	seedAssets(t, 500)
+
+	w, recs, _ := exportCSV(t, r, tok)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, recs, 501)
+	assert.Equal(t, "500", w.Header().Get("X-Total-Count"))
+}
+
+// JSON 分支与 CSV 分支共用一次取数 → 必须同样全量（U1 只覆盖 CSV）
+func TestM32_导出JSON分支也全量(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+	seedAssets(t, 1001)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/assets/export?format=json", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.RemoteAddr = probeIP()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.NotEqual(t, http.StatusTooManyRequests, w.Code, "撞上 RL(10) 的桶")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "1001", w.Header().Get("X-Total-Count"))
+
+	var resp struct {
+		Code int              `json:"code"`
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 0, resp.Code)
+	assert.Len(t, resp.Data, 1001, "JSON 分支同样必须全量")
+}
+
+// 空表：区分「没有数据」与「导错了」
+func TestM32_导出空表(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+
+	w, recs, _ := exportCSV(t, r, tok)
+
+	require.Equal(t, http.StatusOK, w.Code, "空表是合法结果，不是错误")
+	require.Len(t, recs, 1, "只有表头")
+	assert.Equal(t, "0", w.Header().Get("X-Total-Count"))
+}
+
+// 反向破坏钉子：List 的 500 硬顶必须保留（导出改的是 ListAll，不是 List）
+func TestM32_列表500硬顶保留(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+	seedAssets(t, 1001)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/assets?page_size=600", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.RemoteAddr = probeIP()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []map[string]any `json:"items"`
+			Total int64            `json:"total"`
+			Page  int              `json:"page"`
+			Size  int              `json:"size"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Len(t, resp.Data.Items, 500, "交互式分页的 500 硬顶必须保留")
+	assert.EqualValues(t, 1001, resp.Data.Total)
+	// size 回显的是原始 query，既有语义不承诺被钳制 —— 钉住，免得将来被「顺手修正」
+	assert.Equal(t, 600, resp.Data.Size)
 }

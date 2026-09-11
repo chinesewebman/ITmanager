@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockAssetService 手写 mock（避免引入 sqlmock / testify/mock）
@@ -223,4 +224,30 @@ func TestUpdateAsset_不存在_返回404(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// ==================== M32 导出保真：错误路径 ====================
+
+// 取数失败时不能产出「带 CSV 头的错误响应」—— 那会让调用方把错误体当附件下载。
+func TestM32_ExportAssets_取数失败不带CSV头(t *testing.T) {
+	svc := &mockAssetService{
+		listAllFunc: func(ctx context.Context) ([]models.Asset, error) {
+			return nil, errors.New("db is down")
+		},
+	}
+	// 前提钉子：nil 的 listAllFunc 会 panic，而 gin.Recovery() 的 500 同样「无 CSV 头」，
+	// 本用例会因错误的原因通过。先钉住前提，panic 路径另有下面的形状断言兜底。
+	require.NotNil(t, svc.listAllFunc, "U6 前提：必须注入 listAllFunc")
+	r := newTestRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Header().Get("Content-Type"), "text/csv", "500 不应带 CSV 类型")
+	assert.Empty(t, w.Header().Get("Content-Disposition"), "500 不应带下载头")
+	assert.Empty(t, w.Header().Get("X-Total-Count"), "取数失败时不应声明条数")
+	// service 错误路径才打 internal_error；panic 路径（Recovery）body 为空 —— 两者形状不同
+	assert.Contains(t, w.Body.String(), "internal_error", "必须是 service 错误路径，而不是 panic")
 }
