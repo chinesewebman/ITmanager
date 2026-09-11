@@ -650,6 +650,34 @@ func TestHandleAlertEvent_resolver错误日志不泄漏URL凭据(t *testing.T) {
 	assert.NotContains(t, logged, "services")
 }
 
+// M29-F 变异复核补的用例：「no recipient in config」这条日志（worker.go:147）此前零覆盖 ——
+// 去掉该处的 stripControlChars，上面两个用例照旧全绿（变异存活）。
+// 渠道名由管理员经 API 设置（name 只校验非空，无控制字符校验），行式消费的日志里 CR/LF
+// 能伪造出一整行，与 send/resolver 两行的风险同源。
+func TestHandleAlertEvent_无收件人日志不伪造行(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	db, mock := newMockDB(t)
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(uuid.New().String(), "群\r\n[notification worker] FORGED LINE: boom",
+				"webhook", `{}`, true))
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	require.NoError(t, w.handleAlertEvent(context.Background(),
+		eventbus.Event{Payload: []byte(`{"event_type":"created","trigger":"t","host_name":"h"}`)}))
+
+	logged := buf.String()
+	require.Contains(t, logged, "no recipient in config", "必须走到无收件人这一行")
+	assert.NotContains(t, logged, "\r")
+	// CR/LF 被剥掉后，渠道名与消息同处一行 —— 一字不差地钉住这一点。
+	assert.Contains(t, logged,
+		"[notification subscriber] channel 群[notification worker] FORGED LINE: boom: no recipient in config")
+}
+
 // TestMarkFailed_顺序必须先Strip再Text — M29-F 的守门用例。
 //
 // 控制字符会截断 redact.Text 的值类：先 Text 后 Strip 时，`password=abc\nDEF` 只被遮到
