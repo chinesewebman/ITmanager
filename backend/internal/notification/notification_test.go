@@ -649,3 +649,56 @@ func TestHandleAlertEvent_resolver错误日志不泄漏URL凭据(t *testing.T) {
 	assert.NotContains(t, logged, "SECRETPATH")
 	assert.NotContains(t, logged, "services")
 }
+
+// TestMarkFailed_顺序必须先Strip再Text — M29-F 的守门用例。
+//
+// 控制字符会截断 redact.Text 的值类：先 Text 后 Strip 时，`password=abc\nDEF` 只被遮到
+// `\n` 为止，之后 Strip 把 `\n` 删掉，等于把**未遮盖的尾部接回**一个已被认成凭据的串上。
+// 修前 markFailed 正是这个顺序（真泄漏），同包 sender.sanitizeSnippet 一直是对的。
+func TestMarkFailed_顺序必须先Strip再Text(t *testing.T) {
+	db := newSQLiteDB(t)
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour})
+
+	id := uuid.New()
+	require.NoError(t, db.Create(&models.NotificationLog{ID: id, Status: "pending"}).Error)
+
+	// 最坏形态：控制字符把**键**切开 —— 先 Text 的话连 `password=` 都识别不到，值原文入库
+	w.markFailed(context.Background(), id, "pass\nword=SUPERSECRET")
+
+	var got models.NotificationLog
+	require.NoError(t, db.First(&got, "id = ?", id).Error)
+	require.Equal(t, "failed", got.Status, "UPDATE 必须真的写进去了")
+	assert.NotContains(t, got.ErrorMsg, "SUPERSECRET", "控制字符切开键时，值也必须被遮盖")
+	assert.Contains(t, got.ErrorMsg, "password=***", "键名保留便于定位")
+	assert.NotContains(t, got.ErrorMsg, "\n")
+}
+
+// TestHandleAlertEvent_日志不得被渠道名伪造 — M29-F：channel 名进了三行日志，
+// 而 notification_channels.name 只校验非空、没有控制字符校验（channel_service.go:69）。
+// 只净化 err 不够 —— 含 CR/LF 的渠道名照样能伪造出一整行假日志。
+func TestHandleAlertEvent_日志不得被渠道名伪造(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	db, mock := newMockDB(t)
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(uuid.New().String(), "群\r\n[notification worker] FORGED LINE", "dingtalk",
+				`{"webhook_url":"https://oapi.dingtalk.com/robot/send?access_token=x"}`, true))
+
+	ms := &mockSender{typ: "dingtalk", err: errors.New("boom")}
+	RegisterSender("dingtalk", ms)
+	t.Cleanup(func() { delete(customSenders, "dingtalk") })
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	require.NoError(t, w.handleAlertEvent(context.Background(),
+		eventbus.Event{Payload: []byte(`{"event_type":"created","trigger":"t","host_name":"h"}`)}))
+
+	logged := buf.String()
+	require.Contains(t, logged, "send err for channel", "必须走到失败日志这一行")
+	assert.NotContains(t, logged, "\r", "渠道名里的 CR 不得进日志：%q", logged)
+	assert.NotContains(t, logged, "群\r\n", "渠道名里的 CR/LF 不得进日志")
+	assert.Contains(t, logged, "FORGED LINE", "内容保留（只是并进同一行），证明不是丢弃")
+}

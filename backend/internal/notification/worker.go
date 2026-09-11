@@ -141,20 +141,25 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 		// 从 Config JSON 解析 recipient (webhook URL / email / chat_id)
 		recipient, _ := recipientFromConfig(ch.Config, ch.Type)
 		if recipient == "" {
-			log.Printf("[notification subscriber] channel %s: no recipient in config", ch.Name)
+			// M29-F：ch.Name 来自 notification_channels.name（仅校验非空，无控制字符校验），
+			// 行式消费的日志里 CR/LF 能伪造出一整行。它是运维自己的显示名，不是错误文本，
+			// 故只剥控制字符、不脱敏（脱敏会误伤含 URL 形状的正常渠道名）。
+			log.Printf("[notification subscriber] channel %s: no recipient in config", stripControlChars(ch.Name))
 			continue
 		}
 		sender, err := w.resolver(ch)
 		if err != nil {
 			// G-28：第三方 sender（RegisterSender）的构造错误不受我们控制，出口统一脱敏
-			log.Printf("[notification subscriber] resolver err for channel %s: %s", ch.Name, redact.Text(err.Error()))
+			log.Printf("[notification subscriber] resolver err for channel %s: %s",
+				stripControlChars(ch.Name), redact.Text(stripControlChars(err.Error())))
 			continue
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = sender.Send(sendCtx, recipient, content)
 		cancel()
 		if err != nil {
-			log.Printf("[notification subscriber] send err for channel %s: %s", ch.Name, redact.Text(err.Error()))
+			log.Printf("[notification subscriber] send err for channel %s: %s",
+				stripControlChars(ch.Name), redact.Text(stripControlChars(err.Error())))
 		}
 	}
 	return nil
@@ -273,18 +278,20 @@ func (w *Worker) markSuccess(ctx context.Context, id uuid.UUID) {
 }
 
 func (w *Worker) markFailed(ctx context.Context, id uuid.UUID, errMsg string) {
-	// G-28：错误文本可能带凭据（URL 的 query/path/userinfo）→ 先脱敏。
-	// 顺序不是安全边界（脱敏是形状识别，截断后残余部分照样会被识别；实测先截断
-	// 也不泄漏），先脱敏只是为了让截断作用在最终写库的文本上。
-	errMsg = redact.Text(errMsg)
-	// 错误文本来自第三方（SMTP 服务端文本、上游响应体），可能是**非法 UTF-8**。
-	// 非法字节让 PostgreSQL 直接拒收（22021）→ 这一行永远停在 pending 被无限重发，
-	// 且 ≤500 rune 时下面的截断分支根本走不到（审计 P4）。
-	errMsg = strings.ToValidUTF8(errMsg, "�")
-	// 控制字符：错误文本来源不止 sender（SMTP 服务端文本、驱动错误、上游响应体），
-	// NUL 让 PG 直接拒收（22021 → 行永远停在 pending 被无限重发）、CR/LF 可把行式
-	// 消费的 error_msg 伪造成多条记录，故在**入库出口**兜一层（安全审计 MEDIUM-1）。
+	// 错误文本来自第三方（SMTP 服务端文本、上游响应体），可能带凭据（URL 的
+	// query/path/userinfo）。两个职责都要做，而**顺序是安全边界**：
+	//   先剥控制字符，再脱敏。
+	// 反过来的话，CR/LF 会把脱敏规则的值类截断（`password=abc\nDEF` 时 Text 只遮到
+	// `\n` 为止），随后再把 `\n` 剥掉，等于把**未遮盖的尾部接回**一个已被认成凭据的
+	// 串上 → `password=***DEF` 明文入库。
+	// M29 之前这里正是反的（Text → … → stripControlChars），是真泄漏；同包的
+	// sender.sanitizeSnippet 一直是正确顺序（Strip→Text），以它为准。
 	errMsg = stripControlChars(errMsg)
+	errMsg = redact.Text(errMsg)
+	// 非法 UTF-8：PostgreSQL 直接拒收（22021）→ 这一行永远停在 pending 被无限重发。
+	// stripControlChars 经 rune 迭代已把非法字节换成 U+FFFD，故这里是兜底（通常 no-op），
+	// 保留它是因为「保证合法 UTF-8」这个不变式不该依赖调用顺序。
+	errMsg = strings.ToValidUTF8(errMsg, "\ufffd")
 	// 按 rune 截断：列是 varchar(500)（**字符**数，migrations/000009），按字节截断
 	// 会切断多字节字符 → PostgreSQL 拒收（22021）→ 这一行永远停在 pending 被重发。
 	if utf8.RuneCountInString(errMsg) > 500 {
@@ -298,7 +305,7 @@ func (w *Worker) markFailed(ctx context.Context, id uuid.UUID, errMsg string) {
 			"error_msg": errMsg,
 		}).Error; err != nil {
 		// 旧版丢弃返回值：写库失败无声无息（行留在 pending 被无限重发）
-		log.Printf("[notification worker] markFailed %s: %s", id, redact.Text(err.Error()))
+		log.Printf("[notification worker] markFailed %s: %s", id, redact.Text(stripControlChars(err.Error())))
 	}
 }
 
