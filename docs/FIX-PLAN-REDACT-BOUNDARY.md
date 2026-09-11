@@ -376,4 +376,100 @@ after   ["']?\s*[:=：]\s*      （：= U+FF1A）
 
 ## 8. 实现记录
 
-（实现后填：逐项 before/after、变异编号与结果、真 PG 结果、门禁。）
+**提交链**：`f62b8fd`（本文档 rev2）→ `b05df00`（先固化 §1.4 边界锁定 + 回归面 + 已知残余钉子，
+全绿）→ `8b03232`（F1 / F2 / F3+F3b / F4）→ `7253331`（审计迭代：两族净回归 + F4b + F3b 同集）。
+`b05df00` 单独成一个提交，是为了同时满足「门禁全绿才 push」与「先固化用例再改实现」
+（固化用例本身不改生产代码，可独立验证）。
+
+### 8.1 逐项 before/after（全部实测输出）
+
+`before` = `git show b05df00:backend/internal/redact/redact.go` 的真实输出。
+
+| 项 | 输入 | before | after |
+|---|---|---|---|
+| F1 | `Authorization: Bearer "SECRET"` | 原样（**明文**） | `Authorization: Bearer ***"` |
+| F1 | `Authorization: Bearer "SECRET` | 原样（**明文**） | `Authorization: Bearer ***` |
+| F1 | `Authorization: Bearer ""SECRET` | 原样（**明文**） | `Authorization: Bearer ***` |
+| F2 | `password=&SECRET` | 原样（**明文**） | `password=***` |
+| F2 | `password=;SECRET` / `,SECRET` | 原样（**明文**） | `password=***` |
+| F2 | `password=""abc` | 原样（**明文**） | `password=""***` |
+| F2 | `password= '"SECRET'` | 原样（**明文**） | `password= '"***'` |
+| F2（锁定） | `token="S` | `token="***` | `token="***`（不变） |
+| F2（锁定） | `password="SECRET"` | `password="***"` | `password="***"`（不变） |
+| F3 | `http://token:8080/x` | `http://token:***`（端口被规则 3 吃掉） | `http://token:8080` |
+| F3 | `redis://pwd:6379/0` | `redis://pwd:***` | `redis://pwd:6379` |
+| F3b | `http://access_token=SECRET` | `http://access_token=***`（**靠串联的偶然兜底**） | `<invalid-url>` |
+| F4 | `password：SECRET` | 原样（**明文**） | `password：***` |
+| F4b | `password=="SECRET"` | `password=***"SECRET"`（**明文尾部**） | `password=="***"` |
+| 净回归① | `password=https://example.com` | `8b03232` 版：`password=https://example.com`（**明文**） | `password=***` |
+| 净回归② | `password==http://SECRET/x` | `8b03232` 版：`password=***http://SECRET`（**明文**） | `password==***` |
+
+F3b 的 before/after 都是「不泄漏」，差异在信息量：旧版是**偶然**遮住的（规则 3 把 `access_token=SECRET`
+当键值抹成 `***`），一旦有人改动串联就会变明文 —— 这正是净回归①的成因。`<invalid-url>` 是把
+「这是凭据形状、不是主机」写进**结构**，不再依赖另一条规则的行为。
+
+### 8.2 变异反证（T-31：每条先 `go build`，编译失败判 INVALID 不算数）
+
+12 条全部**红在断言上**（无存活、无编译失败），跑完还原逐字回到运行前（内容哈希比对）：
+`/tmp/m30mutate.py`。
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M30-M1 | F1 回退：规则 2 值类不吃起始引号 | 红，9 条用例 |
+| M30-M2 | F2 引号组写成非捕获（不回写） | 红，15 条（含 §1.4 三组锁定） |
+| M30-M3 | F2 去掉「起分隔符」分支 | 红，10 条 |
+| M30-M3b | F2 起分隔符只吞一个 token | 红，5 条 |
+| M30-M4 | F3 回退：不分段，先过规则 2/3 再塌缩 URL | 红，11 条 |
+| M30-M5 | F3 写反：URL 段的输出又送回规则 2/3 | 红，11 条 |
+| M30-M6 | F3b 去掉：host 含分隔符不再塌缩 | 红，8 条 |
+| M30-M7 | F4b 回退：分隔符只收一个 | 红，7 条 |
+| M30-M7b | F4 回退：分隔符不收全角 | 红，6 条 |
+| M30-M8 | 净回归修复回退：段尾会被规则吃满时照切 | 红，13 条 |
+| M30-M9 | 哨兵换成值类排除字符（`"`） | 红，12 条 |
+| M30-M10 | F3b 判据收窄回半角 `=` | 红，3 条 |
+
+### 8.3 差分反证（本轮的关键证据 —— 只跑新增用例**证明不了**没有净回归）
+
+判据：同一张用例表喂两版实现，**旧遮住而新明文 = 净回归**。旧实现逐字取自
+`git show b05df00:backend/internal/redact/redact.go`，表为 12 前缀 × 8 分隔符 × 20 值 × 6 后缀
+= **11520 组**（`/tmp/m30diff`，可重跑）。
+
+| 版本 | 净回归 | 真泄漏 | 说明 |
+|---|---|---|---|
+| `8b03232`（F1–F4） | **有** —— 审计两路独立报出，差分扫出 162 条 | — | 全在同一族：`<敏感键>=<URL>`（值本身是 URL） |
+| 第一版修法（`danglingCredRe` 前缀模式） | **162 → 第二族现形**（`password==http://SECRET/x`） | — | 前缀模式与规则 2/3 不同集（漏引号形态、漏重复分隔符） |
+| **最终版**（`eatsFollowing` 问规则本身 + F4b + F3b 同集） | **0** | **0** | 阈值 0 是通过条件，不是「比之前少」 |
+
+差分同时暴露一族**既有**泄漏（旧版同样漏，非本轮引入）：`password=="SECRET"` → `password=***"SECRET"`，
+与 F2 要修的 `password=""abc` 同族 → 已用 F4b（分隔符量词 `+`）一并修掉，并写进行为突变告知。
+
+### 8.4 真 PG / 迁移
+
+**本轮无 schema 变更、无迁移**（纯函数包 + 测试）。`./scripts/db_smoke.sh` 照跑：
+全新迁移 + 升级路径 + 回滚 + 冒烟断言全部通过 —— 用来证明「没有迁移」这件事本身没被破坏。
+
+### 8.5 门禁
+
+`gofmt -l ./internal ./cmd ./tests` 空 / `go vet ./...` 干净 / `go build ./...` ok /
+`go test ./... -count=1` **27 包全绿**（`redact` 调用面广，无外部断言被移动）/
+`./scripts/db_smoke.sh` ✅ / `npx tsc --noEmit` 0（前端未改，按门禁照跑）。
+
+### 8.6 实现后审计（两路：正确性 / 安全）与处置
+
+| # | 来源 | 发现 | 我的处置 |
+|---|---|---|---|
+| 1 | 正确性 + 安全（**独立报出同一条**） | F3 分段把 `<敏感键>=<URL>` 的值从「已遮」变**明文**（`password=https://example.com`） | **采纳（阻断）** → 复现确认 → 修（`eatsFollowing`）→ 补用例 → 变异 M30-M8/M9 |
+| 2 | 差分（我自查，非审计提） | 同族第二形态：重复分隔符 `password==http://SECRET/x` 仍明文 | **采纳** → 同上修法覆盖（前缀模式换成问规则本身） |
+| 3 | 差分（我自查） | 既有泄漏：`password=="SECRET"` → `password=***"SECRET"` | **采纳** → F4b（分隔符量词 `+`）+ 行为突变③ |
+| 4 | 差分（我自查） | F3b 判据与规则 3 分隔符类不同集：host 含全角 `：`/`＝` 时原样回显 | **采纳** → 拒绝集改 `ContainsAny(u.Host, "=＝：")` + M30-M10 |
+| 5 | 安全 | 全角等号 `＝` 未收（`password＝SECRET` 明文） | **采纳** → 并入 F4（与全角冒号同源）+ M30-M7b |
+
+**教训（已写入 `TRAPS.md` T-56）**：一条规则的输出是另一条规则的输入时，两条边界互相咬合；
+拆开串联必须**用差分证明**另一条没被移动。「另写一份必须与既有规则逐字同集的模式」是错的解法 ——
+M30 试过两次（前缀模式漏了两族），最终改为**问规则本身**（哨兵试探）。
+
+### 8.7 残余（本轮不修，全部实测）
+
+见 §6 表；新增 **TODO G-46**（结构化值内元素明文，`{"password":["SECRET"]}` →
+`{"password":***"SECRET"]}`，需嵌套匹配）。`TestText_已知残余_钉住` 三条断言钉住当前输出：
+修它们时测试会红，从而必须同步 TODO 与本文件。
