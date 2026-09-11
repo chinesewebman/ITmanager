@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -541,17 +543,29 @@ func TestRejectAPIKeyAuth(t *testing.T) {
 	cases := []struct {
 		name     string
 		apiKeyID string
+		userID   string // 模拟 AuthMiddleware 是否建立了身份（两条路径都必然设置）
 		want     int
 	}{
-		{"会话身份放行", "", http.StatusOK},
-		{"API Key 身份拒绝", uuid.NewString(), http.StatusForbidden},
+		{"会话身份放行", "", uuid.NewString(), http.StatusOK},
+		{"API Key 身份拒绝", uuid.NewString(), uuid.NewString(), http.StatusForbidden},
+		// G-8 fail-closed：没有任何身份 = AuthMiddleware 没跑 → 500，绝不放行
+		{"无身份fail-closed", "", "", http.StatusInternalServerError},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
+			// 5xx 分支会往 gin.DefaultErrorWriter 打 [ERR] 行，重定向掉避免污染测试输出
+			oldWriter := gin.DefaultErrorWriter
+			gin.DefaultErrorWriter = io.Discard
+			t.Cleanup(func() { gin.DefaultErrorWriter = oldWriter })
+
 			r := gin.New()
-			// 模拟 AuthMiddleware 已运行：API Key 路径设置 api_key_id，JWT 路径不设置
+			// 模拟 AuthMiddleware 已运行：两条认证路径都设置 user_id，
+			// API Key 路径额外设置 api_key_id。
 			r.Use(func(ctx *gin.Context) {
+				if c.userID != "" {
+					ctx.Set("user_id", c.userID)
+				}
 				if c.apiKeyID != "" {
 					ctx.Set("api_key_id", c.apiKeyID)
 				}
@@ -571,6 +585,34 @@ func TestRejectAPIKeyAuth(t *testing.T) {
 			if c.want == http.StatusForbidden {
 				assert.Contains(t, w.Body.String(), "登录会话")
 			}
+			if c.want == http.StatusInternalServerError {
+				assert.Contains(t, w.Body.String(), "服务器配置错误")
+			}
 		})
 	}
+}
+
+// TestRejectAPIKeyAuth_5xx日志带路径上下文 钉住诊断信息：
+// fail-closed 命中时必须把 path/method 记进 internalErr（经 apierr.Respond 的
+// redact.Text 后写 gin.DefaultErrorWriter），否则排障时无从定位是哪条路由挂错。
+func TestRejectAPIKeyAuth_5xx日志带路径上下文(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var buf bytes.Buffer
+	oldWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &buf
+	t.Cleanup(func() { gin.DefaultErrorWriter = oldWriter })
+
+	r := gin.New()
+	r.POST("/api/auth/api-keys", RejectAPIKeyAuth(), func(ctx *gin.Context) {
+		ctx.String(http.StatusOK, "reached")
+	})
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/auth/api-keys", nil))
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	logged := buf.String()
+	assert.Contains(t, logged, "/api/auth/api-keys", "日志应带路由模板")
+	assert.Contains(t, logged, "POST", "日志应带方法")
+	assert.Contains(t, logged, "没有认证中间件建立身份", "日志应说明原因")
 }

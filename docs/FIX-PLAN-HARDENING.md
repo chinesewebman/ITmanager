@@ -529,3 +529,27 @@ F 项无代码，不单独占一次推送。
   每次变异后 `cp` 还原并以 `git diff --stat` 确认工作区只剩两个预期文件。
 
 **残余**：`handlers/api_key_handler.go` 的 `validateIPWhitelist` **只加了注释、语义未变**（仍接受 CIDR）。「过宽网段无护栏」登记为 **G-42**，本轮不做（§2.1 有理由）。
+
+### 8.2 B 项（G-8）— 已交付 2026-09-11
+
+**改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/internal/middleware/auth.go` | import 新增 `fmt`；`RejectAPIKeyAuth` 加 `user_id == ""` → `apierr.Internal` 500 + Abort 的 fail-closed 分支；补注释说明「为何不做启动期静态自检」 |
+| `backend/internal/middleware/auth_scope_test.go` | `TestRejectAPIKeyAuth` 表加 `userID` 字段与「无身份fail-closed」子例（:546 的「会话身份放行」补 `userID`，**即 §2.2 预告的那处必需更新**）+ `gin.DefaultErrorWriter` 重定向；新增 `TestRejectAPIKeyAuth_5xx日志带路径上下文` |
+
+**生产影响核实（高风险项，逐条）**：
+- `RejectAPIKeyAuth()` 全部 6 处用法（`routes.go:251/259/277/279/281/372`）**均在 `protected` 组内**（`protected := api.Group("")` @ :239 + `protected.Use(AuthMiddleware())` @ :240）；`apiKeys := protected.Group(...)` @ :258、`channels := protected.Group(...)` @ :370 继承父链。故**无路由会命中新的 500 分支**。
+- `c.Set("user_id", …)` 在非测试代码中仅 `auth.go:120`(JWT) / `:194`(API Key) 两处，无第三条路径、无中间件清空该键。
+
+**验证**：
+- 全量 `go test ./...` **27 包全绿**；`go vet` / `gofmt -l` 干净。
+- **变异反证（均确认红在断言上，非编译 —— rev1 原拟的两条都因 `fmt` 未使用而红在编译上，此处为改写后的可编译形态）**：
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M28-M3 | `if c.GetString("user_id") == ""` → `if false`（块保留，`fmt` 仍被使用） | **红**：`无身份fail-closed` 子例（handler 被执行）+ `5xx日志带路径上下文`（三条断言全红） |
+| M28-M4 | `apierr.Internal(...)` → `_ = fmt.Errorf(...)` + `c.Next()`（保 `fmt` 使用） | **红**：同上两条用例 |
+
+**残余/诚实声明**：`VerifyToken` 不校验 `claims.UserID` 非空，故「签名合法但 `user_id` 为空」的 token 会命中 500 分支（生产不会产生此 token，可达性极低）。不为它加代码，理由见 §2.2。

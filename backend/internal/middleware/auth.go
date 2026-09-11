@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -240,12 +241,27 @@ func apiKeyAllows(perms models.StringList, method string) bool {
 // 改密同理：泄露的 write Key 可直接改掉所属账号的密码，吊销 Key 撤销不了已改的密码。
 // 这类操作必须用交互式登录会话（JWT / httpOnly cookie）。
 //
-// 依赖 AuthMiddleware 先运行（api_key_id 由 handleAPIKeyAuth 设置）；未挂 AuthMiddleware
-// 的路由上该键为空 → 退化为放行，故只能挂在受保护路由上。
+// 依赖 AuthMiddleware 先运行（api_key_id 由 handleAPIKeyAuth 设置）。未挂 AuthMiddleware
+// 的路由上该键恒空 —— 若只判 api_key_id，守卫会静默退化为放行（缺陷 G-8）。故这里
+// 再加一道 fail-closed：AuthMiddleware 的两条认证路径（JWT / API Key）都必然设置
+// user_id，它为空即说明上游没有建立身份，此时无法区分「JWT 会话」与「匿名」，一律 500。
+//
+// 不做启动期静态自检：gin 的 Routes() 不暴露路由的中间件链，无法在注册期断言顺序。
+// 这道运行时判据本身就是顺序检查，且比静态检查更强（能发现「组被重建」这类动态情况）。
 func RejectAPIKeyAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.GetString("api_key_id") != "" {
 			apierr.Forbidden(c, "API Key 不能执行该操作,请使用登录会话")
+			c.Abort()
+			return
+		}
+		if c.GetString("user_id") == "" {
+			// 500 而非 403：这是服务器配置错误（路由挂载顺序），要进错误率告警；
+			// 403 会被当成正常拒绝而静默。FullPath()/Method 均不可控（前者是注册的
+			// 路径模板，未匹配时为空串），故可安全入日志。
+			apierr.Internal(c, "服务器配置错误", fmt.Errorf(
+				"RejectAPIKeyAuth 之前没有认证中间件建立身份 (path=%s %s)",
+				c.FullPath(), c.Request.Method))
 			c.Abort()
 			return
 		}
