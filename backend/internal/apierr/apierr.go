@@ -37,10 +37,17 @@ func Respond(c *gin.Context, status int, code, message string, internalErr error
 	if internalErr != nil && status >= 500 {
 		// 5xx 错误：仅记录原始 err，对外不暴露。
 		// G-28：内部错误文本可能带凭据（*url.Error 的完整 URL、DSN、userinfo）→ 出口脱敏。
-		gin.DefaultErrorWriter.Write([]byte(
-			"[ERR] " + c.Request.Method + " " + c.Request.URL.Path +
-				" code=" + code + " internal=" + redact.Text(internalErr.Error()) + "\n",
-		))
+		// G-43：这条日志是行式消费的（容器 json-file），而 URL.Path 是**解码后**的请求
+		// 路径——gin 按解码后路径匹配路由，所以 `GET /api/assets/abc%0d%0a[ERR]%20FORGED`
+		// 能带着真 CR/LF 走到这里（实测见 docs/FIX-PLAN-LOG-INJECTION.md §1.2），
+		// 裸拼就伪造出一行无从分辨的假错误。整行过 StripControl（method/path/code 全不可信），
+		// 再补回换行；顺序必须是 Strip→Text（见 redact.StripControl 注释）。
+		// 内层先 Strip 再 Text：Text 必须看到完整的凭据才能整条遮盖，否则 CR/LF 会
+		// 截断它的值类，外层的 Strip 再把尾部接回去 = 泄漏（§1.4 的实测反例）。
+		internal := redact.Text(redact.StripControl(internalErr.Error()))
+		line := redact.StripControl("[ERR] " + c.Request.Method + " " + c.Request.URL.Path +
+			" code=" + code + " internal=" + internal)
+		gin.DefaultErrorWriter.Write([]byte(line + "\n"))
 	}
 	c.AbortWithStatusJSON(status, ErrorResponse{
 		Code:    code,

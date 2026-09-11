@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -226,4 +229,60 @@ func TestRespond_5xx_InternalErr日志脱敏(t *testing.T) {
 	require.Contains(t, logged, "http://127.0.0.1", "URL 塌缩成 scheme://host")
 	assert.NotContains(t, logged, "SUPERSECRET")
 	assert.NotContains(t, logged, "auth=")
+}
+
+// ==================== G-43：5xx 行不能被路径里的 CR/LF 伪造 ====================
+
+// 走**真 socket**：gin 按**解码后**的 path 匹配路由，所以 %0d%0a 必须交给服务器自己
+// 解码（httptest.NewRequest 直接设 URL.Path 会跳过这一步，测不到真实的到达路径）。
+// 原始的 `%0d%0a` 落在 :id 段内 —— 落在静态段（/api%0d%0aX）会 404，到不了 handler。
+func TestRespond_5xx_路径含CRLF不伪造日志行(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &buf
+	t.Cleanup(func() { gin.DefaultErrorWriter = oldWriter })
+
+	r := gin.New()
+	r.GET("/api/assets/:id", func(c *gin.Context) {
+		Internal(c, "服务器内部错误", errors.New("boom"))
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = conn.Write([]byte(
+		"GET /api/assets/abc%0d%0a[ERR]%20FORGED HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+	_, _ = io.ReadAll(conn) // 等响应读完，确保 handler 已执行
+
+	logged := buf.String()
+	require.Contains(t, logged, "[ERR] GET /api/assets/abc", "5xx 必须写日志")
+	// 核心断言：单行。修前这里是两行，且第二行与一条真实错误行无从区分。
+	assert.Equal(t, 1, strings.Count(strings.TrimRight(logged, "\n"), "\n")+1,
+		"5xx 日志必须是单行，实际 %q", logged)
+	assert.NotContains(t, logged, "\r")
+	// 内容保留（只是被并进同一行）：证明不是靠丢弃内容过关，而是真的净化。
+	assert.Contains(t, logged, "FORGED")
+}
+
+// internal err 里的 CR/LF 同样不能把凭据尾部漏出去（§1.4 的顺序反例在本出口的复现）。
+// 必须先 Strip 再 Text：Text 若先跑，只遮到 \n 为止，Strip 再把尾部接回来 = 明文泄漏。
+func TestRespond_5xx_错误文本含CRLF不泄漏凭据尾巴(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &buf
+	t.Cleanup(func() { gin.DefaultErrorWriter = oldWriter })
+
+	c, _ := newTestCtx()
+	Respond(c, http.StatusInternalServerError, CodeInternal, "服务器内部错误",
+		errors.New("password=YWJjZGVmZ2hp\namtsbW5vcHFy"))
+
+	logged := buf.String()
+	assert.Contains(t, logged, "password=***", "键名保留便于定位")
+	assert.NotContains(t, logged, "YWJjZGVmZ2hp")
+	assert.NotContains(t, logged, "amtsbW5vcHFy", "被 CR/LF 切开的凭据尾部不得残留")
+	assert.Equal(t, 1, strings.Count(strings.TrimRight(logged, "\n"), "\n")+1,
+		"5xx 日志必须是单行，实际 %q", logged)
 }
