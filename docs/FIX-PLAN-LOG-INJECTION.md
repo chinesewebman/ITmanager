@@ -383,4 +383,70 @@ log.Printf("M26: %s %q 的 %s=%q 不可用（status=%d）", what, id, field, raw
 
 ## 8. 实现记录
 
-（实现后填：逐项 before/after、变异编号与结果、覆盖率、真 PG 结果。）
+**交付于 2026-09-12。** commit 链：`399a627`（本文档 rev2，三路审查后修订）→ `77ebf3c` A →
+`f858479` B → `0ab13b2` C → `fd7ff79` D/E → `bc6930a` F → `ef94e2a` G → `2daae5a` 真 PG 冒烟 →
+`613e407` 补一条覆盖用例。
+
+### 8.1 逐项 before / after
+
+| 项 | 位置 | before | after |
+|---|---|---|---|
+| A | `redact.StripControl`（新增） | 同一份「剥控制字符」判据在 `notification.stripControlChars`（`sender.go`）与 `handlers.sanitizeAuditUsername` 的循环（`auth_handler.go`）里各写一遍；audit 侧没有 | 导出 `redact.StripControl`（rune 迭代，删 `<0x20` 与 `0x7f`）；上述两处改为**委托**（各留一层薄壳，不动调用点） |
+| B | `apierr.Respond`（`apierr.go:47-50`） | `Write([]byte("[ERR] " + method + " " + URL.Path + " code=" + code + " internal=" + redact.Text(err) + "\n"))` | `internal := redact.Text(redact.StripControl(err.Error()))`；`line := redact.StripControl("[ERR] " + … + internal)`；`Write(line + "\n")` |
+| C | `buildAuditEntry`（`audit.go:92-143`）+ 新增 `truncateRunes`/`sanitizeField`（`audit.go:193-216`） | `Path` 原样（列 500）；`RequestID` 原样（列 **50**）；`UserAgent`/`Username`/`Resource` 走按 **byte** 的 `truncate`；`ErrorMsg` 原样 | 五字段统一 `sanitizeField(v, 列宽)` = `truncateRunes(redact.StripControl(v), n)`（500/50/500/100/1000/100）。**不套 `redact.Text`**：审计是取证材料 |
+| D | `httpx.redactedErr.Error`（`httpx.go:49`） | `redact.Text(e.err.Error())` | `redact.Text(redact.StripControl(e.err.Error()))`；函数注释写明覆盖面**只含 httpx 起源的错误** |
+| E | `integration/zabbixErrText`（`zabbix.go:211`，新增） | `fmt.Errorf("Zabbix API 错 %d: %s", code, apiResp.Error.Message)`（`:251` 与 `:255` 两处） | 两处都包 `zabbixErrText` = `redact.Text(redact.StripControl(msg))`（HTTP 200 的 JSON-RPC 错误不走 httpx） |
+| F | `notification/worker.go` | `markFailed` 顺序 `redact.Text` → `ToValidUTF8` → 按 rune 截断 → `stripControlChars`（**反的**，且注释称「顺序不是安全边界」）；`ch.Name` 三处原样 | `markFailed`：`stripControlChars` → `redact.Text` → `ToValidUTF8` → 按 rune 截断；`ch.Name` 三处（`147`/`154`/`162`，旧行号 144/150/157）过 `stripControlChars`；错误注释换成实测反例 |
+| G | `integration/logTimeUnusable`（`timeparse.go:106`） | `log.Printf("M26: %s %s 的 %s=%q 不可用…", what, id, field, raw, st)` | `id` 改 `%q` |
+
+### 8.2 变异反证（逐条红在**断言**上）
+
+T-31 的坑本轮踩了两次：首版 B/C/D/E 四条变异写成「删掉 `redact.` 调用」，结果 `redact` 变成
+未使用 import → 红在**编译**上（不算通过）；改成可编译的等价变异后重跑，见下表。
+
+| 变异 | 改法（保证可编译） | 结果 |
+|---|---|---|
+| M29-MA | `redact.StripControl` 函数体改恒等（`_ = strings.TrimSpace; return s`） | **红**：`TestStripControl_删控制字符保留可打印`（含 `CRLF_伪造行` 子例） |
+| M29-MB | B 的整行 `redact.StripControl(` → `redact.Text(` | **红**：`TestRespond_5xx_路径含CRLF不伪造日志行` |
+| M29-MC1 | `sanitizeField` 里 `redact.StripControl(s)` → `redact.Text(s)` | **红**：`TestSanitizeField_按字符截断且输出合法UTF8` |
+| M29-MC2 | `truncateRunes` 函数体改 `return truncate(s, max)`（退回按 byte） | **红**：`TestSanitizeField_…` + `TestBuildAuditEntry_长路径与超长RequestID被净化` |
+| M29-MD | `redactedErr.Error` 去掉 `StripControl` | **红**：`TestDo_错误文本不含URL凭据` |
+| M29-ME | `zabbixErrText` 去掉 `StripControl` | **红**：`TestZabbixE2E_APIError_错误文本被净化` |
+| M29-MF | `markFailed` 两行调回 `Text → Strip` | **红**：`TestMarkFailed_顺序必须先Strip再Text` |
+| M29-MF2 | `no recipient in config` 那处去掉 `stripControlChars(ch.Name)` | **首轮存活** → 见 §8.3，补用例后 **红**：`TestHandleAlertEvent_无收件人日志不伪造行` |
+| M29-MF3 | send/resolver 两处**同时**去掉 `stripControlChars(ch.Name)`（`count==2`，只改一处会漏） | **红**：`TestHandleAlertEvent_日志不得被渠道名伪造` |
+| M29-MG | `logTimeUnusable` 的 `id` 回 `%s` | **红**：`TestLogTimeUnusable_id被转义` |
+
+### 8.3 首轮存活的变异 → 补测试（`613e407`）
+
+`M29-MF2` 首轮**全绿**：`worker.go:147`「no recipient in config」这条日志此前**零覆盖** ——
+把它的 `stripControlChars` 去掉，send/resolver 两条既有用例照旧通过。渠道名由管理员经 API 设置
+（`name` 只校验非空），CR/LF 能伪造行式消费的日志行，与另两行**同源同风险**。
+补 `TestHandleAlertEvent_无收件人日志不伪造行`（渠道名带 `\r\n`，断言渠道名与消息**同处一行**），
+重跑红在断言上（`should not contain "\r"`）。这是「变异反证」而不是「覆盖率」抓出来的缺口。
+
+### 8.4 真 PG（`scripts/db_smoke.sh`）
+
+新增 `TestDBSmoke_AuditFieldTruncation`（`backend/tests/db_smoke_test.go`）：走**真实
+`SetupRouter` + `middleware.AuditLog`**（不是直插 —— `buildAuditEntry` 未导出，直插测不到本次改的
+代码，变异门禁恒不成立），请求 `/api/assets/` + `"中"×600`、`X-Request-ID` = marker + `\r\n` + 60×`r`；
+断言审计行**落库**、`path`/`request_id` 为 500/50 runes、两者均为合法 UTF-8、无 CR/LF、前缀保留。
+
+- **修前**（把 `sanitizeField` 还原成改动前的形态）：`ERROR: value too long for type character varying(500)
+  (SQLSTATE 22001)` → 整行 INSERT 被拒 → **行丢失、用例红**。
+- **修后**：`✅ 审计字段截断落库: path=500 runes, request_id="trunc-f0b861d6rrrr…rrrr"`（50 字符，前缀保留）。
+- 白名单：`db_smoke.sh` 新装轮的 `-run` 已加该用例（T-42：不加就**静默不跑**）。
+- 全新 + 升级两条路径全绿；既有 audit 相关冒烟用例保持绿。
+
+### 8.5 门禁
+
+`gofmt -l ./internal ./cmd ./tests` 空；`go vet ./...` 干净；`go build ./...` 通过；
+`go test ./... -count=1` 27 包全绿；`./scripts/db_smoke.sh` ✅（全新 + 升级）。
+前端本轮零改动，无 `tsc`/`eslint`/`vitest` 影响面。
+
+### 8.6 台账
+
+§5.3 的动作清单已全部执行：`TODO.md`（G-43 结案、G-31 残余① 结案、陈旧的 G-33 结案，
+新增 **G-44**（已交付）与 **G-45**（登记不修））、`TRAPS.md` 新增 **T-55**（与 T-52 互引，
+明确**不重复** T-54）、`CHANGELOG.md` M29 条目 + 三条行为突变告知、
+`08-部署运维.md` §8.4.3 补「控制字符这一半」与审计列宽口径。

@@ -65,6 +65,48 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
   **「已登记、待独立模块」**，附实测边界表：`password=&SECRET` / `password=;SECRET` /
   `Authorization: Bearer "SECRET` 三条真漏，而 rev1 曾误判为漏的 `token="S` **实际不漏**。
 
+- **M29 不可信文本的日志 / 落库出口净化 — 一个真泄漏 + 两处静默丢行**（`399a627` 需求文档 rev2 →
+  `77ebf3c` A → `f858479` B → `0ab13b2` C → `fd7ff79` D/E → `bc6930a` F → `ef94e2a` G →
+  `2daae5a` 真 PG → `613e407` 补测试；方案 `docs/FIX-PLAN-LOG-INJECTION.md`）
+  — **A（`redact.StripControl` 收成唯一实现）**：控制字符净化此前在 `redact` / `notification` /
+  `handlers` 三处各写一遍（同一份判据三种写法），收成一个导出函数，另两处改为委托；`strings.Map`
+  按 rune 迭代顺带把非法字节换成 U+FFFD，PostgreSQL 22021 那一类一并关掉。
+  **B（G-43 `apierr` 5xx 日志行）**：`URL.Path` 是**解码后**的请求路径，`%0d%0a` 会变成真 CR/LF 落进来，
+  裸拼能向 `gin.DefaultErrorWriter` 伪造出与真实错误行**无从分辨**的第二行（CWE-117，真 socket 打 raw
+  请求行实测）→ 整行过 `StripControl`（method/path/code 全不可信），内层先 Strip 再 Text。
+  **C（G-44① 审计字段）**：`Path`/`RequestID` **完全不截断**（列宽 `varchar(500)`/`varchar(50)`），
+  `UserAgent`/`Username`/`Resource` 用按**字节**的 `truncate`；而 `RequestID` 列最窄、`AuditLog` 又挂在
+  **未认证**的 `POST /api/auth/login`（`routes.go:227`）→ 任意人发个超长 `X-Request-ID` 就让登录审计行
+  **静默消失**（22001 整行 INSERT 被拒），byte 截断把 `"中"*200` 切成半个汉字则撞 22021（同样丢行）。
+  改 `sanitizeField`（`StripControl` + 按 **rune** 截断到列宽 —— `varchar(n)` 数的是字符）五字段统一套用；
+  **不做 `redact.Text`**：审计字段是取证材料，脱敏会破坏证据价值。
+  **D/E（httpx / Zabbix 错误文本）**：`redactedErr.Error()` 与 Zabbix JSON-RPC 错误（HTTP 200，
+  不经 httpx）两个出口补 StripControl；`httpx` 注释写明覆盖面**只含 httpx 起源的错误**。
+  **F（G-44② `markFailed` 脱敏顺序 —— 真泄漏）**：原顺序 `redact.Text → stripControlChars` 是**反的**，
+  `password=abc\nDEF` 被遮成 `password=***\nDEF` 后删掉 `\n`，等于把**未遮盖的尾部接回**凭据串
+  （`pass\nword=SECRET` 更是整条泄漏）；同包 `sanitizeSnippet` 一直是对的 —— 同一判据两种写法。
+  改 Strip → Text → ToValidUTF8 → 按 rune 截断，并把"顺序不是安全边界"那句错误注释换成实测反例；
+  `worker.go` 三处日志出口的 `ch.Name` 一并净化（G-31 残余①，旧行号 144/150/157）。
+  **G（`timeparse` 日志 id）**：`logTimeUnusable` 的 `id` 是第三方可控字符串却用 `%s`（`log.Printf`
+  不转义）→ 改 `%q`。
+  验证：27 包全绿 + `vet`/`gofmt` 干净；真 PG 冒烟新增 `TestDBSmoke_AuditFieldTruncation`
+  （还原 `sanitizeField` 即复现修前的 `ERROR: value too long for type character varying(500)
+  (SQLSTATE 22001)` → 丢行；修后 `path=500 runes / request_id=50 runes` 且均为合法 UTF-8）；
+  变异 M29-MA/MB/MC1/MC2/MD/ME/MF/MF2/MG 全红在**断言**上（首版 B/C/D/E 四条因删掉调用后
+  `redact` 变成未使用 import 而**红在编译上**，按 T-31 改成可编译变异后重跑；MF2 首轮**存活** →
+  补 `TestHandleAlertEvent_无收件人日志不伪造行`，见 `613e407`）。
+  新 trap：T-55（安全控制的两半，**顺序**也是语义的一部分）。
+- ⚠️ **行为突变告知（M29，运维需知）**：① **超长路径的审计行从「丢失」变为「截断后入库」** ——
+  `path` 上限 **500 字符**（超出部分丢弃）、`request_id` 50、`user_agent` 500、`username` 100，
+  此前这些请求在审计链上是**空洞**，现在会留下截断记录（多字节字符按整字符截，不会再切出非法 UTF-8）。
+  ② `error_msg` 里被控制字符切开的凭据**从「尾部泄漏」变为「完整遮盖」** —— 若有用例/脚本匹配历史
+  `error_msg` 文本需复核。③ 登录路由带超长 `X-Request-ID` 的请求**开始正常留审计行**（此前静默不落库，
+  审计量的基线会上升）。
+- **M29 新登记（未修，非本轮引入）**：**G-45** —— `internal/integration/` 对第三方字段**零截断**，
+  超长即 22001，而 GORM 批插在同一事务里 → **整批回滚**（外在表现是「同步报成功但一条都没进来」），
+  与 G-44 同族但修法不同（要逐字段定义按字符截断 + 截断计数透出），独立一轮。**G-34/G-35**
+  仍为「已登记、待独立模块」（`redact` 规则 2/3 的值边界漏 + 规则 1 输出被规则 3 二次误伤）。
+
 ### 文档 (docs)
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）
