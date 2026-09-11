@@ -308,6 +308,17 @@ func TestText_修复项_引号与分隔符边界(t *testing.T) {
 		// F4：全角冒号（中文 IME 的默认冒号）。
 		{"L12 全角冒号", `password：SECRET`, `password：***`},
 		{"全角冒号 token", `token：SECRET`, `token：***`},
+		// 全角等号与全角冒号同源（中文输入法全角模式），收一个不收另一个是自相矛盾：
+		// 若只收 `：`，`password＝SECRET` 就是同一句话换个字符的明文。
+		{"全角等号", `password＝SECRET`, `password＝***`},
+		{"全角等号 token", `token＝SECRET`, `token＝***`},
+		// F4b：连续分隔符。只收一个分隔符时，多出来的那个落进值类把引号组挤空 —— 与 F2 的
+		// `password=""abc`（L10）是同一族的漏，F2 修了那个却留着这个就是自相矛盾。
+		// 差分跑 11520 组才现形：`password=="SECRET"` 此前 → `password=***"SECRET"`（明文）。
+		{"重复分隔符 + 引号形态", `password=="SECRET"`, `password=="***"`},
+		{"重复分隔符 + 分隔符起头", `password==&SECRET`, `password==***`},
+		// 行为突变（已告知）：键名后保留整段分隔符，此前是 `password=***`。遮盖性不变。
+		{"行为突变：连续分隔符整体保留", `password==SECRET`, `password==***`},
 		// F4 的代价（§6 行为突变②）：中文无词间空格，整句被吞。这条是**接受**的，写出来防止被当成 bug 又改回去。
 		{"行为突变：中文整句被吞（接受）", `重置 password：请联系管理员`, `重置 password：***`},
 	}
@@ -346,10 +357,59 @@ func TestText_修复项_URL端口保留与host凭据(t *testing.T) {
 		{"host 含 = 的非 http scheme", `redis://access_token=SECRET/0`, `<invalid-url>`},
 		{"err.Error() 里的 host 含 =", `Get "http://access_token=SECRET": dial tcp: timeout`,
 			`Get "<invalid-url>": dial tcp: timeout`},
+		// F3b 的拒绝集必须与规则 3 的分隔符类**同集**（F4 收全角，这里就得跟着收）：
+		// 只挡半角 `=` 的话，`http://access_token：SECRET/x` 这种「F4 会在纯文本里遮住、
+		// 却由 URL() 原样回显」的形状就留下来了 —— URL() 输出的形状必须自己就可信。
+		{"host 含全角冒号", `http://access_token：SECRET/x`, `<invalid-url>`},
+		{"host 含全角等号", `http://access_token＝SECRET/x`, `<invalid-url>`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
+// TestText_修复项_值本身是一个URL — F3 分段的**净回归**修复（M30 审计两路独立报出）。
+//
+// 缺陷机制：分段把 URL 从规则 3 的视野里拿走。旧版是三次 ReplaceAll 顺序执行，规则 3
+// 看得见规则 1 的**输出**（一个塌缩后的 URL），于是 `<敏感键>=<URL>` 的值被整段吞成 `***`；
+// 分段后非 URL 段只剩悬空的 `password=`（无值 → 不匹配），URL 段又只过 URL()，
+// 这个值就退回明文：`password=https://example.com` → `password=https://example.com`。
+//
+// 修法不是「让规则 3 再看 URL」，而是**这种形态不切分**：段尾停在凭据前缀上时，
+// 紧跟的 URL 就是那个值，让它留在非 URL 段里被规则 2/3 连值一起吞（见 danglingCredRe）。
+// 所以这组用例同时钉住两件事：值被整体遮盖、且遮盖后**不留 host 残影**。
+func TestText_修复项_值本身是一个URL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"键值形态的值是 https URL", `password=https://example.com`, `password=***`},
+		{"键值形态的值是 http URL 带端口", `token=http://token:8080/x`, `token=***`},
+		{"JSON 里的 URL 值", `{"password":"https://s.com","user":"a"}`, `{"password":"***","user":"a"}`},
+		{"值带 query 的 URL", `access_token=https://example.com/x?token=SECRET`, `access_token=***`},
+		{"URL 带 userinfo", `password: https://user:pw@host/x`, `password: ***`},
+		{"scheme-relative URL 值", `secret=//example.com/x`, `secret=***`},
+		{"值被引号包裹的 URL", `password="http://x.com"`, `password="***"`},
+		{"值以分隔符开头的 URL", `password=&http://x.com`, `password=***`},
+		{"Bearer 的值是 URL", `Authorization: Bearer http://SECRET/x`, `Authorization: Bearer ***`},
+		// 下面三行是**第二族**净回归（差分跑 11520 组才现形，第一版修法漏了它们）：
+		// 重复分隔符与「值中间没有空白」时，前缀模式与规则 3 的值类不同集 → 退回明文。
+		{"重复分隔符", `password==http://SECRET/x`, `password==***`},
+		// `=` 落在值类里（值类只排除空白/引号/&,;），所以它跟着值一起被替换掉。
+		{"冒号加等号", `token:=http://SECRET/x`, `token:=***`},
+		{"值中间无空白", `password=abc$http://SECRET/x`, `password=***`},
+		// 反向守门：前缀不在段尾（后面还有别的字符）时**不该**因此改变既有行为。
+		{"值不是 URL 时不受影响", `password=abc http://host:8080/x`, `password=*** http://host:8080`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := Text(c.in)
+			assert.Equal(t, c.want, out)
+			// 无论哪种形态，值里的凭据都不许以任何残片形式留下。
+			assert.NotContains(t, out, "SECRET", "值里的凭据不得留残影")
 		})
 	}
 }

@@ -37,7 +37,12 @@ func URL(raw string) string {
 	// 主机的形态，而是「key=value 被 URL 吞掉」的典型形状（`http://access_token=SECRET`）。
 	// 这条是 Text 分段（F3）的**必要条件**：分段后 URL 段不再过规则 3，URL() 的输出必须
 	// 自己保证「不含凭据形状」，否则分段会把现状遮住的串变成明文。
-	if strings.Contains(u.Host, "=") {
+	//
+	// 判据必须与规则 3 的分隔符类**同集**：F4 收了全角 `：`/`＝`，这里就得跟着收。
+	// 不同集的后果不是「少遮一点」而是自相矛盾——`access_token：SECRET` 在纯文本里遮、
+	// 被 URL 吞进 host 就原样回显（`http://access_token：SECRET/x`）。半角 `:` 不在内：
+	// 它是端口分隔符（`host:8080`），host 里合法；`host:` 尾冒号由上面那条判据管。
+	if strings.ContainsAny(u.Host, "=＝：") {
 		return invalidURL
 	}
 	return u.Scheme + "://" + u.Host
@@ -84,11 +89,37 @@ var (
 	//     只吞 token 会把 `password=&next=SECRET` 变成 `password=&***=SECRET`：吃掉了
 	//     下一个键名却把它的值留成明文，那是新引入的泄漏面。代价见 Text 的注释。
 	//
-	// M30-F4：分隔符补全角冒号 `：`（中文 IME 打冒号默认输出它，中文语境里手敲的
-	// `token：xxx` 是常态）。代价：中文没有词间空格，`重置 password：请联系管理员`
-	// 会整句被吞成 `重置 password：***`——与「吞到空白」同一类代价、同一套价值排序。
-	kvSecretRe = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[-_])*(?:access[-_]?token|access[-_]?key|token|secret|password|passwd|pwd|api[-_]?key|apikey|app[-_]?secret|user[-_]?token|sign)(?:[-_][a-z0-9]+)*["']?\s*[:=：]\s*)(["']*)(?:[&,;][^\s]*|[^\s"'&,;]+)`)
+	// M30-F4：分隔符补全角 `：` 与 `＝`（中文 IME 全角模式的默认输出，中文语境里手敲的
+	// `token：xxx` 是常态）。两个字符同源，收一个不收另一个是自相矛盾——只收 `：` 的话，
+	// `password＝SECRET` 就是同一句话换个字符的明文。代价：中文没有词间空格，
+	// `重置 password：请联系管理员` 会整句被吞成 `重置 password：***`——与「吞到空白」
+	// 同一类代价、同一套价值排序。
+	//
+	// M30-F4b：分隔符量词 `+`（连续分隔符整体算分隔符）。只收一个字符时，`password==`
+	// 的第二个 `=` 会落进值类把引号组挤空，于是 `password=="SECRET"` → `password=***"SECRET"`
+	// ——与 F2 要修的 `password=""abc` 是同一族的漏（都是「引号组没吃到引号」），
+	// F2 修了后者却留着前者就是自相矛盾。代价：键名后保留整段分隔符（`password==***`，
+	// 此前是 `password=***`），属观感差异，遮盖性不变。
+	kvSecretRe = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[-_])*(?:access[-_]?token|access[-_]?key|token|secret|password|passwd|pwd|api[-_]?key|apikey|app[-_]?secret|user[-_]?token|sign)(?:[-_][a-z0-9]+)*["']?\s*[:=：＝]+\s*)(["']*)(?:[&,;][^\s]*|[^\s"'&,;]+)`)
 )
+
+// 哨兵：一个必定属于规则 2/3 值类的普通字符（字母既不被值类排除，也不是分隔符或引号）。
+// 所以「真实 URL 的首字符」与它同属值类——用哨兵试探与真实情形同判。
+const sentinel = "x"
+
+// eatsFollowing 判断规则 2/3 会不会把**紧跟在这段文本之后**的内容吃成自己的值
+// （`password=` 后面直接跟 URL、`Bearer ` 后面直接跟 URL 等）。
+//
+// 判据是**问规则本身**，不另写「凭据前缀」模式：把哨兵接在段尾过一遍规则，
+// 值类被吃满时替换结果的结尾必然是 `***`（哨兵不是值类排除项，没被吃则输出以哨兵收尾）。
+//
+// 为什么不用模式：M30 的净回归有**两族**——`password=https://…`（前缀模式漏了引号形态）
+// 与 `password==https://…`（漏了重复分隔符）。两族同源：凡「另写一份前缀模式」，
+// 它就得与规则 2/3 逐字同集，差一个字符就有一族形态从 `***` 退回明文。共用规则本身，
+// 漏的只会是规则漏的，不会更多。
+func eatsFollowing(seg string) bool {
+	return strings.HasSuffix(redactKeyValues(seg+sentinel), "***")
+}
 
 // Text 把文本里的凭据值替换为 ***：
 //  1. URL 形状子串 → scheme://host（覆盖 path / query / userinfo 里的 token）
@@ -102,8 +133,12 @@ var (
 // 信息。分段让「规则 3 知道自己在不在 URL 里」由**结构**保证，不靠模式匹配去猜：
 // 用「回看 `://` 就跳过规则 3」的写法，`://access_token=SECRET` 会变成明文（见测试）。
 //
+// 唯一的例外是「值本身就是一个 URL」（`password=https://…`、`Bearer http://…`）：规则 2/3
+// 本来就该越过这个 URL 的起点继续吃值，此时不切分，让它们连值一起吞 —— 见 eatsFollowing。
+//
 // 分段依赖的不变式：**URL() 的输出不含凭据形状**。path/query/userinfo 由塌缩丢弃，
-// host 里的 `=` 由 F3b 挡掉 —— 改 URL() 时若放宽这两点，分段就会退化成泄漏。
+// host 里的键值分隔符（`=`/`＝`/`：`）由 F3b 挡掉 —— 改 URL() 时若放宽这两点，
+// 分段就会退化成泄漏。
 //
 // 不含敏感内容时原样返回。
 func Text(s string) string {
@@ -113,7 +148,19 @@ func Text(s string) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range urlRe.FindAllStringIndex(s, -1) {
-		b.WriteString(redactKeyValues(s[last:loc[0]]))
+		seg := s[last:loc[0]]
+		// 例外：值本身就是一个 URL 的形态 —— 规则 2/3 会越过这个 URL 起点继续吃值
+		//（`password=https://…`、`password==https://…`、`password="https://…`、
+		// `Bearer http://…`）。这一刀不能切：切了非 URL 段就只剩悬空的键名（没有值 →
+		// 规则 3 不匹配），URL 段又只过 URL()，整个值退回明文（`password=***` →
+		// `password=https://example.com`，审计两路独立报出的净回归）。
+		// 旧版是三次 ReplaceAll，「规则 3 看得见规则 1 的输出」把它偶然兜住了；分段拆掉了
+		// 那个副作用，所以要显式补回：不切分即让 URL 留在非 URL 段里被连值一起吞。
+		// 判据用 eatsFollowing（问规则本身），不另写前缀模式——理由见该函数。
+		if eatsFollowing(seg) {
+			continue
+		}
+		b.WriteString(redactKeyValues(seg))
 		b.WriteString(URL(s[loc[0]:loc[1]]))
 		last = loc[1]
 	}
