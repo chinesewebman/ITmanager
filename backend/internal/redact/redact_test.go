@@ -274,6 +274,101 @@ func TestText_已知残余_钉住(t *testing.T) {
 	}
 }
 
+// TestText_修复项_引号与分隔符边界 — M30 §1.1 的 L1–L12（F1 / F2 / F4）。
+//
+// 这些用例在改 redact.go 之前**全是红的**（§5.1 的「用例真的钉住了缺陷」证明）。
+func TestText_修复项_引号与分隔符边界(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// F1：规则 2 的值类补「任意个起始引号」。L1 是本次最重要的修正 ——
+		// 闭合引号的凭据（从配置文件复制粘贴出来的常态）此前整条明文。
+		{"L1 闭合双引号", `Authorization: Bearer "SECRET"`, `Authorization: Bearer ***"`},
+		{"L2 小写 bearer", `authorization: bearer "SECRET"`, `authorization: bearer ***"`},
+		{"L3 两个空格", "Authorization: Bearer  \"SECRET\"", "Authorization: Bearer  ***\""},
+		{"L4 Tab 分隔", "Authorization: Bearer\t\"SECRET\"", "Authorization: Bearer\t***\""},
+		{"L5 未闭合双引号", `Authorization: Bearer "SECRET`, `Authorization: Bearer ***`},
+		{"L6 未闭合单引号", `Authorization: Bearer 'SECRET`, `Authorization: Bearer ***`},
+		{"两个引号（量词用 * 而非 ?）", `Authorization: Bearer ""SECRET`, `Authorization: Bearer ***`},
+		// 引号内含空格：现状整条明文，修后至少遮住首段（尾部残留见 §6 残余表）。
+		{"引号内含空格", `Authorization: Bearer "SECRET VALUE"`, `Authorization: Bearer *** VALUE"`},
+		// F2：规则 3 的值类补「起引号」（捕获回写）与「起分隔符」（吞到空白）。
+		{"L7 值以 & 开头", `password=&SECRET`, `password=***`},
+		{"L8 值以 ; 开头", `password=;SECRET`, `password=***`},
+		{"L9 值以 , 开头", `password=,SECRET`, `password=***`},
+		{"L10 两个起引号", `password=""abc`, `password=""***`},
+		{"L11 空格后单双引号", `password= '"SECRET'`, `password= '"***'`},
+		{"三个起引号", `password='''SECRET`, `password='''***`},
+		{"空值也遮（无泄漏）", `password=&`, `password=***`},
+		// 「吞到空白」而不是「只吞一个 token」：否则会吃掉下一个键名却留下它的值。
+		{"吞到空白，不产生 =SECRET 明文", `password=&next=SECRET`, `password=***`},
+		{"行为突变：值以分隔符开头时吃掉后续参数", `?a=1&password=&b=2`, `?a=1&password=***`},
+		// F4：全角冒号（中文 IME 的默认冒号）。
+		{"L12 全角冒号", `password：SECRET`, `password：***`},
+		{"全角冒号 token", `token：SECRET`, `token：***`},
+		// F4 的代价（§6 行为突变②）：中文无词间空格，整句被吞。这条是**接受**的，写出来防止被当成 bug 又改回去。
+		{"行为突变：中文整句被吞（接受）", `重置 password：请联系管理员`, `重置 password：***`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
+// TestText_修复项_URL端口保留与host凭据 — M30 §1.2 的 G-35 全谱（F3 + F3b）。
+//
+// F3：URL 段只过 URL()，规则 3 不再把 `host:port` 的端口当键值吃掉。
+// F3b：分段的必要条件是「URL() 的输出不含凭据形状」—— host 里的 `=` 是缺口，
+// 不加 F3b 就是净回归（现状遮住 → 分段后明文）。
+func TestText_修复项_URL端口保留与host凭据(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"敏感词当 host：端口保留", `http://token:8080/x`, `http://token:8080`},
+		{"无路径也保留端口", `http://secret:8080`, `http://secret:8080`},
+		{"带连字符前缀的 host", `http://my-token:8080/x`, `http://my-token:8080`},
+		{"非 http scheme", `redis://pwd:6379/0`, `redis://pwd:6379`},
+		{"下划线组合的 host", `http://access_token:8080/x`, `http://access_token:8080`},
+		{"query 里的 token 随塌缩一起丢", `https://pwd:443/a?token=abc`, `https://pwd:443`},
+		{"端口与 query 同时存在", `http://token:8080/x?password=SECRET`, `http://token:8080`},
+		{"URL 段与非 URL 段并存", `http://token:8080/x password=abc&y=1`, `http://token:8080 password=***&y=1`},
+		{"中文与 URL 混排", `中文前缀 http://token:8080/x 中文后缀 password=SECRET`,
+			`中文前缀 http://token:8080 中文后缀 password=***`},
+		// F3b：host 本身是 `key=value` 形态 → 不是真实主机，按 invalidURL 处置
+		//（与既有的 `host:` 尾冒号判据同构：宁可丢信息，也不回显原串）。
+		{"host 含 = 的绝对 URL", `http://access_token=SECRET`, `<invalid-url>`},
+		{"host 含 = 且带端口", `http://access_token=SECRET:8080/x`, `<invalid-url>`},
+		{"host 含 = 的非 http scheme", `redis://access_token=SECRET/0`, `<invalid-url>`},
+		{"err.Error() 里的 host 含 =", `Get "http://access_token=SECRET": dial tcp: timeout`,
+			`Get "<invalid-url>": dial tcp: timeout`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
+// TestText_URL段不参与规则23 — §5.2 的守门用例（防回归，独立于修复项）。
+//
+// 若有人把 Text 改回「三次 ReplaceAll 顺序执行」，端口会重新消失；
+// 若有人改用「回看 :// 就跳过规则 3」，后两条会变成明文。两种退化都在这里红。
+func TestText_URL段不参与规则23(t *testing.T) {
+	// 三段拼接：URL 段（含敏感词 host）、协议残缺段、host 含 = 段。
+	out := Text(`http://token:8080/x | ://access_token=SECRET | http://access_token=SECRET`)
+	assert.Contains(t, out, `http://token:8080`, "URL 段的端口必须保留（规则 3 不得看见 URL）")
+	assert.Contains(t, out, `://access_token=***`, "协议残缺段不是 URL，规则 3 必须照常遮盖")
+	assert.NotContains(t, out, "SECRET", "host 含 = 的形态不得回显原串")
+
+	// userinfo 由塌缩直接丢弃，不依赖规则 3。
+	assert.Equal(t, `http://host`, Text(`http://user:pass@host/x`))
+}
+
 // ==================== StripControl ====================
 
 func TestStripControl_删控制字符保留可打印(t *testing.T) {

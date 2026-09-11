@@ -33,6 +33,13 @@ func URL(raw string) string {
 	if strings.HasSuffix(u.Host, ":") {
 		return invalidURL
 	}
+	// M30-F3b：host 里的 `=` 同理。它虽是 RFC 3986 reg-name 的合法字符，却不是任何真实
+	// 主机的形态，而是「key=value 被 URL 吞掉」的典型形状（`http://access_token=SECRET`）。
+	// 这条是 Text 分段（F3）的**必要条件**：分段后 URL 段不再过规则 3，URL() 的输出必须
+	// 自己保证「不含凭据形状」，否则分段会把现状遮住的串变成明文。
+	if strings.Contains(u.Host, "=") {
+		return invalidURL
+	}
 	return u.Scheme + "://" + u.Host
 }
 
@@ -50,7 +57,13 @@ var (
 
 	// 规则 2：Authorization: Bearer|Basic <cred>。值类只以空白/引号为界——值里的
 	// `,`/`;` 也是凭据的一部分（审计 P1：`Bearer abc,def` 旧版只抹掉 `abc`）。
-	authHeaderRe = regexp.MustCompile(`(?i)(\bauthorization\s*:\s*(?:bearer|basic)\s+)[^\s"']+`)
+	//
+	// M30-F1：起始引号并入值类。旧版要求值首字符非引号，于是**闭合引号**的凭据
+	// （`Bearer "SECRET"`，从配置文件复制粘贴出来的常态）整条不匹配 = 完全不脱敏；
+	// 「未闭合」与否无关，是同一个值类的两种表现。引号用 `*` 而不是 `?`：上界不是安全
+	// 边界，没有理由定在 1（`Bearer ""SECRET` 同样要遮）。起始引号吃掉后不回写，
+	// 故闭合引号的**尾部**会留下（`Bearer ***"`）—— 吃尾引号要多一个分支，收益只是观感。
+	authHeaderRe = regexp.MustCompile(`(?i)(\bauthorization\s*:\s*(?:bearer|basic)\s+)["']*([^\s"']+)`)
 
 	// 规则 3：键值形态（query / JSON / YAML 冒号）。名字允许 `前缀_`/`后缀` 组合
 	// （smtp_password、x-webhook-secret、access_key_id），但**不收裸 key** —— 那会误伤
@@ -59,8 +72,22 @@ var (
 	//
 	// 值类只以「空白 / 引号 / query 分隔符 &,;」为界：`}` `]` `<` `>` 不收窄，否则
 	// `{"password":"ab}c"}` 会漏掉尾部 `}c`、`password=}SECRET` 干脆不匹配（审计 P1）。
-	// 残余：值**以** `&`/`,`/`;` 开头时不匹配（见 §6 登记）。
-	kvSecretRe = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[-_])*(?:access[-_]?token|access[-_]?key|token|secret|password|passwd|pwd|api[-_]?key|apikey|app[-_]?secret|user[-_]?token|sign)(?:[-_][a-z0-9]+)*["']?\s*[:=]\s*)(["']?)([^\s"'&,;]+)`)
+	//
+	// M30-F2：值类的两个缺口。
+	//   - **起引号**（`(["']*)`，捕获组）：旧版 `(["']?)` 只吃 0/1 个，`password=""abc`
+	//     与 `password= '"SECRET'` 整条不匹配 = 完全不脱敏。捕获组必须**回写**
+	//     （`${1}${2}***`）—— 写成非捕获会改掉 `password="SECRET"` → `password=***"`，
+	//     破坏「引号形态保留」这个既有契约（redact_test.go 的边界锁定用例钉着）。
+	//     量词用 `*` 而非 `{0,2}`：没有理由给引号定上界。
+	//   - **起分隔符**（`[&,;][^\s]*`）：旧版值**以** `&`/`,`/`;` 开头时整条不匹配
+	//     （`password=&SECRET` 明文）。吞到**下一个空白**而不是「只吞一个 token」——
+	//     只吞 token 会把 `password=&next=SECRET` 变成 `password=&***=SECRET`：吃掉了
+	//     下一个键名却把它的值留成明文，那是新引入的泄漏面。代价见 Text 的注释。
+	//
+	// M30-F4：分隔符补全角冒号 `：`（中文 IME 打冒号默认输出它，中文语境里手敲的
+	// `token：xxx` 是常态）。代价：中文没有词间空格，`重置 password：请联系管理员`
+	// 会整句被吞成 `重置 password：***`——与「吞到空白」同一类代价、同一套价值排序。
+	kvSecretRe = regexp.MustCompile(`(?i)(\b(?:[a-z0-9]+[-_])*(?:access[-_]?token|access[-_]?key|token|secret|password|passwd|pwd|api[-_]?key|apikey|app[-_]?secret|user[-_]?token|sign)(?:[-_][a-z0-9]+)*["']?\s*[:=：]\s*)(["']*)(?:[&,;][^\s]*|[^\s"'&,;]+)`)
 )
 
 // Text 把文本里的凭据值替换为 ***：
@@ -68,12 +95,34 @@ var (
 //  2. Authorization: Bearer|Basic 的值
 //  3. access_token=… / "password":"…" 这类键值形态的值（保留键名，便于定位）
 //
+// **规则 1 与规则 2/3 不叠加（M30-F3）**：文本先按 URL 匹配切成「URL 段 / 非 URL 段」，
+// URL 段只过 URL()，非 URL 段才过规则 2/3。旧版是三次 ReplaceAll 顺序执行，于是规则 3
+// 会看见规则 1 的**输出**，把 `scheme://host:port` 的端口当键值吃掉
+// （`http://token:8080/x` → `http://token:***`，G-35）——丢的正是规则 1 想保住的主机定位
+// 信息。分段让「规则 3 知道自己在不在 URL 里」由**结构**保证，不靠模式匹配去猜：
+// 用「回看 `://` 就跳过规则 3」的写法，`://access_token=SECRET` 会变成明文（见测试）。
+//
+// 分段依赖的不变式：**URL() 的输出不含凭据形状**。path/query/userinfo 由塌缩丢弃，
+// host 里的 `=` 由 F3b 挡掉 —— 改 URL() 时若放宽这两点，分段就会退化成泄漏。
+//
 // 不含敏感内容时原样返回。
 func Text(s string) string {
 	if s == "" {
 		return s
 	}
-	s = urlRe.ReplaceAllStringFunc(s, URL)
+	var b strings.Builder
+	last := 0
+	for _, loc := range urlRe.FindAllStringIndex(s, -1) {
+		b.WriteString(redactKeyValues(s[last:loc[0]]))
+		b.WriteString(URL(s[loc[0]:loc[1]]))
+		last = loc[1]
+	}
+	b.WriteString(redactKeyValues(s[last:]))
+	return b.String()
+}
+
+// redactKeyValues 规则 2/3：作用于**不含 URL** 的文本段（见 Text 的分段说明）。
+func redactKeyValues(s string) string {
 	s = authHeaderRe.ReplaceAllString(s, "${1}***")
 	s = kvSecretRe.ReplaceAllString(s, "${1}${2}***")
 	return s
