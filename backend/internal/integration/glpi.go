@@ -154,11 +154,19 @@ func (t *GLPITicket) GetPriorityName() string {
 }
 
 func (t *GLPITicket) ConvertToTicket() *LocalTicket {
-	statusMap := map[int]string{1: "open", 2: "in_progress", 3: "pending", 4: "resolved", 5: "closed"}
+	// M26/D-1：补 6（GLPI「待批准」，与 GetStatusName 的「待批准」对应）。
+	// 取值必须在 openapi Ticket.status 的 enum 内（open/in_progress/pending/resolved/closed）
+	// —— GLPI 6 没有独立的本地语义，归入 pending（等待批准 == 等待）。
+	// 缺这个键时 status=6 会落空串，进而被同步循环当「越界」跳过 —— 整类票静默不入库。
+	statusMap := map[int]string{1: "open", 2: "in_progress", 3: "pending", 4: "resolved", 5: "closed", 6: "pending"}
 	// M16：取值必须是 openapi Ticket.priority 的词表（low/normal/high/critical）。
 	// 原先是 medium —— 与契约和手工建单表单用的 normal 是同一个「普通」的两套拼法，
 	// 导致工单页按「普通」筛选查不到这些票。迁移 000023 已把存量 medium 归一为 normal。
-	priorityMap := map[int]string{1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical"}
+	//
+	// M26/D-1：补 0（GLPI「未指定优先级」），归入 normal —— 与手工建单表单默认值一致。
+	// 越界（∉ 0..6）**不在此处兜底**，由调用方按 D-1 跳过该票并计数
+	// （判据是词表命中，见 service.go 的 SyncFromGLPI，不是硬编码数值范围）。
+	priorityMap := map[int]string{0: "normal", 1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical"}
 	return &LocalTicket{
 		ExternalID:  fmt.Sprintf("%d", t.ID),
 		Title:       t.Name,

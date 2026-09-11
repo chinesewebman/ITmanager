@@ -195,14 +195,14 @@ log "① 全新安装路径: migrate.Up 从零建库 + 核心链路 (build tag: 
 log "   TEST_DATABASE_URL=postgres://${DB_USER}:***@127.0.0.1:${HOST_PORT}/${DB_NAME}"
 ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$FRESH_DSN" "$GO_BIN" test \
     -tags dbsmoke -count=1 -v \
-    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_MigrationNoSessionGUCLeak|TestDBSmoke_AssetJSONBDefaults|TestDBSmoke_NetBoxUpsert|TestDBSmoke_NotificationPendingIndex|TestDBSmoke_AlertsProblemStartIndex|TestDBSmoke_AlertsTriggerIDIndex|TestDBSmoke_TicketsExternalIDIndex|TestDBSmoke_AssetsNameIndex|TestDBSmoke_AuditLogsPathIndex|TestDBSmoke_AlertBulkTransitionGuards|TestDBSmoke_AlertStatusDefault|TestDBSmoke_TicketHistory|TestDBSmoke_TicketResolvedAt' \
+    -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_TicketInsert|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_MigrationNoSessionGUCLeak|TestDBSmoke_AssetJSONBDefaults|TestDBSmoke_NetBoxUpsert|TestDBSmoke_NotificationPendingIndex|TestDBSmoke_AlertsProblemStartIndex|TestDBSmoke_AlertsTriggerIDIndex|TestDBSmoke_TicketsExternalIDIndex|TestDBSmoke_AssetsNameIndex|TestDBSmoke_AuditLogsPathIndex|TestDBSmoke_AlertBulkTransitionGuards|TestDBSmoke_AlertStatusDefault|TestDBSmoke_TicketHistory|TestDBSmoke_TicketResolvedAt|TestDBSmoke_TicketsGLPIExternalIDUnique|TestDBSmoke_GLPITimeZoneWallClock' \
     ./tests/ ) || rc=$?
 
 if [[ "$rc" -eq 0 ]]; then
   log "② 存量升级路径: 只应用 000013 之后的迁移, 校验 role/jsonb 回填 + 回滚不丢旧列"
   ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$UPGRADE_DSN" SMOKE_EXPECT_UPGRADE=1 "$GO_BIN" test \
       -tags dbsmoke -count=1 -v \
-      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_TicketPriorityNormalize|TestDBSmoke_DownPreservesLegacyColumns' ./tests/ ) || rc=$?
+      -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_TicketPriorityNormalize|TestDBSmoke_DownPreservesLegacyColumns|TestDBSmoke_Migration026BlockedByDuplicates' ./tests/ ) || rc=$?
 fi
 
 if [[ "$rc" -eq 0 ]]; then

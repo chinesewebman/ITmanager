@@ -61,16 +61,57 @@ func (t *Ticket) BeforeCreate(tx *gorm.DB) error {
 //
 // 已在 tickets[i].TicketNumber 里填了号的行走 BeforeCreate 的逃生门
 // （TicketNumber != "" 时不覆盖），原样保留、不占用本批的自动序号。
+//
+// M26/D-9：按「当天已占用的标签集合」分配并跳过空洞，而不是按条数线性推进。
+// 条数法只在编号连续时成立 —— 一旦出现空洞，条数会小于最大序号，回绕后撞上已占用的号。
+//
+// M26 引入了一个新的空洞来源：SyncFromGLPI 的 ON CONFLICT DoNothing 在
+// 「预查之后、插入之前」有并发同步插了同一 external_id 时会跳过该行，
+// 而它的号已经分配掉了。后果不是丢一张票，而是**当天后续每次 GLPI 同步都 500**
+// （撞 ticket_number 唯一索引，跨天自愈，运维无自助恢复手段）。
+//
+// 边界：本函数**不解决并发**。两个同步各自读到同一份 used 快照仍会撞号，
+// 那条路径由 ticket_number 唯一索引 + TicketService.Create 的重试兜底
+// （需求 §1.5 已登记为超范围）。本函数只保证「已有空洞不会导致重号」。
 func AssignTicketNumbers(db *gorm.DB, tickets []Ticket) {
 	prefix := ticketNumberPrefix()
-	next := nextTicketSeq(db, prefix)
+	used := usedTicketLabels(db, prefix)
+
+	// 逃生门行也要占位：否则同一批里「已填号 = TICKET-今天-A」与自动分配会各自拿到 A，
+	// 整批被 ticket_number 唯一索引拒绝。旧法同样有此洞，顺手关掉。
+	for i := range tickets {
+		if n := tickets[i].TicketNumber; n != "" {
+			used[n] = struct{}{}
+		}
+	}
+
+	next := int64(0)
 	for i := range tickets {
 		if tickets[i].TicketNumber != "" {
 			continue
 		}
-		tickets[i].TicketNumber = prefix + seqLabel(next)
-		next++
+		// used 有限、next 单调增、seqLabel 无界 → 必然终止。
+		for {
+			label := prefix + seqLabel(next)
+			next++
+			if _, taken := used[label]; !taken {
+				used[label] = struct{}{}
+				tickets[i].TicketNumber = label
+				break
+			}
+		}
 	}
+}
+
+// usedTicketLabels 取当天已占用的工单号集合（含空洞）。
+func usedTicketLabels(db *gorm.DB, prefix string) map[string]struct{} {
+	var nums []string
+	db.Model(&Ticket{}).Where("ticket_number LIKE ?", prefix+"%").Pluck("ticket_number", &nums)
+	used := make(map[string]struct{}, len(nums))
+	for _, n := range nums {
+		used[n] = struct{}{}
+	}
+	return used
 }
 
 // generateTicketNumber 生成工单号 TICKET-YYYYMMDD-<序号>，只用于**逐条** Create。

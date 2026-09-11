@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
@@ -184,6 +185,15 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 			continue // 跳过已存在（避免重复）
 		}
 		alert := t.ConvertToAlert()
+		// M26：problem_start 取 Zabbix 的 lastchange（故障实际开始时刻），不是同步时刻。
+		// 不写这一列会让告警列表有数据、而全部基于 problem_start 的 KPI/SLA 恒空
+		// —— 静默的空，前端也不渲染该列，看不出来（需求 §1.2、§2.3）。
+		// D-8：created_at 仍保持 now（入库时刻），两列语义不同，不要合并。
+		problemStart, st := parseUnixSeconds(t.LastChange)
+		if st != timeOK {
+			logTimeUnusable("Zabbix trigger", t.TriggerID, "lastchange", t.LastChange, st)
+			problemStart = now
+		}
 		toInsert = append(toInsert, models.Alert{
 			TriggerID:    t.TriggerID,
 			HostName:     alert.HostName,
@@ -191,6 +201,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 			Problem:      alert.Problem,
 			Severity:     alert.Severity,
 			SeverityName: alert.SeverityName,
+			ProblemStart: problemStart,
 			Status:       "problem",
 			Source:       "zabbix",
 			CreatedAt:    now,
@@ -213,13 +224,16 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 }
 
 // SyncFromGLPI 从 GLPI 同步工单（C-P6 + C-P7）。
-func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
+//
+// 返回 (synced, skipped, err)：skipped 是档位越界被跳过的条数（M26/D-1、D-6）。
+// 单独计数并透出，是因为「静默丢票」比「同步报错」更难发现 —— 报错有人看，少几张没人看。
+func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped int, err error) {
 	tickets, err := s.glpi.GetTickets(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(tickets) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	externalIDs := make([]string, 0, len(tickets))
@@ -230,7 +244,7 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 	if err := database.DB.WithContext(ctx).
 		Where("external_id IN ?", externalIDs).
 		Find(&existing).Error; err != nil {
-		return 0, fmt.Errorf("GLPI 已存在查询失败: %w", err)
+		return 0, 0, fmt.Errorf("GLPI 已存在查询失败: %w", err)
 	}
 	existingSet := make(map[string]struct{}, len(existing))
 	for _, e := range existing {
@@ -242,9 +256,28 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 	for _, t := range tickets {
 		local := t.ConvertToTicket()
 		if _, ok := existingSet[local.ExternalID]; ok {
-			continue // 工单状态走 PATCH 更新，不在同步阶段覆盖
+			// 已存在：按 ADR-0004，ITmanager 是工单 SoT、GLPI 降级为可选只读参考，
+			// 不在同步阶段覆盖本地状态（这是设计，不是缺口）。全仓无 PATCH 路由。
+			continue
 		}
-		toUpsert = append(toUpsert, models.Ticket{
+		// M26/D-1：越界档位不兜底、不静默改写 —— 跳过并计数，由调用方暴露给运维。
+		// 判据是**词表命中**（ConvertToTicket 对越界值留空串），不是硬编码数值范围：
+		// 词表是契约的投影，改了契约这里自动跟上。
+		if local.Status == "" || local.Priority == "" {
+			skipped++
+			log.Printf("M26: GLPI 工单 %s 档位越界（status=%d priority=%d），已跳过",
+				local.ExternalID, t.Status, t.Priority)
+			continue
+		}
+
+		// M26：created_at 取 GLPI 的 date（工单实际创建时刻），不是同步时刻。
+		created, st := parseGLPITime(local.CreatedAt)
+		if st != timeOK {
+			logTimeUnusable("GLPI 工单", local.ExternalID, "date", local.CreatedAt, st)
+			created = now // created_at 是 NOT NULL 非指针列，没有 NULL 语义，只能回落
+		}
+
+		nt := models.Ticket{
 			ExternalID:  local.ExternalID,
 			Title:       local.Title,
 			Description: local.Description,
@@ -252,27 +285,85 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (int, error) {
 			Priority:    local.Priority,
 			TicketType:  local.TicketType,
 			Source:      "glpi",
-			CreatedAt:   now,
+			CreatedAt:   created,
 			UpdatedAt:   now,
-		})
+		}
+
+		// M26/D-2：导入**不发明时间**。源缺失或解析失败 → 保持 NULL，**不回落 now**。
+		// 补 now 会伪造事件：diagnostic_service.go 只看这两个指针是否非空、不看 status，
+		// 会凭空长出一条「工单已解决/已关闭」的时间线记录，并污染 dashboard 的 SLA 窗口。
+		// 源说「没有这个时间」是合法状态（票还没解决/还没关闭），必须原样保留为 NULL。
+		if local.Status == "resolved" || local.Status == "closed" {
+			if v, st := parseGLPITime(local.ResolvedAt); st == timeOK {
+				nt.ResolvedAt = &v
+			} else {
+				logTimeUnusable("GLPI 工单", local.ExternalID, "solvedate", local.ResolvedAt, st)
+			}
+		}
+		if local.Status == "closed" {
+			if v, st := parseGLPITime(local.ClosedAt); st == timeOK {
+				nt.ClosedAt = &v
+			} else {
+				logTimeUnusable("GLPI 工单", local.ExternalID, "closedate", local.ClosedAt, st)
+			}
+		}
+
+		toUpsert = append(toUpsert, nt)
 	}
 
 	if len(toUpsert) == 0 {
-		return 0, nil
+		return 0, skipped, nil
 	}
 	// 批量插入前显式分配工单号（TODO G-25）：CreateInBatches 会把整批的 BeforeCreate
 	// 都在 INSERT 之前跑完，每行各自按「当天条数」算号 → 整批同一个号 →
 	// tickets.ticket_number 唯一索引整批拒绝（一次新增 ≥2 张票的同步全失败）。
+	// 留在事务外：它只读当天已用标签，与下面的插入不构成同一个一致点。
 	models.AssignTicketNumbers(database.DB.WithContext(ctx), toUpsert)
 
-	// 不加 ON CONFLICT：工单已存在时上面已跳过（状态更新走 PATCH），且 tickets.external_id
-	// 上没有唯一索引 —— 加了只会在真 PG 上 42P10 失败（见 docs/FIX-PLAN-NETBOX-UPSERT.md §1.2）。
-	if err := database.DB.WithContext(ctx).
-		CreateInBatches(toUpsert, 100).Error; err != nil {
-		return 0, fmt.Errorf("GLPI 批量插入失败: %w", err)
+	// M26/D-4：迁移 000026 建了部分唯一索引 uq_tickets_glpi_external_id
+	// （WHERE source='glpi' AND external_id <> ''）。上面的 existingSet 预过滤是 TOCTOU，
+	// 并发同步会漏进重复行；CreateInBatches 又是**整批原子**的（gorm finisher_api.go），
+	// 撞索引会让整批新票一起回滚。故配 ON CONFLICT 把「硬失败」变成「幂等跳过」。
+	// 谓词必须与索引一致 —— 不带 TargetWhere 的 ON CONFLICT (external_id) 在部分索引下 42P10。
+	//
+	// synced **不能**用 res.RowsAffected：Ticket.ID 带 default:gen_random_uuid()，
+	// gorm 会自动追加 RETURNING "id" → create 回调走 QueryContext + gorm.Scan，
+	// 而 scan.go 的 slice 分支拿 RowsAffected 当下标，导致「只要有 ≥1 行插入，
+	// RowsAffected 就等于 len(batch)」—— true PG 与 sqlite 实测皆然
+	// （1 冲突 + 2 新 → 实际插 2，RowsAffected = 3）。恰好就在 D-4 存在的那个场景虚报。
+	// 改用同事务内 COUNT 前后差。已排除的替代：db.Omit("RETURNING") 无效（SQL 里还在）；
+	// clause.Returning{} 空列会 panic（scan.go 对不可寻址 slice 做 SetLen）。
+	if err := database.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		extIDs := make([]string, 0, len(toUpsert))
+		for i := range toUpsert {
+			extIDs = append(extIDs, toUpsert[i].ExternalID)
+		}
+		var before, after int64
+		if err := tx.Model(&models.Ticket{}).
+			Where("source = ? AND external_id IN ?", "glpi", extIDs).Count(&before).Error; err != nil {
+			return err
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "external_id"}},
+			TargetWhere: clause.Where{Exprs: []clause.Expression{
+				clause.Expr{SQL: "source = 'glpi' AND external_id <> ''"},
+			}},
+			DoNothing: true,
+		}).CreateInBatches(toUpsert, 100).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.Ticket{}).
+			Where("source = ? AND external_id IN ?", "glpi", extIDs).Count(&after).Error; err != nil {
+			return err
+		}
+		synced = int(after - before)
+		return nil
+	}); err != nil {
+		return 0, skipped, fmt.Errorf("GLPI 批量插入失败: %w", err)
 	}
-	log.Printf("从 GLPI 同步了 %d 个工单", len(toUpsert))
-	return len(toUpsert), nil
+
+	log.Printf("从 GLPI 同步了 %d 个工单（跳过越界 %d 条）", synced, skipped)
+	return synced, skipped, nil
 }
 
 // SyncAll 同步所有数据（P1-审计：返回 errors.Join 合并所有失败，不再静默吞错）
@@ -297,11 +388,12 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 		results["zabbix"] = n
 	}
 
-	if n, err := s.SyncFromGLPI(ctx); err != nil {
+	if n, skip, err := s.SyncFromGLPI(ctx); err != nil {
 		log.Printf("GLPI 同步失败: %v", err)
 		errs = append(errs, fmt.Errorf("glpi: %w", err))
 	} else {
 		results["glpi"] = n
+		results["glpi_skipped"] = skip
 	}
 
 	if len(errs) > 0 {

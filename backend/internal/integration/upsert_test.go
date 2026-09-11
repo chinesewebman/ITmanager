@@ -1,14 +1,19 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -45,11 +50,14 @@ func init() {
 //     sqlite 的函数默认值必须带括号（`DEFAULT (gen_random_uuid())`）→ 建表直接语法错；
 //   - 列名必须与生产迁移一致（net_box_id / asset_type / …），否则测不出「Go 字段名当列名」。
 //
-// 三个 ON CONFLICT 目标的索引形态**刻意与生产一致**：
+// ON CONFLICT 目标的索引形态**刻意与生产一致**：
 //   - assets.net_box_id 有唯一索引（000015 建的，upsert 的仲裁者）；
-//   - alerts.trigger_id / tickets.external_id **没有**唯一索引 —— 生产也没有（000013 只加列），
-//     且同一 trigger 的多行历史是预期语义。这样「把 ON CONFLICT 加回来」会立刻报
+//   - alerts.trigger_id **没有**唯一索引 —— 生产也没有（000013 只加列），且同一 trigger 的
+//     多行历史是预期语义。把 ON CONFLICT 加到这里会立刻报
 //     "does not match any PRIMARY KEY or UNIQUE constraint"（与 PG 42P10 同源）。
+//   - tickets.external_id 有**部分**唯一索引（000026 建的，谓词与生产逐字相同）。
+//     **方向别搞反**：带**匹配 TargetWhere** 的 ON CONFLICT (external_id) 可以仲裁；
+//     **不带** TargetWhere 才会报上面那个错。它不是「external_id 上没有索引」。
 const upsertTestSchema = `
 CREATE TABLE assets (
     id TEXT PRIMARY KEY DEFAULT (gen_random_uuid()),
@@ -83,6 +91,12 @@ CREATE TABLE tickets (
     resolution TEXT, resolved_at DATETIME, closed_at DATETIME, due_date DATETIME,
     created_at DATETIME, updated_at DATETIME
 );
+-- 000026 的部分唯一索引，谓词与迁移逐字相同（sqlite 支持部分索引）。
+-- 少了它，SyncFromGLPI 的 ON CONFLICT (external_id) WHERE ... 会直接报
+-- "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"，
+-- 本文件的 GLPI 用例会全红 —— 那是基座缺件，不是被测代码的问题。
+CREATE UNIQUE INDEX uq_tickets_glpi_external_id
+    ON tickets(external_id) WHERE source = 'glpi' AND external_id <> '';
 `
 
 // newUpsertTestDB 建内存库并注入 database.DB —— SyncFromXxx 直接读这个全局变量
@@ -406,6 +420,102 @@ func TestSyncFromZabbix_保留历史且不重复(t *testing.T) {
 	assert.Equal(t, int64(2), after, "同步两次后仍应是 2 行")
 }
 
+// fakeZabbixServer 假 Zabbix：只答 user.login 与 trigger.get。
+// lastChange 为空串时**不带** lastchange 字段（模拟 Zabbix 没给）。
+// 这是外部 HTTP 依赖的替身，被测代码（SyncFromZabbix 及其下游）走真实路径。
+func fakeZabbixServer(t *testing.T, lastChange string) *httptest.Server {
+	t.Helper()
+	lc := ""
+	if lastChange != "" {
+		lc = fmt.Sprintf(`,"lastchange":%s`, strconv.Quote(lastChange))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, 4096)
+		n, _ := r.Body.Read(body)
+		bodyStr := string(body[:n])
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(bodyStr, `"user.login"`):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":"tok-1","id":1}`))
+		case strings.Contains(bodyStr, `"trigger.get"`):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":[
+				{"triggerid":"100","description":"CPU > 90%","priority":5,
+				 "hosts":[{"hostid":"1","host":"web-01"}],"value":"1"` + lc + `}
+			],"id":2}`))
+		default:
+			t.Errorf("未预期的 Zabbix 请求: %s", bodyStr)
+			w.WriteHeader(400)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestSyncFromZabbix_ProblemStart来自LastChange 守 M26 的核心修复（需求 §1.2、§2.3）。
+//
+// 这个缺陷是**静默的**：problem_start 不写时告警列表照样有数据（列表根本不渲染该列），
+// 但所有基于 problem_start 的 KPI / SLA 窗口恒空 —— 从界面上看不出来。
+// 所以断言必须落在库里的值上，而不是返回值或日志。
+//
+// 反证：把 `ProblemStart: problemStart` 改回不写（或写 now），本条必红。
+func TestSyncFromZabbix_ProblemStart来自LastChange(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	// 故意取一个远离 now 的固定时刻：若实现误写成 now，比较必然不等。
+	lastChange := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	srv := fakeZabbixServer(t, strconv.FormatInt(lastChange.Unix(), 10))
+
+	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
+	n, err := svc.SyncFromZabbix(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	var row models.Alert
+	require.NoError(t, db.Where("trigger_id = ?", "100").First(&row).Error)
+
+	assert.True(t, row.ProblemStart.Equal(lastChange),
+		"problem_start 必须取 Zabbix 的 lastchange；期望 %v，实际 %v。"+
+			"若实际接近当前时间，说明回落到 now 了；若为零值，说明整列没写",
+		lastChange, row.ProblemStart)
+	assert.Equal(t, "2026-09-01 12:00:00", row.ProblemStart.UTC().Format("2006-01-02 15:04:05"),
+		"落库挂钟（lastchange 是 Unix 秒，恒按 UTC 解释）")
+}
+
+// TestSyncFromZabbix_LastChange缺失回落 守「回落必须可见」（不静默）。
+//
+// 回落本身是允许的（lastchange 非必需字段），但必须留下日志 —— 否则运维无法察觉
+// 这批告警的 problem_start 是同步时刻而非故障时刻。
+//
+// 反证：删掉 logTimeUnusable 调用，本条的红在「日志断言」上。
+func TestSyncFromZabbix_LastChange缺失回落(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	// 捕获标准库 log 的输出；用例结束后复原。
+	var buf bytes.Buffer
+	oldOut := log.Default().Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	srv := fakeZabbixServer(t, "") // 不带 lastchange
+
+	before := time.Now()
+	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
+	n, err := svc.SyncFromZabbix(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	var row models.Alert
+	require.NoError(t, db.Where("trigger_id = ?", "100").First(&row).Error)
+
+	// 落库值仍必须非零（回落是 now，不是零值）—— 零值会让 SLA 窗口算不出来。
+	assert.False(t, row.ProblemStart.IsZero(), "回落也要写 now，不能留零值")
+	assert.WithinDuration(t, before, row.ProblemStart, time.Minute,
+		"缺失 lastchange 时 problem_start 合理回落为同步时刻")
+
+	assert.Contains(t, buf.String(), "lastchange",
+		"回落必须打日志；静默回落正是 M26 要消除的失败模式。实际日志: %q", buf.String())
+}
+
 // TestSyncFromZabbix_本地已确认的告警会重复插入 把**已知边界**钉住（TODO G-27）。
 //
 // 预过滤只认 status='problem'，本地已 ack 的行（status='acknowledged'）不算「已存在」
@@ -452,14 +562,17 @@ func TestSyncFromZabbix_本地已确认的告警会重复插入(t *testing.T) {
 	assert.Equal(t, "problem", rows[1].Status)
 }
 
-// TestSyncFromGLPI_两次同步不重复 守「GLPI 路径不生成 ON CONFLICT」。
-// 原实现生成 `ON CONFLICT (external_id) DO UPDATE SET "id"="id"`：既没有唯一索引仲裁
-// （PG 42P10），SET 里的 id 又是 ambiguous（PG 42702）。tickets.external_id 在测试与
-// 生产 DDL 里都**没有**唯一索引，加回 ON CONFLICT 即红。
+// TestSyncFromGLPI_两次同步不重复 守**预过滤**（existingSet）这条幂等路径。
 //
-// 只喂 1 张工单：本用例守的是 ON CONFLICT 语义，「一次同步多张票」由
-// TestSyncFromGLPI_一次同步多张工单不撞号 单独守（G-25，2026-09-10 已修）。
-// 两者刻意分开，任一侧红了都能一眼看出是哪条语义破了。
+// ⚠️ 它**不守 ON CONFLICT**（M26 起 external_id 已有部分唯一索引，ON CONFLICT 是合法仲裁）。
+// 也不该被当成 ON CONFLICT 的防线：第二次同步时预过滤已把全部行剔除 → toUpsert 为空 →
+// 在 `if len(toUpsert) == 0` 提前返回，**INSERT 根本不会执行**。所以把 ON CONFLICT 整段删掉，
+// 本条依然全绿（假绿，T-47「守门人所在的那一轮根本没执行」的同类：断言没跑，不是没守住）。
+// 真正守 ON CONFLICT 的是
+// TestSyncFromGLPI_预查后漏进冲突行仍幂等 —— 那条构造了「预查之后才出现冲突行」的交错。
+//
+// 只喂 1 张工单：「一次同步多张票」由 TestSyncFromGLPI_一次同步多张工单不撞号 单独守
+// （G-25，2026-09-10 已修）。两者刻意分开，任一侧红了都能一眼看出是哪条语义破了。
 func TestSyncFromGLPI_两次同步不重复(t *testing.T) {
 	db := newUpsertTestDB(t)
 
@@ -482,11 +595,11 @@ func TestSyncFromGLPI_两次同步不重复(t *testing.T) {
 
 	svc := &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
 
-	n, err := svc.SyncFromGLPI(context.Background())
+	n, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "首次同步失败 —— 加回了 ON CONFLICT？tickets.external_id 没有唯一索引")
 	require.Equal(t, 1, n)
 
-	n, err = svc.SyncFromGLPI(context.Background())
+	n, _, err = svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已存在的工单应被跳过")
 
@@ -525,7 +638,7 @@ func TestSyncFromGLPI_一次同步多张工单不撞号(t *testing.T) {
 
 	svc := &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
 
-	n, err := svc.SyncFromGLPI(context.Background())
+	n, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "一次同步 3 张新工单不得撞号（G-25）")
 	require.Equal(t, 3, n)
 
@@ -543,11 +656,179 @@ func TestSyncFromGLPI_一次同步多张工单不撞号(t *testing.T) {
 	}
 
 	// 第二次同步：3 张都已在库，应全跳过，且不因重算编号而改写
-	n, err = svc.SyncFromGLPI(context.Background())
+	n, _, err = svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已存在的工单应被跳过")
 
 	var after int64
 	require.NoError(t, db.Model(&models.Ticket{}).Count(&after).Error)
 	assert.Equal(t, int64(3), after, "同步两次后仍应是 3 行")
+}
+
+// fakeGLPIServer 假 GLPI：只答 initSession 与 Ticket 列表。
+// ticketsJSON 是 /Ticket 的响应体原文。外部 HTTP 依赖的替身，被测代码走真实路径。
+func fakeGLPIServer(t *testing.T, ticketsJSON string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/initSession"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"session_token":"sess-1"}`))
+		case strings.Contains(r.URL.Path, "/Ticket"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(ticketsJSON))
+		default:
+			t.Errorf("未预期的 GLPI 请求: %s", r.URL.Path)
+			w.WriteHeader(400)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func glpiSvc(srv *httptest.Server) *IntegrationService {
+	return &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
+}
+
+// TestSyncFromGLPI_CreatedAt来自GLPI 守 M26：created_at 取 GLPI 的 date，不是同步时刻。
+//
+// 本用例只管**管道**（glpi.date → ticket.created_at 这一路接上了没有）。
+// 时区换算（.UTC()）的一半**不在**这里守：sqlite 会把偏移一起写进字符串再原样还原，
+// 因而两种 Location 的写法在 sqlite 上都"对"—— 见 §4 基座注意与 T18（真 PG）。
+//
+// 反证：把 CreatedAt 改回 now → 本条必红。
+func TestSyncFromGLPI_CreatedAt来自GLPI(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	srv := fakeGLPIServer(t, `[{"id":1,"name":"Disk full","content":"x","status":1,"priority":4,"date":"2026-09-09 10:00"}]`)
+	svc := glpiSvc(srv)
+
+	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, 0, skipped)
+
+	var row models.Ticket
+	require.NoError(t, db.Where("external_id = ?", "1").First(&row).Error)
+	assert.Equal(t, "2026-09-09 02:00:00", row.CreatedAt.UTC().Format("2006-01-02 15:04:05"),
+		"created_at 应取 GLPI 的 date=2026-09-09 10:00 (Asia/Shanghai) → 02:00 UTC；"+
+			"若接近当前时间说明回落成了 now")
+}
+
+// TestSyncFromGLPI_ClosedAt不发明 守 M26/D-2（P0-2 的唯一防线）。
+//
+// 源没给 resolvedate/closedate 是**合法状态**（票还没解决/关闭），必须原样留 NULL。
+// 回落 now 会伪造事件：diagnostic_service 只看指针非空、不看 status，
+// 会凭空长出一条「工单已解决/已关闭」的时间线记录，并污染 dashboard 的 SLA 窗口。
+//
+// 反证：把 else 分支改成 `nt.ClosedAt = &now` → 本条必红。
+func TestSyncFromGLPI_ClosedAt不发明(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	// status=5（已关闭）但两个时间字段都缺失 —— GLPI 允许这种组合
+	srv := fakeGLPIServer(t, `[{"id":1,"name":"closed-no-date","content":"x","status":5,"priority":3,"date":"2026-09-01 09:00"}]`)
+	svc := glpiSvc(srv)
+
+	n, _, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	var row models.Ticket
+	require.NoError(t, db.Where("external_id = ?", "1").First(&row).Error)
+	assert.Equal(t, "closed", row.Status)
+	assert.Nil(t, row.ClosedAt, "源没给 closedate 时必须留 NULL —— 补 now 会伪造「工单已关闭」事件")
+	assert.Nil(t, row.ResolvedAt, "源没给 solvedate 时必须留 NULL —— 同上")
+}
+
+// TestSyncFromGLPI_ClosedAt有值 守 D-2 的另一半：源给了就必须落库（且值正确）。
+// 与上一条成对：只有「该 NULL 的 NULL、该有值的有值」同时成立，才叫不发明也不丢。
+func TestSyncFromGLPI_ClosedAt有值(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	srv := fakeGLPIServer(t, `[{"id":1,"name":"closed","content":"x","status":5,"priority":3,
+		"date":"2026-09-01 09:00","solvedate":"2026-09-02 11:30","closedate":"2026-09-03 16:45"}]`)
+	svc := glpiSvc(srv)
+
+	n, _, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	var row models.Ticket
+	require.NoError(t, db.Where("external_id = ?", "1").First(&row).Error)
+	require.NotNil(t, row.ResolvedAt, "源给了 solvedate 就必须落库")
+	require.NotNil(t, row.ClosedAt, "源给了 closedate 就必须落库")
+	assert.Equal(t, "2026-09-02 03:30:00", row.ResolvedAt.UTC().Format("2006-01-02 15:04:05"))
+	assert.Equal(t, "2026-09-03 08:45:00", row.ClosedAt.UTC().Format("2006-01-02 15:04:05"))
+}
+
+// TestSyncFromGLPI_越界跳过并计数 守 M26/D-1。
+//
+// 越界档位（GLPI 发了词表外的值）既不能兜底成某一档（静默改写事实），
+// 也不能整批失败（一张脏票挡住其余全部）。处置是：跳过该票 + 计数 + 留日志。
+//
+// 反证：把越界分支改成 `continue` 前兜底（如 Status="open"）→ 入库数变了，本条必红。
+func TestSyncFromGLPI_越界跳过并计数(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	srv := fakeGLPIServer(t, `[
+		{"id":1,"name":"ok","content":"x","status":1,"priority":3,"date":"2026-09-09 10:00"},
+		{"id":2,"name":"bad-status","content":"x","status":7,"priority":3,"date":"2026-09-09 10:01"},
+		{"id":3,"name":"ok2","content":"x","status":2,"priority":0,"date":"2026-09-09 10:02"}
+	]`)
+	svc := glpiSvc(srv)
+
+	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err, "一张越界票不得让整批同步失败")
+	assert.Equal(t, 2, n, "id=1 与 id=3 应入库；priority=0 是合法档位（M26/D-1 已补词表）")
+	assert.Equal(t, 1, skipped, "status=7 越界，应恰好跳过 1 条")
+
+	var ids []string
+	require.NoError(t, db.Model(&models.Ticket{}).Order("external_id").Pluck("external_id", &ids).Error)
+	assert.Equal(t, []string{"1", "3"}, ids, "越界的 id=2 不得入库")
+}
+
+// TestSyncFromGLPI_预查后漏进冲突行仍幂等 是 ON CONFLICT（D-4）**唯一**的真实防线。
+//
+// 为什么不能靠「同步两遍」那条用例：第二遍预过滤已全剔除 → INSERT 根本不执行 → 假绿。
+// 必须构造「预查之后、插入之前出现冲突行」的交错，也就是 existingSet 预过滤的 TOCTOU ——
+// 这正是 D-4 存在的唯一场景。用一个一次性 Query 钩子在预查返回后注入该行。
+//
+// 断言设计成**混合批次**（1 冲突 + 1 新），这样才能同时钉住两件事：
+//   - 删掉 ON CONFLICT → 23505 整批失败 → 红；
+//   - 把 synced 换回 res.RowsAffected → 它按 len(batch) 虚报成 2（实测 gorm v1.30 行为）→ 红。
+//
+// 反证（两条，都必须红）：见上。
+func TestSyncFromGLPI_预查后漏进冲突行仍幂等(t *testing.T) {
+	db := newUpsertTestDB(t)
+
+	var once sync.Once
+	require.NoError(t, db.Callback().Query().After("gorm:query").
+		Register("m26:inject-conflict", func(tx *gorm.DB) {
+			// 只在**第一次**查 tickets 时注入 —— 那正是 SyncFromGLPI 的预过滤 Find。
+			// 之后的查询（事务里的 COUNT）不再注入，避免干扰计数。
+			once.Do(func() {
+				require.NoError(t, db.Create(&models.Ticket{
+					ExternalID: "1", Source: "glpi", Status: "open", Priority: "low",
+					TicketNumber: "GLPI-INJECTED", Title: "并发同步已插入",
+				}).Error, "注入冲突行失败")
+			})
+		}))
+
+	srv := fakeGLPIServer(t, `[
+		{"id":1,"name":"already-there","content":"x","status":1,"priority":3,"date":"2026-09-09 10:00"},
+		{"id":2,"name":"new","content":"x","status":1,"priority":3,"date":"2026-09-09 10:01"}
+	]`)
+	svc := glpiSvc(srv)
+
+	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err,
+		"预查后漏进的冲突行必须被 ON CONFLICT 幂等跳过；报 23505 说明 ON CONFLICT 没了")
+	require.Equal(t, 0, skipped)
+
+	assert.Equal(t, 1, n,
+		"只应新增 id=2 那一张。若报 2，说明 synced 用了 res.RowsAffected（按 len(batch) 虚报）")
+
+	var total int64
+	require.NoError(t, db.Model(&models.Ticket{}).Count(&total).Error)
+	assert.Equal(t, int64(2), total, "注入行 + 新增 1 张 = 2 行，冲突行不得产生重复")
 }

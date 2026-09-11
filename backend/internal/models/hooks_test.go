@@ -482,6 +482,58 @@ func TestTicket_AssignTicketNumbers_已有号不覆盖(t *testing.T) {
 		"自动号不应因跳过已填行而空转（从当天起点开始）")
 }
 
+// TestTicket_AssignTicketNumbers_跳过空洞 守 M26/D-9。
+//
+// 缺陷场景：SyncFromGLPI 的 ON CONFLICT DoNothing 跳过的行，它的号已经分配掉了 ——
+// 当天编号出现空洞。条数法只看条数，会把「第 2 个可用标签」算成 C（而 C 已被占用）
+// → 撞 ticket_number 唯一索引 → **当天后续每次 GLPI 同步都 500**（跨天自愈）。
+//
+// 反证：退回条数法（next = nextTicketSeq(db, prefix)）→ 本条必红。
+func TestTicket_AssignTicketNumbers_跳过空洞(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	now := time.Now()
+
+	// 预置 A 与 C，故意留出 B 这个空洞 —— 模拟「B 被 ON CONFLICT 跳过」后的当天状态。
+	pre := []models.Ticket{
+		{ID: uuid.New(), Title: "pre-a", TicketNumber: prefix + "A", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Title: "pre-c", TicketNumber: prefix + "C", CreatedAt: now, UpdatedAt: now},
+	}
+	require.NoError(t, db.Create(&pre).Error)
+
+	batch := []models.Ticket{{ID: uuid.New(), Title: "new", CreatedAt: now, UpdatedAt: now}}
+	models.AssignTicketNumbers(db, batch)
+
+	// 必须是空洞 B —— 确定性的，不是「B 或 D」。条数法会算成 C 并撞号。
+	assert.Equal(t, prefix+"B", batch[0].TicketNumber,
+		"应填进空洞 B；条数法会给 C（已被占用）→ 唯一索引拒绝整批")
+
+	require.NoError(t, db.CreateInBatches(batch, 100).Error,
+		"分配出的号必须与已有号不冲突，否则整批被 ticket_number 唯一索引拒绝")
+}
+
+// TestTicket_AssignTicketNumbers_逃生门占位 守 M26/D-9 的边界：
+// 同批内「已填号的行走逃生门」与「自动分配」不得算出同一个标签。
+//
+// 反证：删掉 AssignTicketNumbers 里的逃生门占位循环 → 两行都拿 A → 整批被拒，本条必红。
+func TestTicket_AssignTicketNumbers_逃生门占位(t *testing.T) {
+	db := newTestDB(t, &models.Ticket{})
+
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	batch := []models.Ticket{
+		{ID: uuid.New(), Title: "preset", TicketNumber: prefix + "A"},
+		{ID: uuid.New(), Title: "auto"},
+	}
+	models.AssignTicketNumbers(db, batch)
+
+	assert.Equal(t, prefix+"A", batch[0].TicketNumber, "逃生门行的号不得被改写")
+	assert.NotEqual(t, batch[0].TicketNumber, batch[1].TicketNumber,
+		"自动分配必须避开同批已占用的标签（否则整批撞 ticket_number 唯一索引）")
+
+	require.NoError(t, db.CreateInBatches(batch, 100).Error, "同批两行必须都能插入")
+}
+
 // ==================== Asset.BeforeSave (G-20) ====================
 //
 // 缺陷背景：tags/custom_fields 是 jsonb，模型字段是 string，零值 "" 被写进 INSERT

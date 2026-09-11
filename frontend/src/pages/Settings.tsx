@@ -189,8 +189,12 @@ function Settings() {
     try {
       const res: any = await integrationApi.syncGLPI()
       const synced = res?.data?.data?.synced?.glpi
+      // M26/D-6：被跳过的票（档位越界）必须露出来。只报「新增 N 条」，运维无法区分
+      // 「GLPI 里没有新票」和「有一批票因为档位不认识被丢掉了」—— 后者是静默丢数据。
+      const skipped = res?.data?.data?.synced?.glpi_skipped ?? 0
       if (res?.data?.code === 0) {
-        message.success(`GLPI 同步完成，新增 ${synced ?? 0} 条工单`)
+        const base = `GLPI 同步完成，新增 ${synced ?? 0} 条工单`
+        message.success(skipped > 0 ? `${base}；另有 ${skipped} 条档位越界被跳过（详见后端日志）` : base)
       } else {
         message.error(res?.data?.message || '同步失败')
       }

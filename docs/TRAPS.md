@@ -527,6 +527,60 @@ M24 新踩到的。
 **共同教训**: 「变异没让测试变红」有四种可能 —— 断言空转 / 变异无效(编译失败、等价变异) /
 守门人没跑 / 测试假绿(T-42) —— **只有第一种是断言的问题**。判定「断言没守住」之前先把另外三种排除掉。
 
+### T-48. sqlite 与 pgx 对 `time.Time` 的处理**相反** —— 任何 sqlite 用例都**结构上不可能**测出 `.UTC()` 的有无
+
+**背景**: M26(同步导入保真)要给 GLPI 的挂钟时间(Asia/Shanghai)做时区转换, 转错了就是**全库时间偏 8 小时**
+—— 数据看着有值、只是全错, 是最难发现的那种。原以为「写一条端到端用例断言读回值」就够了。
+
+**踩到的真相**(真 PG 18.4 + pgx v5.5.1 实测):
+
+| 写入同一时刻 | pgx(真 PG)落库 | sqlite 落库 | 读回渲染 |
+|---|---|---|---|
+| `10:00` Location=`Asia/Shanghai` | `10:00:00`(**丢偏移**) | `10:00:00+08:00`(保留偏移) | PG **18:00 ❌** / sqlite 10:00 |
+| `02:00` Location=`UTC` | `02:00:00` | `02:00:00+00:00` | 两者均 10:00 ✅ |
+
+pgx 对 `TIMESTAMP`(无时区)列只写**挂钟数字**、丢弃 Location; sqlite 把偏移一起写进字符串再原样还原。
+两者对同一个 `time.Time` 产生**不同**的落库结果, 而 sqlite 那条路的结果**恰好等于**「没调 `.UTC()` 时
+pgx 会写出的值」—— 于是「有没有 `.UTC()`」在 sqlite 基座上**不可观测**。
+
+**更隐蔽的第二层(真正的杀招)**: 断言写成 `got.UTC().Format("15:04")` 时, **断言自己又 `.UTC()` 了一次**,
+把被测 `.UTC()` 的效果抹平 —— 变异「去掉 `.UTC()`」**不红**。这条假绿躲过了三轮细节审查, 是写实现时
+做变异反证才炸出来的(见 `docs/IMPL-SYNC-FIDELITY.md` §7 R1)。
+
+**检测线索**:
+1. 断言里对**被测函数已经归一化过**的值再调一次同样的归一化(`.UTC()`/`strings.TrimSpace`/`Sort`)。
+2. 用例只在 sqlite 上跑, 却声称守的是**驱动层/方言层**语义。
+3. 变异「去掉归一化调用」时, 没有用例变红。
+
+**解法**:
+- 纯函数层: 钉**归一化本身**的可观测效果 —— `assert.Equal(t, time.UTC, got.Location())`, 而不是再 `.Format()` 一次。
+- 落库层: **必须**上真 PG 断言 `created_at::text` 的字面值(`TestDBSmoke_GLPITimeZoneWallClock`)。
+  变异「去掉 `.UTC()`」→ `02:00:00` 变 `10:00:00` → 红, 已实测。
+
+**同类**: T-47(变异假信号)、T-30(sqlite 列名解析大小写不敏感 → 只有断言渲染 SQL 才测得出)。
+
+### T-49. gorm 的 `res.RowsAffected` 在带 `RETURNING` 的批量插入上**等于 `len(batch)`** —— 不是实际插入行数
+
+**背景**: M26 的 `SyncFromGLPI` 用 `CreateInBatches` + `ON CONFLICT DO NOTHING` 做幂等导入, 需要返回
+「真正新增了几条」。直觉写法是 `res := tx.Clauses(...).CreateInBatches(...); synced = int(res.RowsAffected)`。
+
+**踩到的真相**(真 PG 18.4 + gorm v1.30.0 实测): `Ticket.ID` 带 `default:gen_random_uuid()` → gorm 把 id 从
+INSERT 列表剔除并追加 `RETURNING "id"` → create 回调改走 `QueryContext` + `gorm.Scan`, 而
+`scan.go` 的 slice 分支**拿 `RowsAffected` 当 slice 下标**。结果: **只要 ≥1 行被插入,
+`RowsAffected` 就等于 `len(batch)`** —— 1 冲突 + 2 新 → 实际插 2, `RowsAffected = 3`; 101 行(1 冲突) → 101。
+sqlite 上同样(实测)。而 `ON CONFLICT` 存在的**唯一场景**恰好就是「批里有冲突行」—— 也就是虚报必然发生的那一格。
+
+**已排除的替代**: `db.Omit("RETURNING")` 无效(SQL 里 RETURNING 还在); `clause.Returning{}` 空列会 panic
+(`scan.go` 对不可寻址 slice 做 `SetLen`)。
+
+**检测线索**: 批量写入后 `RowsAffected` 恰好等于 `len(batch)` —— 尤其当批里有冲突行时。SQL 日志里
+出现 `RETURNING "id"`。
+
+**解法**: 在**同一事务内**对目标行做 COUNT 前后差(`before` / `after`), 而不是信 `RowsAffected`。
+守它的用例必须构造**混合批次**(1 冲突 + 1 新): 只有混合批次才能同时区分「真值 1」与「虚报 2」。
+
+---
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -595,6 +649,8 @@ M24 新踩到的。
 | — (M23 轮) | T-45 | ACTIVE |
 | — (M24 轮) | T-46 | ACTIVE |
 | — (M25 轮) | T-47 | ACTIVE |
+| — (M26 轮) | T-48 | ACTIVE |
+| — (M26 轮) | T-49 | ACTIVE |
 
 ---
 

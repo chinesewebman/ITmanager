@@ -737,7 +737,9 @@ func mustJSON(t *testing.T, v any) string {
 // 假绿，与 000014 的回填同一个坑（见 TestDBSmoke_AssetJSONBBackfill 的注释）。
 //
 // 必须排在 migrate.Up 之后、TestDBSmoke_DownPreservesLegacyColumns 之前：
-// 后者第一次 Down 就是回滚 000023，跑在它后面的话前置 3 会直接 Fatal。
+// 后者会把库一路 Down 回 000013，跑在它后面的话前置 3 会直接 Fatal。
+// （这里刻意不写「第一次 Down 滚的是 0000NN」—— 那个号每加一个迁移就过期一次，
+// 历史上就写歪过两回；「一路 Down 到 000013」才是不变量。）
 func TestDBSmoke_TicketPriorityNormalize(t *testing.T) {
 	db := openSmokeDB(t)
 
@@ -1103,6 +1105,205 @@ func TestDBSmoke_TicketResolvedAt(t *testing.T) {
 	assert.True(t, cleared, "清空 resolved_at 没有留下 new_value 为 NULL 的历史行（空串不算 NULL）")
 }
 
+// TestDBSmoke_TicketsGLPIExternalIDUnique 守 000026 —— M26/D-4 的 ON CONFLICT 仲裁者。
+//
+// 为什么必须上真库：部分唯一索引是**迁移产物**，sqlite 单测用的是手写 DDL；而
+// `ON CONFLICT (external_id) WHERE ...` 能否仲裁完全取决于生产库上索引的谓词是否逐字一致，
+// 差一个字符就是 42P10「there is no unique or exclusion constraint matching the
+// ON CONFLICT specification」—— 每一次 GLPI 同步都 500，而单测全绿。
+//
+// 覆盖三件事：
+//
+//	① 索引存在、是 UNIQUE、且**带 WHERE**（少了 WHERE 就退化成全表唯一，
+//	   人工建单那些 external_id='' 的票会互相撞，第二张票直接插不进去）；
+//	② 两条同 external_id 的 glpi 票 → 第二条 23505；
+//	③ 两条同 external_id 的 manual 票 → **不冲突**（谓词把非 glpi 排除在外）。
+func TestDBSmoke_TicketsGLPIExternalIDUnique(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&applied).Error; err != nil {
+		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
+	}
+	if applied == 0 {
+		t.Fatalf("库未应用到 000026（tickets glpi external_id 部分唯一索引）—— 本用例前置不满足")
+	}
+
+	// ① 索引形态
+	var indexdef string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_tickets_glpi_external_id'`).
+		Scan(&indexdef).Error, "uq_tickets_glpi_external_id 不存在 —— 000026 没生效")
+	assert.Contains(t, indexdef, "UNIQUE", "必须是唯一索引，否则 ON CONFLICT 直接 42P10: %s", indexdef)
+	assert.Contains(t, indexdef, "WHERE", "必须是**部分**索引 —— 全表唯一会让所有 external_id='' 的人工票互相冲突: %s", indexdef)
+
+	const dupExt = "990016-m26-smoke"
+	t.Cleanup(func() {
+		// 自建自清：本用例插的行不能留给后面的用例（尤其 DownPreservesLegacyColumns
+		// 要回滚 000026，库里留着重复行会让那次 Up 失败）。
+		_ = db.Exec(`DELETE FROM tickets WHERE external_id = ?`, dupExt).Error
+	})
+
+	// ② glpi 重复必须被拒
+	// 走 models.Ticket + gorm.Create（而不是手写 INSERT）：真库的 tickets 有
+	// ticket_no/ticket_type/creator_id 等 NOT NULL 列，手抄列清单就是给自己埋一次漂移。
+	// 这条路径同时也是生产建单路径，一举两得。
+	insertTicket := func(source string) error {
+		return db.Create(&models.Ticket{
+			Title: "m26 smoke", TicketType: "incident", Priority: "normal",
+			Status: "open", Source: source, ExternalID: dupExt,
+		}).Error
+	}
+	require.NoError(t, insertTicket("glpi"))
+	err := insertTicket("glpi")
+	require.Error(t, err, "同 external_id 的第二条 glpi 票必须被唯一索引拒绝 —— 否则 ON CONFLICT 无仲裁者")
+	assert.Contains(t, strings.ToLower(err.Error()), "duplicate key", "应是唯一冲突: %v", err)
+
+	// ③ 非 glpi 来源不受约束（谓词 source='glpi' 的边界）
+	require.NoError(t, insertTicket("manual"),
+		"manual 来源的 external_id 必须不受此索引约束 —— 谓词写宽了会把人工建单一起管住")
+	require.NoError(t, insertTicket("manual"),
+		"第二条同 external_id 的 manual 票也必须能插 —— 部分索引的谓词没生效？")
+}
+
+// TestDBSmoke_Migration026BlockedByDuplicates 守 000026 的**前置自检**（D-5 fail-closed）。
+//
+// 库里有重复的 glpi external_id 时，CREATE UNIQUE INDEX 必然失败 —— 但 PG 原生 23505
+// 的 DETAIL 只有一行「Key (external_id)=(...) already exists」，不含「还有哪几行重了」，
+// 而迁移失败会让版本记录不落、每次重启重放、服务持续不可用。所以 up 里加了 DO 自检，
+// 把重复的 external_id **样本**写进异常文本。
+//
+// 本用例走的是「升级到一个脏库」这条真实路径：先滚掉索引 → 造重复行 → Up 必须失败。
+// 三步缺一不可 —— 少了第①步（不滚索引）第②步就插不进去，整个用例变成空转。
+func TestDBSmoke_Migration026BlockedByDuplicates(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&applied).Error; err != nil {
+		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
+	}
+	if applied == 0 {
+		t.Fatalf("库未应用到 000026 —— 本用例要「回滚索引 → 造重复 → Up 必须失败」，前置不满足")
+	}
+
+	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// ① 滚掉 000026，制造出「可以插重复行」的窗口
+	require.NoError(t, migrate.Down(db), "回滚 000026 失败")
+	var idxGone bool
+	require.NoError(t, db.Raw(
+		`SELECT NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_tickets_glpi_external_id')`).
+		Scan(&idxGone).Error)
+	require.True(t, idxGone, "down 000026 没删掉索引 —— 下一步插重复行会直接失败，用例变空转")
+
+	const dupExt = "990026-m26-dup"
+	// 收尾必须把库恢复成「000026 已应用 + 无重复行」。不做的话：
+	//   · 同进程后面的 TestDBSmoke_DownPreservesLegacyColumns 前置 3 直接 Fatal（一个红变一片红）；
+	//   · 更糟的是库留在「索引没了」的状态，而那个状态在运行时就是 GLPI 同步全 500。
+	// 用 defer 而不是 t.Cleanup：t.Cleanup 在 Fatal 时也跑，defer 同样跑，但这里
+	// 关键顺序（先删重复行再 Up）用 defer 更直白。
+	defer func() {
+		if err := db.Exec(`DELETE FROM tickets WHERE external_id = ?`, dupExt).Error; err != nil {
+			t.Errorf("清理重复行失败，库已留在脏状态: %v", err)
+			return
+		}
+		if err := migrate.Up(db); err != nil {
+			t.Errorf("复原 000026 失败，库已留在「索引缺失」状态（运行时=GLPI 同步全 500）: %v", err)
+		}
+	}()
+
+	// ② 插入两行同 external_id 的 glpi 票（此时没有索引，插得进去）
+	for i := 0; i < 2; i++ {
+		require.NoError(t, db.Create(&models.Ticket{
+			Title: "m26 dup", TicketType: "incident", Priority: "normal",
+			Status: "open", Source: "glpi", ExternalID: dupExt,
+		}).Error, "第 %d 条重复行插入失败 —— 索引不是真被删掉了？", i+1)
+	}
+
+	// ③ Up 必须失败，且异常文本必须点名重复的 external_id（这正是 DO 自检存在的理由）
+	err := migrate.Up(db)
+	require.Error(t, err, "库里有重复 glpi external_id 时 000026 必须失败（fail-closed），绝不能静默跳过建索引")
+	assert.Contains(t, err.Error(), "存在重复的 glpi external_id",
+		"异常文本必须是 DO 自检抛的那条 —— 只有 PG 原生的 23505 说明自检被删了，"+
+			"运维拿不到「哪几个 ID 重了」: %v", err)
+	assert.Contains(t, err.Error(), dupExt, "自检必须把重复的 external_id 样本带进异常文本")
+}
+
+// TestDBSmoke_GLPITimeZoneWallClock 守 M26 的**时区转换**在真驱动上确实生效（§7 R1）。
+//
+// 为什么 sqlite 用例守不住它（实测，见 IMPL §4 基座注意）：pgx 对 TIMESTAMP（无时区）列
+// 写入 time.Time 时**丢弃 Location、只写挂钟数字**；sqlite 反过来，把偏移一起写进字符串
+// 再原样还原。于是「有没有调 .UTC()」在 sqlite 上两种写法都读回同一个值 ——
+// 纯函数层的 TestParseGLPITime_时区 也只能钉到 `Location()==UTC`，钉不到落库结果。
+// 只有真 PG 能回答「库里的挂钟数字到底是不是 02:00」。
+//
+// 走的是**真调用点**（真 GLPIClient → 真 SyncFromGLPI → 真 PG），不是直接调解析函数：
+// 直接调会绕开「解析结果有没有一路传到 created_at」这段管道，那只剩半条防线。
+//
+// 变异反证：去掉 parseGLPITime 里的 .UTC() → 落库变 10:00:00，本用例必红。
+func TestDBSmoke_GLPITimeZoneWallClock(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&applied).Error; err != nil {
+		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
+	}
+	if applied == 0 {
+		t.Fatalf("库未应用到 000026 —— SyncFromGLPI 的 ON CONFLICT 会 42P10，本用例前置不满足")
+	}
+
+	// GLPI 的 id 是整数，ConvertToTicket 用 fmt.Sprintf("%d") 转成 external_id，
+	// 所以常量必须与下面 fixture 里的 "id" 逐字一致（不一致时查询落空 → 断言红，
+	// 但错误信息会指向「时区算错」这个错误方向）。
+	const extID = "990018"
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM tickets WHERE source = 'glpi' AND external_id = ?`, extID).Error
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/initSession"):
+			_, _ = w.Write([]byte(`{"session_token":"smoke-sess"}`))
+		case strings.Contains(r.URL.Path, "/Ticket"):
+			// GLPI 返回的是**挂钟**（无偏移），10:00 Asia/Shanghai == 02:00 UTC
+			_, _ = w.Write([]byte(`[{"id":990018,"name":"m26 tz","content":"x","status":1,"priority":3,"date":"2026-06-15 10:00"}]`))
+		default:
+			t.Errorf("未预期的 GLPI 请求: %s", r.URL.Path)
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			GLPI: config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"},
+		},
+	}, nil)
+
+	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err, "真 PG 上 SyncFromGLPI 失败 —— 000026 的部分唯一索引没生效（42P10）？")
+	require.Equal(t, 1, n)
+	require.Equal(t, 0, skipped)
+
+	// 逐字断言落库文本：SQLite 基座下这里会是 "2026-06-15 10:00:00"（偏移被保留又还原），
+	// 真 PG 下若少了 .UTC() 也会是 10:00:00 —— 那正好是我们要抓的 8 小时偏移。
+	var got string
+	require.NoError(t, db.Raw(
+		`SELECT created_at::text FROM tickets WHERE source = 'glpi' AND external_id = ?`, extID).
+		Scan(&got).Error)
+	assert.Equal(t, "2026-06-15 02:00:00", got,
+		"GLPI 的 10:00(Asia/Shanghai) 落到 TIMESTAMP 列必须是 02:00 UTC —— "+
+			"10:00 说明 .UTC() 没了（全库时间偏 8 小时）；别的值说明时区名写错了")
+}
+
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。
@@ -1110,10 +1311,10 @@ func TestDBSmoke_TicketResolvedAt(t *testing.T) {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000025（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
-//     故十二次 Down = 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000026（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
+//     故十三次 Down = 26 → 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //     **多滚 / 少滚都不会被链上断言发现**：下面全是「索引没了」的 assert.False，晚一步仍为真。
-//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000025」，
+//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000026」，
 //     结尾钉「000012 必须还在（多滚一层的唯一暴露点）」。
 //     下面每一步只写「回滚 0000NN」不写序数：序数本身会随新增迁移整体后移，是这行
 //     注释里最容易变成假话的部分（历史上就写重过两个「第三次」），版本号才是不变量。
@@ -1143,34 +1344,57 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
-	// 前置 3（M16/M20/M25）：最新三个迁移必须已应用，且 000025 必须是**下一次** Down 的对象。
+	// 前置 3（M16/M20/M25/M26）：最新几个迁移必须已应用，且 000026 必须是**下一次** Down 的对象。
 	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
 	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-	var has25, has24, has23 int64
+	var has26, has25, has24, has23 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&has26).Error)
+	if has26 == 0 {
+		t.Fatalf("库未应用到 000026 —— 第一次 Down 会滚掉 000025，整条断言链静默后移")
+	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
 		Scan(&has25).Error)
 	if has25 == 0 {
-		t.Fatalf("库未应用到 000025 —— 第一次 Down 会滚掉 000024，整条断言链静默后移")
+		t.Fatalf("库未应用到 000025 —— 第二次 Down 会滚掉 000024，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
 		Scan(&has24).Error)
 	if has24 == 0 {
-		t.Fatalf("库未应用到 000024 —— 第二次 Down 会滚掉 000023，整条断言链静默后移")
+		t.Fatalf("库未应用到 000024 —— 第三次 Down 会滚掉 000023，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&has23).Error)
 	if has23 == 0 {
-		t.Fatalf("库未应用到 000023 —— 第三次 Down 会滚掉 000021，整条断言链静默后移")
+		t.Fatalf("库未应用到 000023 —— 第四次 Down 会滚掉 000021，整条断言链静默后移")
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// Down = 回滚 000026：只删部分唯一索引，数据不动
+	require.NoError(t, migrate.Down(db), "回滚 000026 失败")
+	var v26 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&v26).Error)
+	assert.Zero(t, v26, "第一次 Down 必须滚掉 000026 —— 否则后面每一次 Down 都在滚错的那一层")
+	var glpiIdxExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_tickets_glpi_external_id')`).
+		Scan(&glpiIdxExists).Error)
+	assert.False(t, glpiIdxExists, "down 000026 应 DROP uq_tickets_glpi_external_id")
+	// 000019 的普通索引不归 000026 管，滚掉它是越界（预查查询靠它，见 up 里的实测）
+	var extIdxStillThere bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_tickets_external_id')`).
+		Scan(&extIdxStillThere).Error)
+	assert.True(t, extIdxStillThere, "down 000026 不得顺手删掉 000019 的 idx_tickets_external_id")
 
 	// Down = 回滚 000025：整表删除（ticket_history 是 000025 新建的，up 里没有存量数据改写）
 	require.NoError(t, migrate.Down(db), "回滚 000025 失败")
 	var v25 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
 		Scan(&v25).Error)
-	assert.Zero(t, v25, "第一次 Down 必须滚掉 000025 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v25, "第二次 Down 必须滚掉 000025 —— 否则后面每一次 Down 都在滚错的那一层")
 	var thTables int64
 	require.NoError(t, db.Raw(
 		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'ticket_history'`).
@@ -1182,7 +1406,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	var v24 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
 		Scan(&v24).Error)
-	assert.Zero(t, v24, "第一次 Down 必须滚掉 000024 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v24, "第三次 Down 必须滚掉 000024 —— 否则后面每一次 Down 都在滚错的那一层")
 	var statusDef *string
 	require.NoError(t, db.Raw(
 		`SELECT column_default FROM information_schema.columns
@@ -1197,7 +1421,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	var v23 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&v23).Error)
-	assert.Zero(t, v23, "第二次 Down 必须滚掉 000023")
+	assert.Zero(t, v23, "第四次 Down 必须滚掉 000023")
 
 	// Down = 回滚 000021：删除 path text_pattern_ops 索引
 	require.NoError(t, migrate.Down(db), "回滚 000021 失败")
@@ -1271,13 +1495,13 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.True(t, exists, "down 不得 DROP 000001 建的 tickets.ticket_type（丢列丢数据）")
 
 	// 收尾正向断言：**多滚一层唯一的暴露点**。
-	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十二次 Down 会一路全绿，
+	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十三次 Down 会一路全绿，
 	// 同时把 000012 也滚掉。只有「000012 必须还在」能挡住它。
 	var v12 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 12`).
 		Scan(&v12).Error)
 	assert.Equal(t, int64(1), v12,
-		"十一次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
+		"十三次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
 }
 
 // explainSeqScanOff 在**单连接**上禁掉顺序扫描后跑 EXPLAIN，返回完整计划文本。

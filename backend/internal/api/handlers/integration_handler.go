@@ -71,8 +71,9 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 		results = map[string]int{"zabbix_metrics": count}
 		err = e
 	case "glpi":
-		count, e := h.svc.SyncFromGLPI(ctx)
-		results = map[string]int{"glpi": count}
+		// M26/D-6：skipped 是档位越界被跳过的条数，一并透出 —— 静默丢票没人看得出来。
+		count, skipped, e := h.svc.SyncFromGLPI(ctx)
+		results = map[string]int{"glpi": count, "glpi_skipped": skipped}
 		err = e
 	default:
 		results, err = h.svc.SyncAll(ctx)

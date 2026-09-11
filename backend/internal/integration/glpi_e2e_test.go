@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"network-monitor-platform/internal/config"
 )
@@ -192,16 +195,61 @@ func TestGLPIE2E_SessionError(t *testing.T) {
 	}
 }
 
-// TestGLPIE2E_ConvertToTicket_优先级限定契约词表 守 M16。
+// ticketEnum 从 openapi.yaml 读 Ticket.<field> 的 enum 字面量。
 //
-// 改 glpi.go 的 priorityMap 之前，这些分支在整套测试里**零覆盖**：
-// glpi_e2e_test.go 只喂过 Priority 4（断言 high），其余档位写成什么都行、
-// 没有用例会红。而 3 号档原先写的 medium 与契约的 normal 是同一个「普通」的
-// 两套拼法，后果是工单页按「普通」筛选（WHERE priority='normal'）查不到这些票。
-func TestGLPIE2E_ConvertToTicket_优先级限定契约词表(t *testing.T) {
-	// 与 openapi.yaml 的 Ticket.priority enum 一一对应，改动需同步契约
-	vocab := map[string]bool{"low": true, "normal": true, "high": true, "critical": true}
-	want := map[int]string{1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical"}
+// 为什么不硬编码：契约是单一 source of truth（internal/api/swagger.go:20），
+// 把 enum 抄进测试就等于抄了一份会各自漂移的副本 —— 有人改了契约而没改这里，
+// 用例照样绿，正是本文件要防的那类假绿（T-42）。
+func ticketEnum(t *testing.T, field string) map[string]bool {
+	t.Helper()
+	raw, err := os.ReadFile("../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("读 openapi.yaml 失败: %v", err)
+	}
+	var doc struct {
+		Components struct {
+			Schemas struct {
+				Ticket struct {
+					Properties map[string]struct {
+						Enum []string `yaml:"enum"`
+					} `yaml:"properties"`
+				} `yaml:"Ticket"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("解析 openapi.yaml 失败: %v", err)
+	}
+	prop, ok := doc.Components.Schemas.Ticket.Properties[field]
+	if !ok {
+		t.Fatalf("openapi.yaml 的 Ticket 里没有 %s 字段 —— 契约结构变了，本用例需同步", field)
+	}
+	if len(prop.Enum) == 0 {
+		t.Fatalf("openapi.yaml 的 Ticket.%s 没有 enum —— 契约结构变了，本用例需同步", field)
+	}
+	set := make(map[string]bool, len(prop.Enum))
+	for _, v := range prop.Enum {
+		set[v] = true
+	}
+	return set
+}
+
+// TestGLPIE2E_ConvertToTicket_优先级per键对照 守 M16 + M26/D-1。
+//
+// **逐键对照**，不是值域对照：只检查「产出的值在 enum 内」抓不到缺键 ——
+// 缺键会落空串，而空串会被同步循环当越界跳过（整类票静默不入库）。
+// 必须为 GLPI 的每一个档位写死期望值，缺/错任何一键都红。
+//
+// 反证：删掉 priorityMap 的 `0:` 键 → 本条红。
+func TestGLPIE2E_ConvertToTicket_优先级per键对照(t *testing.T) {
+	vocab := ticketEnum(t, "priority")
+
+	// GLPI 的 priority 取值域是 0..6（0 = 未指定）。
+	// 期望值独立于被测的 priorityMap —— 这张表来自语义决策（D-1），不是从实现抄回来的。
+	want := map[int]string{
+		0: "normal", // M26/D-1：GLPI「未指定」→ 与手工建单表单默认值一致
+		1: "low", 2: "low", 3: "normal", 4: "high", 5: "critical", 6: "critical",
+	}
 
 	for p, exp := range want {
 		got := (&GLPITicket{ID: 1, Name: "t", Status: 1, Priority: p}).ConvertToTicket().Priority
@@ -209,17 +257,52 @@ func TestGLPIE2E_ConvertToTicket_优先级限定契约词表(t *testing.T) {
 			t.Errorf("GLPI priority=%d → %q, want %q", p, got, exp)
 		}
 		if !vocab[got] {
-			t.Errorf("GLPI priority=%d 产出 %q, 不在契约词表内", p, got)
+			t.Errorf("GLPI priority=%d 产出 %q, 不在契约 Ticket.priority 的 enum 内 (openapi.yaml:2503)", p, got)
 		}
 		if got == "medium" {
 			t.Errorf("GLPI priority=%d 产出了 medium —— 该拼法已由迁移 000023 归一为 normal, 不得再引入", p)
 		}
 	}
 
-	// 越界档位（真实 GLPI 只发 1~6）：记录当前行为是「原样落空串」，不是静默兜底成某一档。
-	// 落空串会被 ticket_service.Create 的 M16 兜底接成 normal（HTTP 建单路径），
-	// 但 GLPI 同步走的是 upsert，不经 Create —— 真出现越界值应当看得见。
-	if got := (&GLPITicket{Priority: 0}).ConvertToTicket().Priority; got != "" {
-		t.Errorf("越界 priority=0 → %q, 期望空串（当前行为）", got)
+	// 越界（∉ 0..6）：词表必须**留空串**，由调用方按 D-1 跳过并计数。
+	// 在这里兜底成某一档会把「GLPI 发了没见过的值」这件事静默掩盖掉。
+	for _, p := range []int{-1, 7, 99} {
+		if got := (&GLPITicket{Priority: p}).ConvertToTicket().Priority; got != "" {
+			t.Errorf("越界 priority=%d → %q, 期望留空串由调用方处置, 不得在此兜底", p, got)
+		}
+	}
+}
+
+// TestGLPIE2E_ConvertToTicket_状态per键对照 守 M26/D-1。
+//
+// 与优先级同法：**逐键对照**。缺 `6:` 键时 status=6 落空串 → 被当越界跳过，
+// 「待批准」这一类票会整批静默不入库。
+//
+// 反证：删掉 statusMap 的 `6:` 键 → 本条红。
+func TestGLPIE2E_ConvertToTicket_状态per键对照(t *testing.T) {
+	vocab := ticketEnum(t, "status")
+
+	// GLPI 的 status 取值域是 1..6。期望值独立于被测的 statusMap。
+	want := map[int]string{
+		1: "open", 2: "in_progress", 3: "pending", 4: "resolved",
+		5: "closed",
+		6: "pending", // M26/D-1：GLPI「待批准」无独立本地语义，归入 pending
+	}
+
+	for s, exp := range want {
+		got := (&GLPITicket{ID: 1, Name: "t", Status: s, Priority: 3}).ConvertToTicket().Status
+		if got != exp {
+			t.Errorf("GLPI status=%d → %q, want %q", s, got, exp)
+		}
+		if !vocab[got] {
+			t.Errorf("GLPI status=%d 产出 %q, 不在契约 Ticket.status 的 enum 内 (openapi.yaml:2506)", s, got)
+		}
+	}
+
+	// 越界（∉ 1..6）留空串，同上。
+	for _, s := range []int{0, 7, 99} {
+		if got := (&GLPITicket{Status: s}).ConvertToTicket().Status; got != "" {
+			t.Errorf("越界 status=%d → %q, 期望留空串由调用方处置, 不得在此兜底", s, got)
+		}
 	}
 }
