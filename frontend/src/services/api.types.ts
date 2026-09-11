@@ -1138,6 +1138,296 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 获取当前登录用户
+         * @description 供前端启动时取当前身份与能力集。`role` / `capabilities` 取自**鉴权上下文**
+         *     （JWT claim / API Key 关联用户），与门禁实际使用的值同源，不是回查 DB 的 role ——
+         *     避免「按钮隐藏但接口放行」的错位。
+         */
+        get: operations["getCurrentUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改当前用户密码
+         * @description 校验旧密码 → 强度校验（**≥8 字符且同时含字母与数字**）→
+         *     **禁止与旧密码相同** → bcrypt 落库，并清除 `must_change_password`。
+         *
+         *     该路由有两道额外限制（均非通用）：
+         *     - 挂 `RejectAPIKeyAuth`：API Key 身份一律 403。泄露的 write Key 若同时掌握旧密码
+         *       即可改掉账号密码，而吊销 Key 撤销不了。
+         *     - 限流 **3 req/min per IP**（远严于 protected 组默认的 100）。
+         *
+         *     失败一律 400，**不区分**「旧密码错」与「新密码不合规」以外的原因。
+         */
+        put: operations["changePassword"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/api-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出当前用户的 API Key
+         * @description 只返回**当前用户**的 Key（`user_id` 取自鉴权上下文）。
+         *     哈希列 `key_hash` 在模型层标 `json:"-"`，**永不出现在任何响应里**；
+         *     只回显 `prefix`（前 8 字符）供识别。
+         */
+        get: operations["listAPIKeys"];
+        put?: never;
+        /**
+         * 创建 API Key
+         * @description ⚠️ 响应里的 `data.api_key` 是**完整明文 Key，仅此一次返回**，之后任何接口都取不回
+         *     （库里只存 HMAC-SHA256(pepper) 哈希）。
+         *
+         *     约束：
+         *     - 整组挂 `RejectAPIKeyAuth` —— 长期凭据**不得自我复制**（write scope 的 Key 挂在
+         *       admin 账号上即可铸造新 Key，吊销旧 Key 后新 Key 仍存活）。
+         *     - `must_change_password=true` 的账号禁止铸造（否则默认口令登录后立刻铸一把不过期的
+         *       Key，即可绕过「首次登录必须改密」，且之后改密也撤不掉）。
+         *     - `permissions` 缺省 `["read"]`；`rate_limit` 缺省 1000，合法区间 `[1, 100000]`；
+         *       `ip_whitelist` 接受裸 IP 或 CIDR，**鉴权侧按网段匹配**（裸 IP 等价 /32、/128）。
+         *     - `expires_at` 格式 `YYYY-MM-DD`（**不是** RFC3339）。
+         */
+        post: operations["createAPIKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/api-keys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 删除 API Key（物理删除）
+         * @description 只能删自己的 Key（查询条件同时带 `id` 与 `user_id`）。不可恢复；保留审计用「吊销」。
+         */
+        delete: operations["deleteAPIKey"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/api-keys/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 吊销 API Key（置 status=revoked，保留记录）
+         * @description 不删行，只把 `status` 置为 `revoked` —— 保留审计追溯。
+         *     与删除同样只能作用于自己的 Key。
+         */
+        put: operations["revokeAPIKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 查询审计日志（cursor 分页）
+         * @description 按时间倒序返回操作留痕。**需要 `audit` 能力**（admin / ops_admin / auditor）。
+         *
+         *     分页是 **cursor 式**（不是 offset）：`limit` 条恰好取满时响应带 `next_cursor`，
+         *     下一页把它原样回传即可。**没有 `next_cursor` 即到底**（不是「本页不满」）。
+         *     注意 `limit` 是「本页最多几条」，服务端不对它做上限校验 —— 传大值即大页。
+         *
+         *     过滤参数为**精确匹配**（`action` / `method` / `path` 都是 `=` 而非模糊）；
+         *     `user_id` 非法 uuid 时**静默忽略该过滤条件**（不是 400）。
+         */
+        get: operations["listAuditLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/bulk-ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量确认告警
+         * @description 单条 SQL 批量更新，不逐条循环。`ids` **最多 1000 条**（超出 400）。
+         */
+        post: operations["bulkAcknowledgeAlerts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/bulk-resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量解决告警
+         * @description 同批量确认：单条 SQL、`ids` 上限 1000。
+         */
+        post: operations["bulkResolveAlerts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/bulk-delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量删除告警
+         * @description 物理删除、不可恢复。需要 `manage` 能力（admin / ops_admin）—— 比批量确认 / 解决
+         *     （`write`）更严。`ids` 上限 1000。
+         */
+        post: operations["bulkDeleteAlerts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/assets/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 导出资产（CSV / JSON）
+         * @description `format=csv`（默认）→ 返回 `text/csv` 附件，表头固定 `ID,Name,Type,Status`，
+         *     字段经 `encoding/csv` 转义；以 `= + - @` 或制表符 / CR 开头的字段会加**前导单引号**，
+         *     防 Excel 公式注入（DDE）。
+         *     其他取值 → 返回 JSON（`data` 为资产数组）。
+         *
+         *     ⚠️ **静默截断**：内部固定取**前 500 条**（`Page=1, PageSize=500`，且 List 的
+         *     `pageSize>500 → 500` 硬顶），总数被丢弃、**不分页**。资产超过 500 条时导出结果
+         *     不完整且无任何提示 —— 已登记为独立缺陷（不在本轮修）。
+         */
+        get: operations["exportAssets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/assets/{id}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 软退役资产（释放 IP）
+         * @description 退役动作（单事务）：把各网卡的 IP 移到 `asset.last_known_ip4/ip6`，**清空网卡的 IP 字段**，
+         *     置 `status='retired'` 并记 `retired_at` / `retired_reason` / `retired_by`。
+         *     释放出的 IP 可被新设备使用，历史仍按 hostid 可查。
+         *
+         *     `reason` 可省略。资产已退役 / id 非法 → 400；不存在 → 404。
+         *
+         *     ⚠️ 本操作把 `status` 置为 `retired`，但 `Asset.status` 的 enum 当前**不含该值**
+         *     —— 既有契约漂移（同 `offline`），已登记为独立缺陷，不在本轮修。
+         */
+        post: operations["retireAsset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/assets/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 恢复软退役资产（写回 IP）
+         * @description 逆操作：把 `last_known_ip4/ip6` 写回网卡，清空 `retired_*`，置 `status='active'`。
+         *     资产未处于退役状态 → 400；不存在 → 404。无请求体。
+         */
+        post: operations["restoreAsset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1820,6 +2110,204 @@ export interface components {
             app_token?: string;
             /** @description 留空 = 保留旧值。仅存内存、不落盘，且**不在任何响应里回显**。 */
             user_token?: string;
+        };
+        /**
+         * @description 当前登录用户。`role` / `capabilities` 取自**鉴权上下文**（JWT claim / API Key 关联用户），
+         *     与门禁实际使用的值同源。与 `User`（用户管理列表里的一行）**不是同一个形态** ——
+         *     这里没有 `created_at`，多了 `capabilities` / `phone` / `avatar` / `status`。
+         */
+        CurrentUser: {
+            code?: number;
+            data?: {
+                /** Format: uuid */
+                id?: string;
+                username?: string;
+                nickname?: string;
+                email?: string;
+                phone?: string;
+                avatar?: string;
+                /**
+                 * @description 规范化后的角色（存量 operator / viewer 由服务端折叠为 ops_user / readonly）
+                 * @enum {string}
+                 */
+                role?: "admin" | "ops_admin" | "ops_user" | "auditor" | "readonly" | "user";
+                /**
+                 * @description 该角色具备的能力集，顺序固定（read 在前）。前端据此隐藏入口；
+                 *     服务端仍独立判权，**不得**把这里当访问控制依据。
+                 */
+                capabilities?: ("read" | "write" | "manage" | "audit" | "identity")[];
+                /** @enum {string} */
+                status?: "active" | "inactive";
+            };
+        };
+        ChangePasswordRequest: {
+            old_password: string;
+            /**
+             * @description ≥8 字符，且**同时包含字母与数字**；不得与旧密码相同。
+             *     任一条不满足 → 400（与「旧密码错误」同为 400，响应文案区分）。
+             */
+            new_password: string;
+        };
+        /** @description 列表里的一条 Key。**含 `key_hash` 的字段在本形态中不存在** —— 模型层标 `json:"-"`，永不下发。 */
+        APIKey: {
+            /** Format: uuid */
+            id?: string;
+            name?: string;
+            /** @description 完整 Key 的前 8 字符，仅供 UI 识别 */
+            prefix?: string;
+            permissions?: string[];
+            /** @description 裸 IP 或 CIDR；**鉴权侧按网段匹配**（裸 IP 等价 /32、/128） */
+            ip_whitelist?: string[];
+            rate_limit?: number;
+            /** @enum {string} */
+            status?: "active" | "revoked";
+            /**
+             * Format: date-time
+             * @description 无过期时间为 null
+             */
+            expires_at?: string | null;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /** Format: date-time */
+            created_at?: string;
+        };
+        APIKeyInput: {
+            name: string;
+            /** @description 缺省 `["read"]` */
+            permissions?: string[];
+            /** @description 缺省空数组（= 不做 IP 检查，放行） */
+            ip_whitelist?: string[];
+            /** @description 缺省 1000；**显式传 0 视为未提供**（用默认值），不报错 */
+            rate_limit?: number;
+            /** @description 格式 `YYYY-MM-DD`（**不是** RFC3339）；省略或空串 = 不过期 */
+            expires_at?: string;
+        };
+        /** @description ⚠️ `data.api_key` 是**完整明文 Key，仅此一次返回**，之后任何接口都取不回。 */
+        APIKeyCreated: {
+            code?: number;
+            message?: string;
+            data?: {
+                /** Format: uuid */
+                id?: string;
+                name?: string;
+                /** @description 明文长期凭据，仅此一次 */
+                api_key?: string;
+                prefix?: string;
+                permissions?: string[];
+                rate_limit?: number;
+                /** Format: date-time */
+                expires_at?: string | null;
+                /** Format: date-time */
+                created_at?: string;
+            };
+        };
+        APIKeyList: {
+            code?: number;
+            data?: components["schemas"]["APIKey"][];
+        };
+        /** @description 一行操作留痕。不含请求体 —— 只记方法 / 路径 / 状态码 / 不可信文本的错误摘要。 */
+        AuditLog: {
+            /** Format: uuid */
+            id?: string;
+            /**
+             * Format: uuid
+             * @description 未认证请求（如登录失败）为 null
+             */
+            user_id?: string | null;
+            username?: string;
+            action?: string;
+            resource?: string;
+            /** Format: uuid */
+            resource_id?: string | null;
+            method?: string;
+            /** @description 请求路径（已剥控制字符，防日志行伪造） */
+            path?: string;
+            /** @description 取自 ClientIP()，受 server.trusted_proxies 约束 */
+            ip?: string;
+            user_agent?: string;
+            /** @description HTTP 状态码 */
+            status?: number;
+            error_msg?: string;
+            request_id?: string;
+            /** Format: date-time */
+            created_at?: string;
+        };
+        /** @description cursor 分页信封。**没有 `next_cursor` 即到底**（不是「本页不满」）。 */
+        AuditLogList: {
+            code?: number;
+            data?: {
+                items?: components["schemas"]["AuditLog"][];
+                /** @description 仅在取满 `limit` 条时出现；下一页原样回传 */
+                next_cursor?: string;
+            };
+        };
+        BulkRequest: {
+            /** @description 非空，**最多 1000 条**（超出 400） */
+            ids: string[];
+        };
+        /** @description `affected` 是**实际更新行数**，可能小于传入条数（id 不存在 / 状态已终态）。 */
+        BulkResult: {
+            code?: number;
+            data?: {
+                affected?: number;
+            };
+        };
+        /**
+         * @description `asset_networks` 一行。退役时 `ipv4_address` / `ipv6_address` 被**清空**
+         *     （值移到 `Asset.last_known_ip4/ip6`），恢复时写回。
+         */
+        AssetNetwork: {
+            /** Format: uuid */
+            id?: string;
+            /** Format: uuid */
+            asset_id?: string;
+            interface_name?: string;
+            /** @enum {string} */
+            interface_type?: "ethernet" | "fiber";
+            mac_address?: string;
+            /** @description 退役后为空串 */
+            ipv4_address?: string;
+            ipv4_netmask?: string;
+            /** @description 字段名的历史拼写是 `ipv_address`；退役后为空串 */
+            ipv6_address?: string;
+            /** @description Mbps */
+            speed?: number;
+            /** @enum {string} */
+            duplex?: "full" | "half";
+            /** @enum {string} */
+            status?: "up" | "down" | "unknown";
+            connected_to?: string;
+            connected_port?: string;
+            /** @enum {string} */
+            purpose?: "mgmt" | "service";
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        AssetRetireResult: {
+            code?: number;
+            message?: string;
+            data?: {
+                asset?: components["schemas"]["Asset"];
+                /** @description 退役后的网卡行（IP 已被清空） */
+                networks?: components["schemas"]["AssetNetwork"][];
+                /** @description 原网卡的 IPv4（已释放，可被新设备使用） */
+                released_ip4?: string | null;
+                released_ip6?: string | null;
+                /** Format: date-time */
+                retired_at?: string | null;
+                retired_reason?: string | null;
+            };
+        };
+        AssetRestoreResult: {
+            code?: number;
+            message?: string;
+            data?: {
+                asset?: components["schemas"]["Asset"];
+                /** @description 恢复后的网卡行（IP 已写回） */
+                networks?: components["schemas"]["AssetNetwork"][];
+            };
         };
     };
     responses: never;
@@ -3948,6 +4436,482 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    getCurrentUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CurrentUser"];
+                };
+            };
+            /** @description 未认证 / 凭证无效 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 用户已不存在（凭证有效但账号被删） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description 密码修改成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 旧密码错误 / 新密码强度不足 / 新旧密码相同 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 当前为 API Key 身份（禁止改密） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    listAPIKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIKeyList"];
+                };
+            };
+            /** @description 凭证无效 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    createAPIKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["APIKeyInput"];
+            };
+        };
+        responses: {
+            /** @description 创建成功（含一次性明文 Key） */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIKeyCreated"];
+                };
+            };
+            /** @description 参数错误（名称缺失 / ip_whitelist 非法 / rate_limit 越界 / expires_at 格式错） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 账号处于强制改密状态 / 当前为 API Key 身份 / 无密钥管理权限 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 同 user 下已存在同名 API Key */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteAPIKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 删除成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description API Key 不存在（或不属于当前用户） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    revokeAPIKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description API Key 已吊销 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description API Key 不存在（或不属于当前用户） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    listAuditLogs: {
+        parameters: {
+            query?: {
+                /** @description 非法 uuid 会被静默忽略（退回不按用户过滤） */
+                user_id?: string;
+                action?: string;
+                method?: string;
+                path?: string;
+                /** @description 上一页返回的 next_cursor；解码失败时静默忽略 */
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditLogList"];
+                };
+            };
+            /** @description 查询失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    bulkAcknowledgeAlerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkRequest"];
+            };
+        };
+        responses: {
+            /** @description 成功（`affected` 为实际更新行数，可能小于传入条数） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkResult"];
+                };
+            };
+            /** @description ids 为空 / 非法 JSON / 超过 1000 条 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    bulkResolveAlerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkRequest"];
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkResult"];
+                };
+            };
+            /** @description ids 为空 / 非法 JSON / 超过 1000 条 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    bulkDeleteAlerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkRequest"];
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkResult"];
+                };
+            };
+            /** @description ids 为空 / 非法 JSON / 超过 1000 条 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    exportAssets: {
+        parameters: {
+            query?: {
+                /** @description csv（默认）= 附件；其他任意值 = JSON 数组 */
+                format?: "csv" | "json";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description `format=csv` 时是 `text/csv` 附件（非 JSON）；否则为 JSON 信封。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                    "application/json": {
+                        code?: number;
+                        data?: components["schemas"]["Asset"][];
+                    };
+                };
+            };
+            /** @description 查询失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    retireAsset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 退役原因，写入 retired_reason */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 已退役 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetRetireResult"];
+                };
+            };
+            /** @description 无法退役（资产已退役 / 参数无效） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 资产不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    restoreAsset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已恢复 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetRestoreResult"];
+                };
+            };
+            /** @description 无法恢复（资产未处于退役状态） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 资产不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
             };
         };
     };
