@@ -1,6 +1,9 @@
 package integration
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,4 +201,25 @@ func TestParseGLPITime_边界(t *testing.T) {
 		assert.Equal(t, timeInvalid, st,
 			"未登记的格式必须走 invalid（可见），不得静默当成 absent")
 	})
+}
+
+// TestLogTimeUnusable_id被转义 — M29-G：id 与 raw 都是第三方可控字符串
+// （Zabbix JSON 里的 triggerid / 字段原文），而 log.Printf **不转义** ——
+// 用 %s 时 CR/LF 能伪造出一整行假日志。改用 %q 后整条仍是单行。
+func TestLogTimeUnusable_id被转义(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut := log.Default().Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	// 修前这里是 %s：id 里的 CR/LF 会真的断行
+	logTimeUnusable("Zabbix trigger", "100\r\n[FAKE] forged", "lastchange", "abc", timeAbsent)
+
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(strings.TrimRight(out, "\n"), "\n")+1,
+		"日志必须是单行，实际 %q", out)
+	assert.NotContains(t, out, "\r", "id 里的 CR 不得原样进日志：%q", out)
+	assert.Contains(t, out, `"100\r\n[FAKE] forged"`,
+		"%q 应把控制字符转义成字面量（可读且不换行），实际 %q", out)
+	assert.Contains(t, out, "lastchange")
 }

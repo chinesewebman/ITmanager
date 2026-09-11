@@ -101,5 +101,7 @@ func parseGLPITime(raw string) (time.Time, timeParseStatus) {
 //
 // st 的取值见 timeParseStatus：0=源缺失 1=解析失败。
 func logTimeUnusable(what, id, field, raw string, st timeParseStatus) {
-	log.Printf("M26: %s %s 的 %s=%q 不可用（status=%d）", what, id, field, raw, st)
+	// id 与 raw 都必须 %q：两者都是第三方可控字符串（Zabbix JSON 里的 triggerid /
+	// 字段原文），%s 会让 CR/LF 原样进日志（log.Printf 不转义）→ 伪造日志行（M29-G）。
+	log.Printf("M26: %s %q 的 %s=%q 不可用（status=%d）", what, id, field, raw, st)
 }
