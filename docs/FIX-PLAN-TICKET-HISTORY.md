@@ -247,6 +247,23 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | **D-6** | `source` / `request_id` 填什么？ | **两列都保持空串**（燕如 2026-09-11 授权决定） | 原问题是「`source` 是操作的来路还是工单的来路」。**按工作流追下去，答案是「两个都不需要在历史里」**：① **出生行的来路**已经有更好来源 —— `tickets.source` 这一列**早就存在且有值**（`Create` 缺省 `manual`、`ticketFromAlert` 写 `alert`、GLPI 写 `glpi`，json 标签直出响应）；把它抄进历史行 = 同一事实存两份，而两份迟早不一致。② **更新行的来路**当前**恒为「人经 API 发起」**（`Update` 只有一个生产调用方 = PUT handler；全仓无 PATCH 路由、GLPI 同步走 `CreateInBatches` 不更新），填进去就是一列恒为 `manual` 的常量。真正要区分「系统 vs 人」时，读 `tickets.source`。③ `request_id` 需要请求级 ID 中间件，**当前不存在** —— 留空是如实，编一个假值才是撒谎。**不删列**：删列要新迁移，而收益只是省两个 `TEXT`；列已建、已测、已在真 PG 冒烟里验过「无外键」，删除的爆炸半径大于收益。**真有非人写入方时**（GLPI 回写 / 规则引擎自动升级）再填，那是 1 行改动、不需要迁移 —— 这正是「留空」比「删列」好的地方。⚠️ 注意 `docs/FIX-PLAN-UI-PERF.md` §8 里步骤 3 那句「验 `source`」已按本决定作废 |
 | **D-8** | `CreateFromAlert` 的经手人参数形态 | **同 `Create`：传 `Actor`**（本轮决定） | 旧签名收 `userID string` 只当 requester 名用，handler 里 `actorFromContext(c)` 算出的 `ID` **被丢掉** —— 后果是这条路径的出生行**没有 `actor_id`**。`Create` 在步骤 2b 已经改成收 `Actor`，两条建单路径对「谁经手」的表达不该有两套。见步骤 5c |
 
+### 2.8 前端时间线（步骤 6）的设计
+
+**落点**：`TicketDetailModal` 底部新增「经手记录」区块（新建 `TicketHistoryTimeline` 组件 + `utils/ticketHistory.ts` 纯函数），**不另开页面**。人是在「正看着这张工单」的时候问「谁改的」，多一次跳转就多一次上下文切换 —— 而详情弹窗此刻已经在屏幕上。
+
+| # | 决定 | 理由 |
+|---|---|---|
+| UI-1 | 按 `batch_id` 分组，**一组 = 一次操作** | 后端返回平铺行（§2.6「不做展示层聚合」）。一次 PUT 改三个字段 = 三行，摊平读起来像「改了三次」。 |
+| UI-2 | **组内按 `field_name` 升序重排** | 读端点排序是 `created_at DESC, id DESC`，而同批次各行 `created_at` 相同 → 组内顺序由**随机 uuid** 决定，每次刷新都可能变（T-45 同族：写下来的顺序必须是确定的）。写入侧（§2.3）本来就是按列名升序输出的，这里重排正好**还原写入时的顺序**。 |
+| UI-3 | 组标题 = `经手人 · 时间`；出生批次显示「创建了这张工单」 | 人先看「谁在什么时候」，再看「改了什么」。 |
+| UI-4 | 首屏取 50 条，`total` 更大时给「加载更多」（追加下一页） | 长命工单的变更可能上百条，一屏塞不下；但不该让人够不到更早的。 |
+| UI-5 | 历史加载失败**不影响票面信息** | 票面数据来自父组件、已经在手；一个次要请求失败不该把主信息一起藏起来。错误只落在时间线区块内，带重试。 |
+| UI-6 | 空态文案「暂无经手记录（本功能上线前的改动未记录）」 | 表是刚建的，**所有老票都没历史**，这是常态不是异常。写「无记录」会被读成「这票没被改过」。 |
+| UI-7 | 值渲染：`null` → `（空）`；`""` → `（空字符串）`；`status`/`priority` 过字典；`*_at`/`*_date` 走 `formatDateTime` | 历史存的是**文本快照**（§2.3 不承诺类型保真），原样怼出来是 RFC3339 原文 + 英文枚举，与全站口径不一致（W2 统一时间出口）。**NULL 与空串必须显示成两个不同的东西** —— §2.3 的决定③就是「nil 与空串不等同」，UI 抹平它等于把那条决定废掉。时间列格式化**失败时回退显示原文**（值可能是被截断的文本快照，显示「—」等于把内容吞掉）。 |
+| UI-8 | `field_name` 字典查不到时**显示原列名**，不隐藏 | `tickets` 有 12 个模型外列（§2.3），它们**真的会进历史**。藏起来等于假装那次改动没发生。 |
+
+**为什么组内排序放在前端**：§2.6 已定「后端不做展示层聚合」，组内顺序是分组（展示层）的一部分；后端排序键 `id` 是**翻页全序**所必需的（T-45），不能为了组内好看去动它。
+
 ---
 
 ## 3. 契约
@@ -285,7 +302,7 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | ~~5a~~ ✅ | 读端点（service `ListHistory` + handler + 路由 + `ungatedRoutes` 登记 + 分页 clamp 500） | **已完成**。`ListHistory` 先做存在性检查（不存在 → `ErrNotFound`，**不是空列表** —— 空列表会让前端把「票不存在」读成「票没被改过」，渲染出一个并不存在的详情页）；排序 `created_at DESC, id DESC`（全序，T-45）；`page_size` 上限 500 与 `List` 同口径。单测 6 条：全序（时间相同的一对逼出 `id DESC` 这个次序键，期望顺序写成字面量而不是「按同样规则再排一遍」）、逐页拼起来恰好等于全序序列（重复/漏行都会露出来）、**页大小上限 500 用 501 行数据验**（五行数据下 `LIMIT 10000` 与 `LIMIT 500` 结果一样，那条用例会假绿）、越界页返回空、工单不存在 → `ErrNotFound`、黑盒读到 `Create`+`Update` 真写下的两行。handler 3 条：参数解析与响应形状（含 `actor_name` 必须回传）、缺省分页、404 映射。变异 **10/10** 红在预判用例上，其中 **V-9/V-10 守的是准入层**：不登记 `ungatedRoutes` → 分类闸门红；给它挂上 `canAudit`（推翻拍板③）→ `只读端点未被过度收紧` 红 |
 | ~~5b~~ ✅ | openapi + `gen:api` + 前端手写类型 | **已完成**。`openapi.yaml` 加 `/tickets/{id}/history`（get、`listTicketHistory`、query `page`/`page_size`、**补 404**）+ `TicketHistory`/`TicketHistoryList`。`data` 用**如实**的 `{items,total,page,size}`（照 `AlertList`；紧邻的 `TicketList` 把 `data` 写成裸数组是既有漂移，**不顺手改**）。分页回显键取 `size` —— 全仓不统一（`user_handler.go` 用 `page_size`），取**同页邻居** `GET /tickets` 为准。`TicketHistory` **如实声明 `required`**（本文件其余响应 schema 多不声明）：Go 侧 json 标签没有 `omitempty`，键一定在，不声明则生成物每个字段都带 `?`，消费者被迫写假的 `?.`。可空列（四个指针字段）在 JSON 里是**真 `null` 不是缺键** —— 出生行 `field_name` 就是 `null`。前端 `types/index.ts` 手写 `TicketHistory` + **双向可赋值断言**（`DriftOK` 本地→生成物、`DriftOKRev` 生成物→本地）。**不用 `User` 那种 `_Equal`**：它走条件类型**同一性**比较，结构与生成物一致时**也判 false**（实测），而这里要的是「结构一致」。**两条断言都不多余**：六条变异各红三条（正方向抓本地缺字段/放宽，反方向抓本地多必填/收窄）。方括号 `[X] extends [Y]` 不能省（裸类型参数会分配到 union 成员，漏掉整体等价性）。变异 **6/6** 红在预判断言上。⚠️ **首轮 6 条全被脚本判成「没红」而实际全红** —— tsc 的 TS2344 消息里**不含断言别名**，只给 `行:列`；判据改为「失败行号集合含目标行号」且行号在变异体上重新 grep（同步骤 4 的 V-5，**第二次踩同一个坑**）。门禁：`tsc --noEmit` 干净、`lint` 干净、vitest **37 文件 312 用例全过**、`go test ./internal/api/...` ok、`gen:api` 幂等（sha256 不变，本地复现 CI 那道 `git diff --exit-code` 闸门） |
 | ~~5c~~ ✅ | `CreateFromAlert` 补出生留痕（同事务）+ 签名收 `Actor`（D-8） | **已完成**。`ticket_service.go` 的接口与实现签名改收 `Actor`（旧签名收裸 `userID` 只当 requester 名用）；抢到认领的分支里加 `insertTicketBirth(tx, t.ID, uuid.New(), actor)` —— **与插票同一个 `tx`**，冲突时一起回滚；`ticket_handler.go` 改传 `actorFromContext(c)`（旧写法在那里取 `.Name` 把 ID 丢掉，出生行于是**没有 `actor_id`**；经手人解析由此收在与 `Create`/`Update` 同一个 helper，不再各处 parse）。**测试**：新增 2 条真 sqlite —— ① 写出生历史行（`kind=created`、`field_name`/`old_value`/`new_value` 三列皆 NULL、`batch_id` 非零、`actor_id` + `actor_name` 落库、挂在**刚建的这张票**上、`source` 与 `request_id` 为**空串**（钉住 D-6），而票自己的 `tickets.source='alert'` 承载来路）② 幂等路径（重复点击）不重复留痕。夹具侧把 ticket_history 的 DDL 抽成共享 helper `createTicketHistoryTable`，`newDiagTestDB` 与 `newTicketSQLiteDB` 共用 —— 抄两遍迟早只有一份被改。handler 侧同步 mock 签名，并给 requester 用例补上「**ID 也必须传下去**」的断言。**变异 9/9 红在目标断言上**：出生行整段不写 / actor 传零值 / kind 记成 updated / 挂错票 / 出生行填 source / actor_id 丢失 / actor_name 丢失 / batch_id 零值 / 幂等路径也留痕。⚠️ **本轮删掉了一条不可证伪的断言**（见下方小节）。**门禁**：`gofmt -l` 干净、`go vet ./...` 与 `go vet -tags dbsmoke ./tests/` 均无输出、`go test -count=1 ./...` 27 包全 ok、`internal/service` 84.9%、`internal/api/handlers` 65.0%；前端 0 改动故 tsc/lint/vitest 未跑（如实记录） |
-| 6 | 前端工单详情时间线（按 `batch_id` 分组） | vitest + tsc + eslint |
+| ~~6~~ ✅ | 前端工单详情时间线（按 `batch_id` 分组） | **已完成**。按 §2.8 的 UI-1..UI-8 落地：新增 `utils/ticketHistory.ts`（纯函数 `groupTicketHistory`/`formatHistoryValue`/`fieldLabel`）+ `components/TicketHistoryTimeline.tsx` + `services/api.ts` 的 `ticketApi.history` + `queryKeys.tickets.history`，挂在 `TicketDetailModal` 底部「经手记录」区块（`key={ticket.id}` —— 父组件直接换票时弹窗不重挂，不给 key 会把上一张的行带过来）。**把逻辑压进纯函数是有意的**：分组/排序/取值渲染才是会出错的部分，组件只剩取数与三态胶水 —— 前者脱离 React 单测与变异，后者只守它独有的事（空态不说谎、错误不外溢、加载更多真接在后面）。**测试 15 条**（10 纯函数 + 5 组件）。**变异 13/13 红在目标用例上**：组内不排序 / 降序 / 分组键用行 id / 组顺序按 batchId 排 / `null` 与空串合并 / 时间格式化失败吞成占位符 / 未知列不显示列名 / 空态写「暂无经手记录」/ loading 不早返回 / 错误态不渲染 / 加载更多替换而非追加 / 有更多也不给按钮 / 重复拉第 2 页。⚠️ **V-11 首轮 MISS 且零失败** —— 又是一条不可证伪的断言（见下方小节），已改成点两次「加载更多」。**门禁**：`tsc --noEmit` 干净、`lint --max-warnings 0` 干净、全量 vitest **39 文件 327 用例全过**（基线 37/312）。**同时修好被本次改动打红的一条既有用例**：`pages/Tickets.test.tsx` 的 `useApiQuery` mock 是按 key 分支返回的，`queryKeys.tickets` 里没有 `history` → 详情弹窗一渲染就在 `queryKeys.tickets.history(...)` 上抛 TypeError（`W2：详情弹窗的创建/更新时间同样格式化` 红）。mock 补 `history` 键并让历史请求返回空列表 —— **不是放宽断言，是 mock 跟不上真实契约** |
 
 ### 为什么 5c 排在 6 前面（按运营的实际工作流倒推，燕如 2026-09-11 授权定序）
 
@@ -317,6 +334,15 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 删掉它，并把这个结论写进用例注释（免得下一个人再补一遍）。**另一半** ——「工单在、出生行不在」—— 由 `TestTicketService_CreateFromAlert_写出生历史行` 守，那一条是可证伪的（V-1 删掉调用即红）。
 
 **教训**：变异反证的价值不止「证明断言有效」，还包括「**证明某条断言无效**」。断言写完先问一句：**什么样的代码改动会让它红？** 答不上来的，就是没在守任何东西。
+
+### 步骤 6 又抓到一条同族的（2026-09-11）
+
+前端「加载更多」用例原本只点**一次**，注释写着「追加而不是替换：原来那行还在」，断言 `张三`（第 1 页的行）仍在。变异 V-11 把 `setExtra((prev) => [...prev, ...next.items])` 改成 `setExtra(next.items)`（替换式），**零失败**：
+
+- `extra` 首次点击时是**空数组**，`[...prev, ...items]` 与 `next.items` 结果**逐字相同** —— 这一次点击里两种写法不可区分；
+- 被断言「还在」的 `张三` 来自 `data.items`（第 1 页，走 `useApiQuery` 那条路），替换 mutation **根本碰不到它**。
+
+断言为真，但真因不是注释写的那个 —— 与 5c 那条是同一个病：**断言描述的现象和它实际守住的东西不是一回事**。改成点两次（第二次时 `extra` 里已有第 2 页的行，替换式写法会让第一个新增行消失），V-11 立刻红。「点一次就够」在这类**累积状态**上是通病，判据仍是同一句：什么样的改动会让它红。
 
 ### 步骤 0 实测结论（2026-09-11，运行验证；探针文件已删）
 

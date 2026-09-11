@@ -45,6 +45,17 @@ vi.mock('../hooks/useApiQuery', () => ({
         ...h.statsOverride,
       }
     }
+    if (k[1] === 'history') {
+      // M25 经手记录时间线（TicketDetailModal 内）。这里只要求它别把详情弹窗带崩 ——
+      // 分组/渲染的正确性在 TicketHistoryTimeline.test.tsx 与 utils/ticketHistory.test.ts。
+      return {
+        data: { items: [], total: 0 },
+        isLoading: false,
+        isError: false,
+        error: undefined,
+        refetch: vi.fn(),
+      }
+    }
     // M3/P5：data 结构改为 {items, total}（服务端分页契约）。记录 queryKey 供分页/筛选变化断言。
     h.lastListKey = key
     return {
@@ -61,6 +72,7 @@ vi.mock('../hooks/useApiQuery', () => ({
     tickets: {
       list: (f?: unknown) => ['tickets', 'list', f ?? {}],
       stats: () => ['tickets', 'stats'],
+      history: (id: string) => ['tickets', 'history', id],
     },
   },
 }))

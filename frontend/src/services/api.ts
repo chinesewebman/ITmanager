@@ -178,6 +178,10 @@ export const ticketApi = {
   get: (id: string) => api.get(`/tickets/${id}`),
   create: (data: any) => api.post("/tickets", data),
   update: (id: string, data: any) => api.put(`/tickets/${id}`, data),
+  // M25 经手历史。分页键是 size（不是 page_size）—— 与同页邻居 GET /tickets 一致，
+  // 全仓本就不统一（user_handler 用 page_size），契约层也是 size。
+  history: (id: string, params?: { page?: number; page_size?: number }) =>
+    api.get(`/tickets/${id}/history`, { params }),
 };
 
 // ==================== 用户 ====================

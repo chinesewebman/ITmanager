@@ -2,6 +2,7 @@ import { Button, Col, Modal, Row } from 'antd'
 import { StatusTag } from './StatusTag'
 import { formatDateTime } from '../utils/time'
 import type { Ticket } from './TicketTable'
+import { TicketHistoryTimeline } from './TicketHistoryTimeline'
 
 const PRIORITY_LABEL: Record<string, string> = {
   critical: '紧急',
@@ -77,6 +78,15 @@ export function TicketDetailModal({ ticket, onClose }: TicketDetailModalProps) {
               {formatDateTime(ticket.updated_at)}
             </Col>
           </Row>
+
+          {/* M25 经手记录。key=ticket.id：换一张票就重挂，省得把上一张的行带过来
+              （弹窗 destroyOnClose 只在关闭时销毁，父组件直接换 ticket 时不会重挂）。 */}
+          <div style={{ marginTop: 8 }}>
+            <strong>经手记录</strong>
+            <div style={{ marginTop: 8 }}>
+              <TicketHistoryTimeline key={ticket.id} ticketId={ticket.id} />
+            </div>
+          </div>
         </>
       )}
     </Modal>

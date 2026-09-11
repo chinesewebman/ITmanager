@@ -14,18 +14,18 @@ dayjs.locale('zh-cn')
 dayjs.extend(relativeTime)
 
 /** 空值/非法时间的统一占位符（不要显示 Invalid Date 或空字符串）。 */
-const EMPTY = '—'
+export const EMPTY_TIME = '—'
 
 /** 绝对时间：'YYYY-MM-DD HH:mm:ss'（本地时区）。 */
 export function formatDateTime(iso?: string | null): string {
-  if (!iso) return EMPTY
+  if (!iso) return EMPTY_TIME
   const d = dayjs(iso)
-  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : EMPTY
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : EMPTY_TIME
 }
 
 /** 相对时间：'3 分钟前' / '2 天前'。 */
 export function formatRelativeTime(iso?: string | null): string {
-  if (!iso) return EMPTY
+  if (!iso) return EMPTY_TIME
   const d = dayjs(iso)
-  return d.isValid() ? d.fromNow() : EMPTY
+  return d.isValid() ? d.fromNow() : EMPTY_TIME
 }

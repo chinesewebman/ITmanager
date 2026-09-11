@@ -26,6 +26,7 @@ export const queryKeys = {
     all: ['tickets'] as const,
     list: (filters?: Record<string, unknown>) => ['tickets', 'list', filters ?? {}] as const,
     stats: () => ['tickets', 'stats'] as const,
+    history: (id: string) => ['tickets', 'history', id] as const,
   },
   dashboard: {
     stats: () => ['dashboard', 'stats'] as const,
