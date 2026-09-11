@@ -158,6 +158,17 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket, actor Acto
 		now := time.Now()
 		t.ClosedAt = &now
 	}
+	// M25：同一个不变式的第二个入口 —— 出生即 resolved 也要落下 resolved_at。
+	// 不补的话这张票「已解决但没有解决时刻」：`diagnostic_service` 的资产时间线靠
+	// `resolved_at IS NOT NULL` 派生「已解决」事件，它永远没有；MTTR 也算不出。
+	// 调用方显式给了时间（回灌带原始 SolvedDate）时不覆盖。
+	//
+	// status='closed' 出生时**不补** resolved_at：那会凭空发明一个从未发生过的解决时刻。
+	// closed 的语义是「保留已有的解决时间」，出生时本来就没有。
+	if t.Status == "resolved" && t.ResolvedAt == nil {
+		now := time.Now()
+		t.ResolvedAt = &now
+	}
 	// 工单号在 BeforeCreate 里按「当天已建数量」生成，并发下两个请求可能算出同一个号。
 	// 唯一索引拒绝后重新生成并重试（最多 5 次），彻底消除竞态（缺陷 D-2）。
 	//
@@ -482,14 +493,38 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	// 已知边界：只传 closed_at 不传 status 的请求不进这段逻辑（gorm 原样写列）。那种请求能
 	// 给已关闭的工单补时间，也能把一张 open 的工单写成「有 closed_at 却不 closed」——
 	// 后者会复现本段要治的时间线假事件。没有已知调用方，登记在 §8，不在这里替对接方决定。
+	// M25：resolved_at 与 closed_at 同一套语义（燕如 2026-09-11 拍板「当前状态」语义）。
+	// 三个场景各自的期望：
+	//
+	//	status 不是 resolved/closed → NULL。重开/退回必须清掉，否则读端点与资产时间线
+	//	                             仍拿它当「已解决」的证据。清掉的值不会丢 ——
+	//	                             同事务的字段级 diff 会留下 old_value。
+	//	status 是 resolved 且原本无值 → now。这一刻是真正的解决时刻。
+	//	status 是 resolved 且原本有值 → 保留（COALESCE）。关掉描述再存一次不该把 MTTR 重置。
+	//	status 是 closed             → **保留不动**：resolved→closed 时 MTTR 仍要算得出，
+	//	                             清掉会让已关闭的票丢掉解决时刻。
+	//
+	// 与 closed_at 分开写两条表达式而不是揉成一条：两条列的转移表不同（closed_at 在任何
+	// 非 closed 状态下都必须为 NULL，resolved_at 在 closed 下必须存活），揉在一起只会让
+	// 「哪条列在哪个状态该是什么」变得读不出来。
 	if status, ok := updates["status"].(string); ok {
-		var explicit interface{}
+		var explicitClosed, explicitResolved interface{}
 		if v, ok := updates["closed_at"]; ok {
-			explicit = v
+			explicitClosed = v
+		}
+		if v, ok := updates["resolved_at"]; ok {
+			explicitResolved = v
 		}
 		updates["closed_at"] = gorm.Expr(
 			"CASE WHEN ? = 'closed' THEN COALESCE(?, closed_at, ?) ELSE NULL END",
-			status, explicit, time.Now())
+			status, explicitClosed, time.Now())
+		// closed 这一支用 COALESCE(?, resolved_at) 而不是裸 resolved_at：默认「保留」，
+		// 但调用方显式给了值就**不能悄悄丢掉**（与 resolved 那一支的取向一致；
+		// 不给 now 兜底 —— 出生即关闭的票不该被发明一个解决时刻）。
+		updates["resolved_at"] = gorm.Expr(
+			"CASE WHEN ? = 'resolved' THEN COALESCE(?, resolved_at, ?)"+
+				" WHEN ? = 'closed' THEN COALESCE(?, resolved_at) ELSE NULL END",
+			status, explicitResolved, time.Now(), status, explicitResolved)
 	}
 	// 写入与留痕同事务：diff 的 pre-image 必须**属于本次写入**，否则并发 PUT 会让
 	// 第二条历史的 from 归错。pre 用原始行 map 而不是 struct —— 见 diffTicketRows 注释。

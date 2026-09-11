@@ -1123,3 +1123,173 @@ func TestTicketService_Create_留痕_插历史失败整单回滚(t *testing.T) {
 	require.NoError(t, db.Model(&models.Ticket{}).Count(&tickets).Error)
 	assert.Zero(t, tickets, "回滚必须连工单行一起撤销")
 }
+
+// ==================== M25：resolved_at 与 status 的一致性 ====================
+//
+// 语义与 closed_at（M24）同族但**转移表不同**：closed_at 在任何非 closed 状态下都必须为
+// NULL；resolved_at 在 **closed 下必须存活** —— 否则 resolved→closed 之后 MTTR 归零。
+// 「重开清空」是燕如 2026-09-11 的拍板（当前状态语义），配套约定是**清掉的值进历史**，
+// 所以这里既钉库里的值，也钉历史里那行 old_value。
+func TestTicketService_Update_解决时间随状态跃迁(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+
+	seed := func(t *testing.T, status string, resolvedAt *time.Time) (*gorm.DB, TicketService, uuid.UUID) {
+		t.Helper()
+		db := newTicketSQLiteDB(t)
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Ticket{ //nolint:exhaustruct
+			ID: id, TicketNumber: "TICKET-20260101-A", Title: "原标题", Status: status,
+			ResolvedAt: resolvedAt, CreatedAt: t0, UpdatedAt: t0,
+		}).Error)
+		return db, NewTicketService(db), id
+	}
+	load := func(t *testing.T, db *gorm.DB, id uuid.UUID) models.Ticket {
+		t.Helper()
+		var after models.Ticket
+		require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+		return after
+	}
+
+	t.Run("进入resolved_写now", func(t *testing.T) {
+		db, svc, id := seed(t, "in_progress", nil)
+		got, err := svc.Update(context.Background(), id.String(),
+			map[string]interface{}{"status": "resolved"}, testActor())
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ResolvedAt, "进入 resolved 必须记解决时刻，否则 MTTR 与时间线都看不见它")
+		assert.WithinDuration(t, time.Now(), *after.ResolvedAt, time.Minute)
+		require.NotNil(t, got)
+		require.NotNil(t, got.ResolvedAt, "响应体里的 resolved_at 不得为空")
+		assert.WithinDuration(t, *after.ResolvedAt, *got.ResolvedAt, time.Second,
+			"响应体里的 resolved_at 必须与库中一致")
+	})
+
+	// 本轮工作流的起因：重开必须清掉 resolved_at，否则「当前状态」是假的。
+	// 但**清掉不等于丢掉** —— 同事务的字段级 diff 会把被清掉的时间留在历史里。
+	t.Run("重开工单_清空resolved_at且被清的值进历史", func(t *testing.T) {
+		db, svc, id := seed(t, "resolved", &t0)
+		got, err := svc.Update(context.Background(), id.String(),
+			map[string]interface{}{"status": "open"}, testActor())
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		assert.Equal(t, "open", after.Status)
+		assert.Nil(t, after.ResolvedAt, "重开后 resolved_at 必须清空（当前状态语义）")
+		require.NotNil(t, got)
+		assert.Nil(t, got.ResolvedAt, "响应体里的 resolved_at 不得落后于库")
+
+		row, ok := historyOf(t, db, id)["resolved_at"]
+		require.True(t, ok, "清空 resolved_at 必须留痕 —— 否则「谁在何时解决的」永久消失")
+		require.NotNil(t, row.OldValue, "被清掉的时间要留在 old_value 里")
+		assert.Contains(t, *row.OldValue, "2026-01-01", "old_value 必须是原解决时刻")
+		assert.Nil(t, row.NewValue, "新值为 NULL（不是空串）—— 读端要能分辨「没有值」")
+	})
+
+	// resolved→closed 是本轮最关键的**反面用例**：closed_at 那套写法的直觉会把它一起清掉。
+	t.Run("resolved到closed_保留解决时间", func(t *testing.T) {
+		db, svc, id := seed(t, "resolved", &t0)
+		_, err := svc.Update(context.Background(), id.String(),
+			map[string]interface{}{"status": "closed"}, testActor())
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ResolvedAt,
+			"resolved→closed 必须保留解决时刻，否则已关闭的票 MTTR 归零")
+		assert.WithinDuration(t, t0, *after.ResolvedAt, time.Second)
+		require.NotNil(t, after.ClosedAt, "同时要落下关闭时刻")
+	})
+
+	t.Run("已解决工单再PATCH_不重置解决时间", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			updates map[string]interface{}
+		}{
+			{"重复置resolved", map[string]interface{}{"status": "resolved", "description": "改个描述"}},
+			{"只改其它列", map[string]interface{}{"description": "改个描述"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				db, svc, id := seed(t, "resolved", &t0)
+				_, err := svc.Update(context.Background(), id.String(), tc.updates, testActor())
+				require.NoError(t, err)
+
+				after := load(t, db, id)
+				require.NotNil(t, after.ResolvedAt)
+				assert.WithinDuration(t, t0, *after.ResolvedAt, time.Second,
+					"一次无关编辑不得把 MTTR 重置成 now")
+			})
+		}
+	})
+
+	// 已知边界（按 §2.5 规范写、未加 extra CASE）：closed→resolved 直接跳转时，
+	// 若这张票当初是 resolved→closed 过来的，它带着真实的解决时刻 —— 回到 resolved
+	// 应当保留它，而不是当成一次新的解决。这条钉住的是「不加额外分支」这个决定本身，
+	// 免得日后被当成 bug「修」成 now（那会把 MTTR 与时间线一起改掉）。
+	t.Run("closed回到resolved_保留既有解决时刻", func(t *testing.T) {
+		db, svc, id := seed(t, "closed", &t0)
+		_, err := svc.Update(context.Background(), id.String(),
+			map[string]interface{}{"status": "resolved"}, testActor())
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ResolvedAt)
+		assert.WithinDuration(t, t0, *after.ResolvedAt, time.Second)
+		assert.Nil(t, after.ClosedAt, "回到 resolved 已经离开 closed，关闭时刻必须清掉")
+	})
+
+	t.Run("关闭时显式给resolved_at_尊重调用方", func(t *testing.T) {
+		db, svc, id := seed(t, "open", nil)
+		_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
+			"status": "closed", "resolved_at": t1,
+		}, testActor())
+		require.NoError(t, err)
+
+		after := load(t, db, id)
+		require.NotNil(t, after.ResolvedAt,
+			"调用方显式给的 resolved_at 不得被「closed 保留原值」这条规则悄悄丢掉")
+		assert.WithinDuration(t, t1, *after.ResolvedAt, time.Second)
+	})
+}
+
+// 同一个不变式的第二个入口：出生即 resolved 也要落 resolved_at。
+func TestTicketService_Create_出生即解决_写resolved_at(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	svc := NewTicketService(db)
+
+	t.Run("status为resolved_落now", func(t *testing.T) {
+		tk := &models.Ticket{Title: "回灌工单", Status: "resolved"} //nolint:exhaustruct
+		require.NoError(t, svc.Create(context.Background(), tk, testActor()))
+
+		var got models.Ticket
+		require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+		require.NotNil(t, got.ResolvedAt,
+			"建单即解决必须落下 resolved_at，否则 MTTR 与资产时间线都看不见它")
+		assert.WithinDuration(t, time.Now(), *got.ResolvedAt, time.Minute)
+	})
+
+	t.Run("显式给resolved_at_不覆盖", func(t *testing.T) {
+		t1 := time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)
+		tk := &models.Ticket{Title: "回灌工单", Status: "resolved", ResolvedAt: &t1} //nolint:exhaustruct
+		require.NoError(t, svc.Create(context.Background(), tk, testActor()))
+
+		var got models.Ticket
+		require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+		require.NotNil(t, got.ResolvedAt)
+		assert.WithinDuration(t, t1, *got.ResolvedAt, time.Second,
+			"对接回灌的原始解决时间不得被 now 覆盖")
+	})
+
+	// status=closed 出生时**不补** resolved_at：那会凭空发明一个从未发生过的解决时刻。
+	// 这条是**反面**用例 —— 把 closed 也一并补上是很自然的「顺手」，必须被挡住。
+	t.Run("status为closed_不发明解决时刻", func(t *testing.T) {
+		tk := &models.Ticket{Title: "直接关闭的工单", Status: "closed"} //nolint:exhaustruct
+		require.NoError(t, svc.Create(context.Background(), tk, testActor()))
+
+		var got models.Ticket
+		require.NoError(t, db.First(&got, "id = ?", tk.ID.String()).Error)
+		require.NotNil(t, got.ClosedAt)
+		assert.Nil(t, got.ResolvedAt,
+			"closed 的语义是「保留已有的解决时间」，出生时本来就没有 —— 不能发明一个")
+	})
+}

@@ -1037,6 +1037,72 @@ func TestDBSmoke_TicketHistory(t *testing.T) {
 		"ticket_id 的 ON DELETE 规则变了 —— 历史与工单的生命周期绑定是有意选的，改动要同步文档")
 }
 
+// TestDBSmoke_TicketResolvedAt resolved_at 的三态转移表在**真 Postgres** 上确实成立。
+//
+// 为什么必须上真库：这条 CASE 把「调用方没给值」表达成 **nil 参数**
+// （`COALESCE($2, resolved_at, $3)`）。sqlite 基座对 nil 参数照单全收，真库要先做
+// 参数类型推断 —— 推不出来就是 42P18 `could not determine data type of parameter $2`，
+// 单测永远看不见。同理「CASE 把它写成 NULL」之后读回来到底是 NULL 还是零值时间、
+// 时间列走一遍 COALESCE 之后精度剩多少，也只有真驱动说了算。
+//
+// 四条断言各对应设计文档 §2.5 的一格：
+//  1. 进入 resolved → now（COALESCE 第三个参数真被用上）
+//  2. resolved → closed 保留（走 `COALESCE($2, resolved_at)` 且 $2 为 nil 那一支）
+//  3. 重开 → NULL（`ELSE NULL` 落在一张时间列上）
+//  4. 被清掉的值进历史（old_value 有值 / new_value 为 NULL）
+func TestDBSmoke_TicketResolvedAt(t *testing.T) {
+	db := openSmokeDB(t)
+	svc := service.NewTicketService(db)
+	ctx := context.Background()
+	actor := service.Actor{Name: "dbsmoke"}
+
+	tk := &models.Ticket{ //nolint:exhaustruct
+		Title: "dbsmoke resolved_at", TicketType: "incident", Priority: "low", Status: "open",
+	}
+	require.NoError(t, svc.Create(ctx, tk, actor), "建单失败 —— Create 在真库上没走通")
+
+	// ① open → resolved
+	got, err := svc.Update(ctx, tk.ID.String(), map[string]interface{}{"status": "resolved"}, actor)
+	require.NoError(t, err, "status→resolved 的 CASE 在真库上求值失败（多半是 nil 参数推不出类型）")
+	require.NotNil(t, got.ResolvedAt, "进入 resolved 必须落下解决时刻")
+	resolvedAt := *got.ResolvedAt
+
+	// ② resolved → closed：保留解决时刻（已关闭的票 MTTR 靠它）
+	got, err = svc.Update(ctx, tk.ID.String(), map[string]interface{}{"status": "closed"}, actor)
+	require.NoError(t, err, "status→closed 的 CASE 在真库上求值失败")
+	require.NotNil(t, got.ResolvedAt, "resolved→closed 丢了解决时刻，已关闭的票 MTTR 会归零")
+	assert.True(t, resolvedAt.Equal(*got.ResolvedAt), "解决时刻被改写: %v → %v", resolvedAt, *got.ResolvedAt)
+
+	// ③ 重开 → NULL。判据走 SQL 而不是 Go 侧指针：指针为 nil 只说明「没读出来」，
+	// 分不出「列是 NULL」和「驱动把零值时间读成了 nil」。
+	_, err = svc.Update(ctx, tk.ID.String(), map[string]interface{}{"status": "open"}, actor)
+	require.NoError(t, err, "重开的 CASE 在真库上求值失败")
+	var isNull bool
+	require.NoError(t, db.Raw(`SELECT resolved_at IS NULL FROM tickets WHERE id = ?`, tk.ID).
+		Scan(&isNull).Error)
+	assert.True(t, isNull, "重开后 resolved_at 必须真的是 NULL，否则时间线上永久挂着一条「已解决」")
+
+	// ④ 被清掉的值进历史。不按下标取行：同一秒内的两行没有可靠顺序（T-45），
+	// 按「new_value 为 NULL 的那一行」定位，顺带把「清空」与「写入」两种行都覆盖到。
+	var hist []struct{ OldValue, NewValue *string }
+	require.NoError(t, db.Raw(`
+		SELECT old_value, new_value FROM ticket_history
+		 WHERE ticket_id = ? AND field_name = 'resolved_at'`, tk.ID).Scan(&hist).Error)
+	require.NotEmpty(t, hist, "resolved_at 的两次变更在真库上没有留下历史行")
+
+	var cleared bool
+	for _, h := range hist {
+		if h.NewValue != nil {
+			continue
+		}
+		cleared = true
+		require.NotNil(t, h.OldValue, "清空那一行的 old_value 不能为空 —— 否则「谁在何时解决的」永久消失")
+		assert.Equal(t, resolvedAt.UTC().Format(time.RFC3339Nano), *h.OldValue,
+			"被清掉的时间必须原样进 old_value")
+	}
+	assert.True(t, cleared, "清空 resolved_at 没有留下 new_value 为 NULL 的历史行（空串不算 NULL）")
+}
+
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。
 // down.sql 曾无条件 DROP tickets.ticket_type（up 里对它是 no-op），
 // 回滚后该列与数据一起消失，且 GORM 枚举 Ticket.TicketType 会直接 500（审计 阻断-2）。

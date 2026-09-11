@@ -280,7 +280,7 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | ~~1~~ ✅ | 迁移 `000025` + `models.TicketHistory`（含 `TableName()`）+ `liveModels()` + `autoMigrate()` + `db_smoke.sh` 白名单 + Down 链断言 + `TestDBSmoke_TicketHistory` | **已完成**：真 PG 冒烟两轮全绿（`✓ applied 25_000025_ticket_history`、Down 链 `25→24→23→21→…→13`）；`TestDBSmoke_TicketHistory` 确认在白名单里**真跑**（T-42 假绿已排除）；变异 V-1/V-2/V-4/V-5 全部红在预判断言上 |
 | ~~2~~ ✅ | `Actor` + `Update` 签名变更（1 handler + 13 测试 + 1 mock）+ 事务/行锁 + **原始行 map diff** + 批量插历史 | **已完成**（2a diff 纯函数 / 2b 签名与接线 / 2c 事务与留痕）。单测：字段级 diff、**无变化 PUT → 0 行**、`updated_at` 不入历史、**模型外列也留痕**、actor 快照、同事务回滚、**pre 必须在 UPDATE 前读**（形态守卫：`old_value` 必须是写入前的值，同 M24 V-5 同族）。变异 7/7 红在预判用例上；真 PG 探针验过 `LIMIT $2 FOR UPDATE` 语法与 4 行历史落库 |
 | ~~3~~ ✅ | `Create` 出生事件（**每次尝试各一事务**，含重试） | **已完成**。单测：出生行 kind/actor 快照/批次非零值、无 user id 时留姓名、**撞号重试失败不留任何行**（工单与出生行都不留）、**插历史失败整单回滚**；handler 侧钉住经手人真的传下去了。变异 **8/8** 红在预判用例上。真 PG 探针四条全 PASS：出生行落库（`ticket_id` 带 FK，同事务才插得进）、撞号整单回滚不留孤儿、**长事务里重试确实死于 25P02**、每次尝试各一事务时撞号自愈成功。⚠️ 原验证列写的「验 `source`」**已过时** —— 按 D-6，`source` 留 NULL 待拍板 |
-| 4 | `resolved_at` 随状态收口 | 单测（真 sqlite）：三态 + **`resolved→closed` 保留的反面用例** + 变异反证 + 真 PG 方言 |
+| ~~4~~ ✅ | `resolved_at` 随状态收口 | **已完成**。Update 里与 `closed_at` 并列一条 `CASE`，Create 补同一个不变式的第二个入口。单测（真 sqlite）：进入 resolved 写 now / **重开清空且被清的值进历史**（`old_value` 有值、`new_value` 为 NULL）/ 重复 PUT 不重置 / **`resolved→closed` 保留的反面用例**（照抄 `closed_at` 写法就会红）/ closed 时显式给值被尊重 / **closed→resolved 保留既有解决时刻**（钉住「不加额外分支」这个决定）；Create 侧：出生即 resolved 落 now、显式值不被覆盖、**出生即 closed 不发明解决时刻**。变异 **9/9** 红在预判用例上。真 PG 落成**常驻用例** `TestDBSmoke_TicketResolvedAt`（已进 `db_smoke.sh` 白名单）：nil 参数的类型推断、`ELSE NULL` 在时间列上真是 NULL、`resolved→closed` 保留、历史快照文本逐字比对 |
 | 5 | 读端点 + `ungatedRoutes` 登记 + 分页 clamp 500 + openapi + `gen:api` + 前端手写类型 | handler 用例（分页/404/排序/上限）+ 路由分类闸门 + 契约漂移闸门 |
 | 6 | 前端工单详情时间线（按 `batch_id` 分组） | vitest + tsc + eslint |
 
@@ -383,6 +383,16 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 1. **`LIMIT $2 FOR UPDATE` 在真 PG 上合法**且与事务包裹共用时路径可通 —— sqlite 基座不渲染它、sqlmock 只做字符串匹配，两者都绿也证明不了这一点。
 2. **一次 PUT 落 4 行历史**（`title` / `status` / `closed_at` / `assignee_group`），共享同一 `batch_id`，`actor_name` 快照与 `actor_id` 均正确；同值 PUT **不新增行**（真 PG 的时间戳精度没有把「同值」骗成有变化）。
 3. **`tickets` 的 12 个模型外列在真 PG 上类型各异**，探针连炸两次才摸清：`alert_id` 是 **`UUID REFERENCES alerts(id)`**（传字符串 → 22P02；传随机 uuid → 23503 外键违例），`reviewer_id` 同为带外键的 UUID，`cc_users` 是 `UUID[]`，`attachments` 是 `JSONB`，`progress` 是 `DECIMAL(5,2)`。**而 sqlite 基座里这些列是宽松的 TEXT 且无外键** —— 同一条「模型外列留痕」的用例在基座上是绿的、在真库上会因类型或外键炸掉。这条对**步骤 5 的读端点**有直接影响：历史里存的是 `historyValueText` 归一后的文本，读端点若要按类型渲染（比如 `attachments` 当 JSON 展开、`cc_users` 当数组），得知道原列类型。当前实现只存文本，**不承诺类型保真**。
+
+**步骤 4 真 PG 结论（与前三步不同：这次落成常驻用例，不再跑完即删）**：`TestDBSmoke_TicketResolvedAt` 已进 `db_smoke.sh` 白名单，四条断言在真 PG 上通过 ——
+1. **预判的风险没有发生，但要记下它被排除过**：这条 `CASE` 把「调用方没给值」表达成 **nil 参数**（`COALESCE($2, resolved_at, $3)`），真 PG 要先做参数类型推断，推不出来就是 `42P18 could not determine data type of parameter $2` —— 这是 sqlite 基座（对 nil 照单全收）永远看不见的一类失败。实测 PG 能从 `COALESCE` 的其它分支推断出 `$2` 的类型，**不需要显式 cast**。日后若把这条表达式拆开或换写法，第一件事就是重跑这个用例。
+2. **`ELSE NULL` 落在时间列上真是 NULL**：判据走 SQL（`SELECT resolved_at IS NULL`），不是 Go 侧指针 —— 指针为 nil 只说明「没读出来」，分不出「列是 NULL」和「驱动把零值时间读成了 nil」。
+3. **`resolved→closed` 保留**在真库上成立（走 `COALESCE($2, resolved_at)` 且 `$2` 为 nil 那一支）。
+4. **历史快照逐字比对**：被清掉的时间在 `old_value` 里是 `resolvedAt.UTC().Format(RFC3339Nano)`，`new_value` 是 NULL（不是空串）—— 这条把「重开可追溯」从「表里有行」升级为「值原样存住了」。
+
+**步骤 4 登记的两条边界（按 §2.5 规范写、不顺手加分支）**：
+1. **`closed→resolved` 直接跳转时保留既有 `resolved_at`**：一张 `resolved→closed` 过来的票回到 `resolved`，`COALESCE` 会保留它当初真实的解决时刻，而不是当成一次新解决。这是「不加 extra CASE」的**有意**结果，已用 `closed回到resolved_保留既有解决时刻` 钉住 —— 免得日后被当成 bug「修」成 `now`（那会把 MTTR 与时间线一起改掉）。要改就是一次独立决策，不是顺手。
+2. **「只传 `resolved_at` 不传 `status`」的口子**：与 `closed_at` 完全对称（§2.5 后果 2），本轮**对称登记**、不顺手加拒绝。
 
 **sqlite 基座与真库的第二处差异（步骤 3 撞到，登记）**：`newTicketSQLiteDB` 手写的 `tickets` DDL **没有 `ticket_number` 唯一索引**（生产有 `uniqueIndex`）→ 撞号重试这条路径在基座上**根本不可达**：不补索引的话，那条「撞号失败不留任何行」的用例会**假绿**（第一次尝试就成功，压根没进重试分支）。修法是在用例里补一个只属于该用例的 `CREATE UNIQUE INDEX`，让基座在这一列上与生产同构。两处差异同族：**基座宽松、真库严格 —— 绿的不算数，得知道绿在哪一层**。
 
