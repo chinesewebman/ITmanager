@@ -9,9 +9,27 @@
 # 辅助系统（netbox/zabbix/glpi/graylog/elasticsearch/mongoDB）全部在 `aux` profile 下，
 # 需 `docker compose --profile aux up -d` 显式拉起。原因：它们目前是占位凭据、
 # 独立库也未初始化，默认拉起会失败并把已知凭据暴露到宿主。生产化见 TODO G-17。
+#
+# 日志轮转（TODO G-29）：Docker 默认的 json-file 驱动**不轮转**，日志在
+# /var/lib/docker/containers/<id>/<id>-json.log 单调增长。api（访问日志 + 慢查询）
+# 与 web（nginx access log）长期运行会把宿主盘写满，写满后 postgres 写入失败、
+# 容器异常重启，且 `docker compose logs` 本身也不可用。故所有服务统一上限
+# 10MB × 5 = 50MB/服务。运维说明见 08-部署运维.md §8.4.4。
+#
+# 注意锚点里必须自带 `logging:` 这一层：`<<:` 是把锚点的条目**平铺**进服务，
+# 写成裸的 driver/options 会变成服务的顶层属性，`docker compose config` 直接报
+# `Additional property driver is not allowed`。
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
 services:
   # PostgreSQL 数据库 (主数据库)
   postgres:
+    <<: *default-logging
     image: timescale/timescaledb:latest-pg16
     container_name: nmp-postgres
     restart: unless-stopped
@@ -35,6 +53,7 @@ services:
 
   # Redis 缓存
   redis:
+    <<: *default-logging
     image: redis:7-alpine
     container_name: nmp-redis
     restart: unless-stopped
@@ -52,6 +71,7 @@ services:
   # 后端 API（启动时自动执行数据库迁移，见 docs/FIX-PLAN-COMPOSE-RUNTIME.md D-C）
   # 单副本约束：迁移用非阻塞 pg_try_advisory_lock，多副本冷启动时抢不到锁的副本会启动失败。
   api:
+    <<: *default-logging
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -96,6 +116,7 @@ services:
 
   # 前端
   web:
+    <<: *default-logging
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -120,6 +141,7 @@ services:
 
   # NetBox (资产管理)
   netbox:
+    <<: *default-logging
     image: netboxcommunity/netbox:v4.0
     container_name: nmp-netbox
     profiles: ["aux"]
@@ -148,6 +170,7 @@ services:
   # 注意：这是 zabbix-server 进程，没有 Web/API；api 侧的 ZABBIX_URL 需要
   # zabbix-web-nginx-pgsql（见 08-部署运维.md §8.3）。
   zabbix:
+    <<: *default-logging
     image: zabbix/zabbix-server-pgsql:latest
     container_name: nmp-zabbix
     profiles: ["aux"]
@@ -170,6 +193,7 @@ services:
 
   # GLPI (工单)
   glpi:
+    <<: *default-logging
     image: linuxserver/glpi:latest
     container_name: nmp-glpi
     profiles: ["aux"]
@@ -193,6 +217,7 @@ services:
 
   # Graylog (日志)
   graylog:
+    <<: *default-logging
     image: graylog/graylog:6.0
     container_name: nmp-graylog
     profiles: ["aux"]
@@ -220,6 +245,7 @@ services:
 
   # Elasticsearch (Graylog 依赖)
   elasticsearch:
+    <<: *default-logging
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: nmp-elasticsearch
     profiles: ["aux"]
@@ -238,6 +264,7 @@ services:
 
   # MongoDB (Graylog 依赖)
   mongoDB:
+    <<: *default-logging
     image: mongo:7
     container_name: nmp-mongodb
     profiles: ["aux"]

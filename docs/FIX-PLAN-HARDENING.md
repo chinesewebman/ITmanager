@@ -553,3 +553,25 @@ F 项无代码，不单独占一次推送。
 | M28-M4 | `apierr.Internal(...)` → `_ = fmt.Errorf(...)` + `c.Next()`（保 `fmt` 使用） | **红**：同上两条用例 |
 
 **残余/诚实声明**：`VerifyToken` 不校验 `claims.UserID` 非空，故「签名合法但 `user_id` 为空」的 token 会命中 500 分支（生产不会产生此 token，可达性极低）。不为它加代码，理由见 §2.2。
+
+### 8.3 C 项（G-29）— 已交付 2026-09-11
+
+**改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `docker-compose.yml` | `services:` 前新增 `x-logging: &default-logging`（**锚点内自带 `logging:` 层**）+ 10 个服务各加一行 `<<: *default-logging`；顶部注释说明为何锚点必须自带 `logging:` 层 |
+| `08-部署运维.md`（仓库根） | 新增 **§8.4.4 容器日志轮转（json-file 上限）**，含增长特征表、锚点坑、验证命令与「不要用 `grep -c` 检查」的原因；**未改动 §8.4.3** |
+
+**验证**：
+- `docker compose --profile aux config -q` 通过；`--format json` 逐服务判定：**服务数 10、`missing logging = []`、`wrong max-size = []`**。
+- **变异反证（配置项，非 Go 测试）**：
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M28-M5 | 删掉 `mongoDB` 的 `<<: *default-logging` 行 | **红**：检查输出 `服务数: 10 未配上限: ['mongoDB']` 并 `AssertionError` 退出（退出码 1）。证明该检查不是恒真 |
+| M28-M6 | 锚点改成裸 `driver`/`options`（rev1 的写法） | **红**：`docker compose config` 报 `services.postgres Additional property driver is not allowed`（在 /tmp 独立复现，见 §7.1 #1） |
+
+  变异后 `cp` 还原，`grep -c '<<: *default-logging'` = 10。
+
+**说明**：本项无 Go 代码改动，`scripts/db_smoke.sh` 不受影响。
