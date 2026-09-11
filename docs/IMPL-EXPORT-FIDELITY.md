@@ -500,4 +500,60 @@ cd frontend && npx tsc --noEmit && npx eslint src --ext .ts,.tsx && npx vitest r
 
 ## 11. 实现记录
 
-待填（逐项 before/after、变异实跑输出、门禁输出、计划外改动回填）
+**提交**：步骤 3（实现）`ff46735` / 步骤 4（用例 + 变异）`89ddc5a` / 步骤 5（台账）本次。
+实现与本文档 §2/§3/§4/§6 的代码块**逐字一致**，无计划外改动。
+
+### 11.1 改动落地情况
+
+| 项 | 结果 |
+|---|---|
+| `AssetService.ListAll` + interface | 按 §2 落地；`List` 与 `:87` 硬顶**未触碰**（diff 中零行改动） |
+| `ExportAssets` | 按 §3 落地：`ListAll` / `X-Total-Count` / 缓冲 + `w.Error()` / `Content-Length` / `c.Data`；`Content-Type` 手写行按计划删除（交 `render` 层） |
+| `mockAssetService.ListAll` | 按 §6.3 落地 —— **先做这一步**，否则 `handlers` 包编译失败（T-31） |
+| 路由限流 | 按 §4.1 落地，`DefaultRateLimitConfig(10)` |
+| CORS | 按 §4.2 落地，`Expose-Headers` 补 `X-Total-Count` |
+| openapi.yaml | §5.1 description 重写 + §5.2 `headers` 声明（本 spec 首个） |
+| 生成物 | `npm run gen:api` → **恰好 2 处 diff**（+7/−3），与 §5.3 预测完全一致：description 的 JSDoc + `operations["exportAssets"].responses[200].headers` 里的 `"X-Total-Count"?: number`。无第三处。 |
+| `validate:api` | `../backend/internal/api/openapi.yaml is valid` |
+
+### 11.2 变异实跑（T-31：先 `go build` 确认可编译，再判红在断言上）
+
+脚本化施加 → 跑指定用例 → 还原（未用任何 git 破坏性命令，还原后 `git status` 只剩预期的两个测试文件）。
+
+| # | 变异 | 目标用例 | 结果 | 实测报错点 |
+|---|---|---|---|---|
+| M1 | 导出改回 `List(Page:1, PageSize:500)` | `TestM32_导出全量_1001行` | **RED** | `routes_integration_test.go:1617` 记录数断言 |
+| M2 | 删 `X-Total-Count` | 同上 | **RED** | `:1618` `Not equal` |
+| M3 | `ListAll` 加 `.Limit(1000)` | 同上 | **RED** | `:1617` 记录数断言（1001 vs 1000 —— 101 条夹具正是为它而选） |
+| M4 | JSON 分支截断到 500 | `TestM32_导出JSON分支也全量` | **RED** | `:1681` 长度断言 |
+| M5 | 删 `List` 的 500 硬顶 | `TestM32_列表500硬顶保留` | **RED** | `:1720` items 长度 600≠500 |
+| M6 | 去掉显式 `Content-Length` | `TestM32_导出全量_1001行` | **RED** | `:1619` `Not equal`（`""` vs `"62082"`） |
+| M7 | `X-Total-Count` 只在 CSV 分支内 | `TestM32_导出JSON分支也全量` | **RED** | `:1673` `Not equal` |
+| M8 | 取数失败也带 CSV 头 | `TestM32_ExportAssets_取数失败不带CSV头` | **RED** | `handlers/asset_handler_test.go:249` `Should be empty, but was attachment; filename=assets.csv` |
+
+**8/8 全部红在预期断言上，且全部通过 `go build`（无 INVALID）。**
+
+> 首次跑时 M3 报 `锚点未命中`（脚本锚点写成 `.Order(...)`，实际行首是制表符，`.` 在上一行行尾）——
+> 属**脚本**问题而非用例问题，修正锚点后重跑即红。记录在此以免被误读为「M3 抓不到」。
+
+### 11.3 门禁输出
+
+| 门禁 | 结果 |
+|---|---|
+| `gofmt -l ./internal ./cmd ./tests` | 空 |
+| `go vet ./...` / `go build ./...` | 通过 |
+| `go test ./... -count=1` | 全绿（27 个包，含 `internal/api` 19.2s、`internal/api/handlers` 7.6s） |
+| `go test ./internal/api/ -run TestM32_ -count=3` | 绿 —— §6.1 的 `probeIP()` 验收（不设独立源 IP 时此命令必红） |
+| `./scripts/db_smoke.sh` | ✅ 迁移（全新 + 升级）+ 冒烟断言全过（本轮无新 `TestDBSmoke_*`，T-42 白名单不适用） |
+| `npx tsc --noEmit` / `npx eslint src --ext .ts,.tsx` | 0 错 |
+| `npx vitest run` | 步骤 3/4 未跑（前端零改动）；步骤 5 因生成物 `api.types.ts` 变更而跑 |
+
+### 11.4 计划外改动回填
+
+**无。** 唯一超出 §1 清单的动作是 `routes_integration_test.go:772` 的理由串更新 —— 它在 §9 台账里已列。
+
+### 11.5 与 §7「抓不到的变异」的一致性核对
+
+§7 诚实标注的三条（`X-Total-Count` 改独立 `COUNT(*)`、删 `, id DESC` 兜底、去掉 `w.Error()` 检查）
+**确实没有任何用例能抓** —— 本轮未新增反例，标注继续有效。这三条的理由是设计取舍（消除竞态 /
+产物可 diff / 防御写失败），不是「测试能抓」，不应被读作用例覆盖的缺口。

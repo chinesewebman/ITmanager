@@ -1371,9 +1371,11 @@ export interface paths {
          *     防 Excel 公式注入（DDE）。
          *     其他取值 → 返回 JSON（`data` 为资产数组）。
          *
-         *     ⚠️ **静默截断**：内部固定取**前 500 条**（`Page=1, PageSize=500`，且 List 的
-         *     `pageSize>500 → 500` 硬顶），总数被丢弃、**不分页**。资产超过 500 条时导出结果
-         *     不完整且无任何提示 —— 已登记为独立缺陷（不在本轮修）。
+         *     导出**全部资产**（本端点无过滤参数；无行数上限、不分页），按 `created_at` 倒序，
+         *     同刻按 `id` 倒序 —— 保证产物可 diff。响应头 `X-Total-Count` = 数据行数（不含表头），
+         *     `Content-Length` = 完整字节数：两者都供调用方自校验「收到的内容是完整的」。
+         *     CSV 分支先写满内存缓冲再一次性发出：取数失败返回 500 且**不带** CSV 头，不会产出半截文件。
+         *     注意：本端点有独立限流（10 次/分钟 per IP），比其余端点更紧。
          */
         get: operations["exportAssets"];
         put?: never;
@@ -4811,6 +4813,8 @@ export interface operations {
             /** @description `format=csv` 时是 `text/csv` 附件（非 JSON）；否则为 JSON 信封。 */
             200: {
                 headers: {
+                    /** @description 本次导出的数据行数（不含 CSV 表头）。CSV 与 JSON 两个分支都会返回。 */
+                    "X-Total-Count"?: number;
                     [name: string]: unknown;
                 };
                 content: {

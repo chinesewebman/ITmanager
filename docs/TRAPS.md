@@ -890,6 +890,36 @@ JSDoc 注释 —— 改文案也会漂移, 不只改结构)。后果: 那个 com
 
 ---
 
+### T-60. 限流桶是**包级共享**的 —— 集成测试里同一端点的调用**会累加**, `-count=N` 时最先爆
+
+**状态**: ACTIVE | **类别**: 测试基座 / 限流
+
+**现象**: 给某个端点单独加限流后, 新写的用例 `-count=1` 全绿, `-count=2` **恰好压线**通过,
+`-count=3` 起**全线红**且报的是业务断言失败 (不是「限流了」) —— 看起来像新代码有并发 bug。
+
+**根因**: `middleware/rate_limit.go` 的 `rlCache` 是**包级** map (`:88`), 桶键 = `ClientIP|FullPath`
+(`:36-38`)。`package api_test` 里所有用例共用同一个 `*gin.Engine` 之外的**同一进程**, 于是所有对
+`/api/assets/export` 的调用落进**同一个桶**; 而 `-count=N` 让同一批用例跑 N 遍, 累计次数 N×每次调用数。
+逃生门 `resetRateLimiterCache()` (`:132`) **未导出**, `package api_test` 调不到。
+
+**检测线索**: 单个用例红/绿取决于**它前面跑过多少用例**; 失败信息是**别的**断言 (数据不对),
+而不是 429 —— 因为 `httptest` 下 429 也被当成一次「正常响应」继续走进断言。
+
+**解法**: 用本仓库既有模式 —— 每个用例给自己一个**独立源 IP**:
+`req.RemoteAddr = probeIP()` (`routes_integration_test.go:60`, 序号递增 + RFC 5737 文档段,
+注释原文就是「让每次运行 (含 `go test -count=N`) 拿到不同的限流桶」)。
+**不要**为此导出 reset 钩子 (包级可变状态又多一个出口), 也**不要**放宽 Max (那会带走限流本身)。
+每个用例另加一条前提钉子, 把 429 与真正的逻辑失败区分开:
+
+```go
+require.NotEqual(t, http.StatusTooManyRequests, w.Code, "撞上限流桶 —— 不是业务逻辑坏了")
+```
+
+**来源**: M32(2026-09-12, 步 2 细节审查实测: `-count=1` 绿 / `-count=2` 压线 / `-count=3` 红;
+`docs/IMPL-EXPORT-FIDELITY.md` §6.1)。
+
+---
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -970,6 +1000,7 @@ JSDoc 注释 —— 改文案也会漂移, 不只改结构)。后果: 那个 com
 | — (M31 轮) | T-57 | ACTIVE |
 | — (M31 轮) | T-58 | ACTIVE |
 | — (M31 轮) | T-59 | ACTIVE |
+| — (M32 轮) | T-60 | ACTIVE |
 
 ---
 

@@ -772,7 +772,7 @@ var ungatedRoutes = map[string]string{
 	// ---- 读地板：业务读（列表 / 详情 / 统计 / 导出）----
 	"GET /api/assets":                          "资产读",
 	"GET /api/assets/:id":                      "资产读",
-	"GET /api/assets/export":                   "资产导出（限 500 行 + safeCSV）",
+	"GET /api/assets/export":                   "资产导出（全量 + X-Total-Count + safeCSV，独立限流 10/min）",
 	"GET /api/alerts":                          "告警读",
 	"GET /api/alerts/:id":                      "告警读",
 	"GET /api/alerts/stats":                    "告警统计",

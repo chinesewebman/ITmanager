@@ -152,7 +152,8 @@
 - 所有未列入上表的 `GET` 列表/详情、`/api/dashboard/*`、`/api/topology`、`/api/postmortem/*`、`/api/diagnostics/assets/:id/timeline`、`/api/health`、`/healthz`、`/readyz`、`/metrics`。
 - **auth 组自助端点**：`POST /api/auth/login`、`logout`、`PUT /api/auth/password`、`POST /api/auth/skip-password-change` —— 只需认证，不挂能力（否则 `readonly` 连自己的密码都改不了）。
   - 后续修订（2026-09-09，见 `docs/FIX-PLAN-AUTHZ-LEFTOVER.md`）：`POST /auth/skip-password-change` 已移入 `protected` 组（补 AuditLog 留痕）；`PUT /auth/password` 追加 `RejectAPIKeyAuth`（API Key 不得改密）。二者仍**不挂能力**，readonly 自助改密不受影响。
-- **导出/下载**：`GET /api/assets/export`、`GET /api/alerts/false-positives/export`、`GET /api/postmortem/assets/:id/report` 属读地板（已核实：导出限 500 行、文件名经 `sanitizeFilename`，无路径穿越）。
+- **导出/下载**：`GET /api/assets/export`、`GET /api/alerts/false-positives/export`、`GET /api/postmortem/assets/:id/report` 属读地板（已核实：文件名经 `sanitizeFilename`，无路径穿越）。
+  - 后续修订（2026-09-12，M32）：`GET /api/assets/export` 原先「限 500 行」的截断已随 M32 去除 —— 该端点现在**导出全量**（原截断不是安全属性，而是静默不完整的缺陷：运维据此对账会得出错误结论；导出仍属读地板、无能力门禁，见 `docs/FIX-PLAN-EXPORT-FIDELITY.md` §3.4）。同轮为该端点单独加了 10 次/分钟的限流（原组级 100/min 允许瞬时 100 个全表读）。
 
 ---
 
