@@ -137,6 +137,41 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
   `http://token:8080` 是正常的（此前是 `http://token:***`）；看到 `<invalid-url>` 说明该 URL 的
   host 形如 `key=value`（不是真实主机），这是**有意丢弃**，不要为了看原串把脱敏关掉。
 
+- **M31 OpenAPI 契约完整化 — 未文档化路由 22 → 0，断言升级为双向集合相等**（`22689ef` 需求文档 rev2 →
+  `be6e55c` 步骤 2 → `95f3f98` 步骤 3 → `b3a26e3` 步骤 4 → `90195af` 步骤 5 + `e73710c` 补漏 →
+  `dee8470` 步骤 6；方案 `docs/FIX-PLAN-OPENAPI-CONTRACT.md`）
+  — **G-37 残余结案**：此前 spec 只声明 71 条、真实路由 93 条，缺口 22 条（含 `/auth/me`、整组
+  `/auth/api-keys`、`/audit-logs`、告警批量、资产退役/恢复/导出、`/health`、`/integrations/*`）。
+  按组分两步补完，schema **全部来自 handler 实读**（`c.JSON(...)` 逐个字段抄，拿不准的写
+  `additionalProperties` 而不是编造字段）。**实测：93/93 全文档化、spec 零幻影**。
+  **门禁思路换向（D-1）**：从「spec ⊆ 路由」（只挡幻影）升级为**集合相等**（两个方向都断言），
+  且**明确不设 allowlist** —— allowlist 会把「未文档化」洗成合法态，理由字符串是软控制、
+  交付态恒绿 vacuous。另补一条用例钉住**鉴权语义**：顶层 `security: [{BearerAuth: []}]` 生效后，
+  spec 标 `security: []` 的端点必须**恰好等于**运行时无凭据可达的端点（实测两侧各 3 条：
+  `GET /health`、`POST /auth/login`、`POST /auth/logout`）。顺带修正 `/auth/logout` 原先
+  **反着错**的标注（它没挂 `AuthMiddleware`，spec 却说它要 Bearer）。
+  **变异 M31-M1..M7**：M1（删 spec path）、M4（spec 方法名改大写）、M5（删公开端点的
+  `security: []`）、M6（给受保护端点加 `security: []`）、M7（删顶层 `security`）**只有新断言能抓**，
+  旧断言全绿；M2（改动词）、M3（删路由注册）旧断言也红，只作交叉验证 —— **计划态把 M3 说成
+  「旧断言覆盖不到的方向」是错的，已实测更正**（旧断言遍历 spec 逐条核真实路由，删注册正好命中）。
+  **工具链接线**：`npm run validate:api`（swagger-cli，依赖早已在 `package.json` 却从未接线 ——
+  README 声称的「validate 通过」此前是**陈旧声明**）；`gen:api` 漂移检查纳入每步验收
+  （CI 有硬门禁）。
+  验证：`gofmt`/`go vet`/`go build`/`go test ./...` 全绿 + `db_smoke.sh` ✅ + `validate:api` valid +
+  `tsc`/`eslint` 0 + `vitest` 18 passed（仅受影响文件）。新 trap：**T-57**（`map[K]bool` 当集合用时
+  「键存在」≠「值为真」）、**T-58**（空输出 ≠ 无漂移，判据要看退出码）、**T-59**（YAML
+  `description` 不能以反引号开头，报错却指向缩进）。
+  新登记：**G-47**（Swagger/`openapi.yaml` 匿名可达且无开关，改由部署文档的网络层约束兜底）、
+  **G-48**（`Asset.status` 两套词表，退役写的 `retired` 不在契约 enum 内）、
+  **G-49**（`/assets/export` 固定前 500 条且丢弃 total → 静默截断）。
+- ⚠️ **行为突变告知（M31，运维需知）**：**无运行时行为变更** —— 本轮零 Go 业务代码改动
+  （只改 spec、生成物、测试与文档）。但**有一条部署侧的新要求**：见下条。
+- ⚠️ **部署侧新增要求（M31/§8.4.5）**：**不得把后端 8080 直接映射到 `0.0.0.0`**。
+  `/openapi.yaml` 与 `/swagger/*any` 是**刻意公开**的（无鉴权、无开关，release 下同样可达），
+  直连等于把 API 的完整形状（路径/参数/schema/枚举）对全网公开，并绕过 nginx 的 TLS/安全头/限流。
+  compose 默认已绑 `127.0.0.1:8080`，**改 compose 或加端口映射时不要动它**；
+  排查见 `08-部署运维.md` §8.4.5（`ss -tlnp | grep 8080`）。
+
 ### 文档 (docs)
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）

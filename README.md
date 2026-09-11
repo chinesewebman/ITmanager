@@ -111,8 +111,13 @@ make test-coverage   # 生成 coverage.html
 
 启动后端后访问: **http://localhost:8080/swagger/index.html**
 
-- OpenAPI 源: `backend/internal/api/openapi.yaml` (26.3K, 手写, swagger-cli validate 通过)
-- Type-safe 客户端: `frontend/src/services/apiClient.ts` (基于 openapi-typescript, 3/13 endpoint 已 typed)
+- OpenAPI 源: `backend/internal/api/openapi.yaml` (手写, 104K)
+  - 校验: `cd frontend && npm run validate:api`（swagger-cli）
+  - 生成: `cd frontend && npm run gen:api` → `src/services/api.types.ts`（**改了 spec 必须重跑并一起提交**，CI 有漂移门禁）
+  - 契约门禁: `backend/internal/api/routes_integration_test.go` 里三条用例钉住
+    「真实路由 == spec 声明的 (method,path)」与「公开端点 == spec 标了 `security: []` 的端点」
+- Type-safe 客户端: `frontend/src/services/apiClient.ts` (基于 openapi-typescript，
+  生成类型覆盖全部 93 个 operation)
 - 详细 API 列表见 `backend/internal/api/swagger.go`
 
 ## 相关文档

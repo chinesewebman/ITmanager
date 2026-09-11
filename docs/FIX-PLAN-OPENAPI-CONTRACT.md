@@ -380,6 +380,20 @@ M31-M3 是本轮最关键的变异：它证明**新断言抓的是旧断言结�
 > 待实现完成后填入。预置子节（对齐 `docs/FIX-PLAN-LOG-INJECTION.md` §8 与 `docs/FIX-PLAN-REDACT-BOUNDARY.md` §8）：
 
 ### 8.1 逐项 before/after（实测）
+
+| 项 | before | after | 取证方式 |
+|---|---|---|---|
+| spec 声明的 operation 数 | 71 | **93** | 遍历 `/openapi.yaml` HTTP 端点的 `paths`，只计 get/post/put/delete/patch |
+| 未文档化的真实路由 | **22** | **0** | `SetupRouter(t).Routes()` 剥 `/api` + `:id`→`{id}` 后做差集 |
+| spec 幻影端点 | 0（rev2 已闭合） | 0 | 同上，反方向 |
+| path key 数 | 51 | **72**（+21） | `yaml.safe_load` 后数 `paths` 的键；operation 数与 path key 数不等（93≠72），勿混用 |
+| 契约断言方向 | spec ⊆ 路由（单向） | **集合相等（双向）** | `TestRoutes_OpenAPI契约集合相等` |
+| 鉴权语义 | 顶层无 `security:` → 机器读作「全部端点免认证」 | 顶层 `security: [{BearerAuth: []}]` + 3 条公开端点显式 `security: []` | `TestRoutes_OpenAPI公开端点集合相等`；运行时「无凭据非 401」实测恰 3 条 |
+| `/auth/logout` 的 security | `[BearerAuth]`（**反着错**：它没挂 AuthMiddleware） | `[]` | 无凭据请求实测 200 |
+| YAML 合法性检查 | 无（依赖早已存在但从未接线） | `npm run validate:api` → `openapi.yaml is valid` | 首次实跑输出 |
+| 生成物漂移门禁 | CI 有，本地验收清单漏列 | 每个动 spec 的 commit 都 `gen:api` + 退出码断言 | 步 5 漏提交过一次，已补（§8.5 R-7） |
+| 运行时行为 | — | **无变更**（零 Go 业务代码改动；改动只在 spec / 生成物 / 测试 / 文档） | `go test ./...` 全绿且无新增/修改业务代码文件 |
+
 ### 8.2 变异反证（M31-M1..M4，逐条先 `go build`）
 
 **实测（步 4，2026-09-12）。每条先 `go build ./...` → BUILD_OK，再跑 `go test ./internal/api/ -run OpenAPI -count=1 -v`；
