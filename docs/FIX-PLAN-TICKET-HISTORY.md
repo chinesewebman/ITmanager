@@ -243,6 +243,7 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | D-3 | 历史保留期？ | 不设清理（append-only，无删除路径） | 加保留期需定时任务，属独立决策 |
 | D-4 | `kind` 词表 | `created` / `updated` | 宽粒度下「字段级」已由 `field_name` 表达；不预设 `deleted`（无删除路径） |
 | D-5 | 解析不出 actor 时？ | `actor_id=NULL` + `actor_name` 取得到就存，都取不到存 `"unknown"` | 与 `ticket_handler.go:107-110` 现有处理一致 |
+| **D-6** | `source` / `request_id` 填什么？ | **暂不填（留 NULL）—— 待拍板** | 语义未定：`source` 是「**操作的来路**」还是「**工单的来路**」？若是前者，API Key 路径算 `api`、JWT 人工算 `manual`（需中间件把认证方式也写进 ctx）；若是后者，直接取工单自己的 `source` 列即可，但那与「经手」无关。`request_id` 需要请求级 ID 中间件，当前不存在。两列都可空，**先留空不阻塞**，等语义定了再补 —— 不在这里替调用方猜一个值写死 |
 
 ---
 
@@ -276,7 +277,7 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 |---|---|---|
 | ~~0~~ ✅ | **实测前置**：`clause.Locking` 在 sqlite 基座与真 PG 上的实际渲染；gorm `Updates(map)` 回写 struct 与自动补 `updated_at` 的行为 | **已完成，四条全部运行验证为真** —— 见下方「步骤 0 实测结论」 |
 | ~~1~~ ✅ | 迁移 `000025` + `models.TicketHistory`（含 `TableName()`）+ `liveModels()` + `autoMigrate()` + `db_smoke.sh` 白名单 + Down 链断言 + `TestDBSmoke_TicketHistory` | **已完成**：真 PG 冒烟两轮全绿（`✓ applied 25_000025_ticket_history`、Down 链 `25→24→23→21→…→13`）；`TestDBSmoke_TicketHistory` 确认在白名单里**真跑**（T-42 假绿已排除）；变异 V-1/V-2/V-4/V-5 全部红在预判断言上 |
-| 2 | `Actor` + `Update` 签名变更（1 handler + 13 测试 + 1 mock）+ 事务/行锁 + **原始行 map diff** + 批量插历史 + `CreateFromAlert` | 单测：字段级 diff、**无变化 PUT → 0 行**、`updated_at` 不入历史、**模型外列（如 `alert_id`）也留痕**、actor 快照、同事务回滚、**pre 必须在 UPDATE 前拷贝**（形态守卫：否则黑盒用例全绿，同 M24 V-5 同族） |
+| ~~2~~ ✅ | `Actor` + `Update` 签名变更（1 handler + 13 测试 + 1 mock）+ 事务/行锁 + **原始行 map diff** + 批量插历史 | **已完成**（2a diff 纯函数 / 2b 签名与接线 / 2c 事务与留痕）。单测：字段级 diff、**无变化 PUT → 0 行**、`updated_at` 不入历史、**模型外列也留痕**、actor 快照、同事务回滚、**pre 必须在 UPDATE 前读**（形态守卫：`old_value` 必须是写入前的值，同 M24 V-5 同族）。变异 7/7 红在预判用例上；真 PG 探针验过 `LIMIT $2 FOR UPDATE` 语法与 4 行历史落库 |
 | 3 | `Create` 出生事件（**每次尝试各一事务**，含重试） | 单测：`created` 行 + `source`；真 PG 制造 `ticket_number` 冲突验自愈仍活（R-5） |
 | 4 | `resolved_at` 随状态收口 | 单测（真 sqlite）：三态 + **`resolved→closed` 保留的反面用例** + 变异反证 + 真 PG 方言 |
 | 5 | 读端点 + `ungatedRoutes` 登记 + 分页 clamp 500 + openapi + `gen:api` + 前端手写类型 | handler 用例（分页/404/排序/上限）+ 路由分类闸门 + 契约漂移闸门 |
@@ -371,6 +372,11 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 
 `Update` 完全不碰 `resolved_at`；生产调用方 1 处、测试 13 处；**四条建单路径穷尽**（真 grep：无 webhook/复制/导入/定时任务/裸 INSERT）；**无删工单路径**（真 grep：零 `Unscoped()`、零 `Delete(&models.Ticket`）；`asset_history`/`step_progress_history` 零 Go 引用；迁移 000025 空闲且缺号容忍；`clause.Locking` 被 sqlite 驱动丢弃。
 
-**未核实项（实现步必须实跑验证，不当作已验证事实）**：PG 25P02（R-5，步骤 3 验）、autocommit 下 `FOR UPDATE` 立即释放（§2.4，步骤 2 验）—— 两条都是读源码/标准语义得出的，需真 PG 才能确认。
+**未核实项（实现步必须实跑验证，不当作已验证事实）**：PG 25P02（R-5，步骤 3 验）、autocommit 下 `FOR UPDATE` 立即释放（§2.4）—— 两条都是读源码/标准语义得出的，需真 PG 才能确认。`FOR UPDATE` 与事务同用这一条在步骤 2c 已由真 PG 探针确认**语法与路径可通**（事务由 `s.db.Transaction` 包住，`LIMIT $2 FOR UPDATE` 在 PG 上合法），但「并发不交错」仍**没有测试守住** —— 要验需要两条连接 + 时序控制，属独立小步。
+
+**步骤 2c 真 PG 探针的三个结论（探针跑完即删，未进仓）**：
+1. **`LIMIT $2 FOR UPDATE` 在真 PG 上合法**且与事务包裹共用时路径可通 —— sqlite 基座不渲染它、sqlmock 只做字符串匹配，两者都绿也证明不了这一点。
+2. **一次 PUT 落 4 行历史**（`title` / `status` / `closed_at` / `assignee_group`），共享同一 `batch_id`，`actor_name` 快照与 `actor_id` 均正确；同值 PUT **不新增行**（真 PG 的时间戳精度没有把「同值」骗成有变化）。
+3. **`tickets` 的 12 个模型外列在真 PG 上类型各异**，探针连炸两次才摸清：`alert_id` 是 **`UUID REFERENCES alerts(id)`**（传字符串 → 22P02；传随机 uuid → 23503 外键违例），`reviewer_id` 同为带外键的 UUID，`cc_users` 是 `UUID[]`，`attachments` 是 `JSONB`，`progress` 是 `DECIMAL(5,2)`。**而 sqlite 基座里这些列是宽松的 TEXT 且无外键** —— 同一条「模型外列留痕」的用例在基座上是绿的、在真库上会因类型或外键炸掉。这条对**步骤 5 的读端点**有直接影响：历史里存的是 `historyValueText` 归一后的文本，读端点若要按类型渲染（比如 `attachments` 当 JSON 展开、`cc_users` 当数组），得知道原列类型。当前实现只存文本，**不承诺类型保真**。
 
 ~~`Updates(map)` 回写 struct 与自动时间戳、`clause.Locking` 在 sqlite 被丢弃~~ —— **已实测为真，见 §5「步骤 0 实测结论」**。

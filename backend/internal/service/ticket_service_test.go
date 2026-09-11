@@ -167,6 +167,23 @@ func newTicketSQLiteDB(t *testing.T) *gorm.DB {
 		created_at DATETIME,
 		updated_at DATETIME
 	)`).Error)
+	// ticket_history 与迁移 000025 同构（列名/可空性一致），只去掉 PG 专有默认值：
+	// 主键无 gen_random_uuid()（sqlite 没有），created_at 无 DEFAULT NOW()（由 gorm 填）。
+	// 少了这张表，Update 的留痕路径会以 "no such table" 全红 —— 那不是断言在守，是基座缺件。
+	require.NoError(t, db.Exec(`CREATE TABLE ticket_history (
+		id TEXT PRIMARY KEY,
+		ticket_id TEXT NOT NULL,
+		batch_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		field_name TEXT,
+		old_value TEXT,
+		new_value TEXT,
+		actor_id TEXT,
+		actor_name TEXT,
+		source TEXT,
+		request_id TEXT,
+		created_at DATETIME
+	)`).Error)
 	return db
 }
 
@@ -518,21 +535,37 @@ func TestTicketService_Update_成功_非空updates(t *testing.T) {
 	ctx := context.Background()
 
 	id := uuid.NewString()
-	rows := sqlmock.NewRows([]string{"id", "title", "status"}).
+	pre := sqlmock.NewRows([]string{"id", "title", "status"}).
 		AddRow(id, "原标题", "open")
+	post := sqlmock.NewRows([]string{"id", "title", "status"}).
+		AddRow(id, "新标题", "open")
 
-	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
-		WithArgs(id, 1).
-		WillReturnRows(rows)
-
+	// 事务序：pre（持锁）→ UPDATE → post → 插历史 → 重读响应体。
+	// **顺序本身就是形态守卫**：pre 若被挪到 UPDATE 之后，第一条期望就对不上 —— 那时
+	// pre 读到的是写后的值，diff 恒空、历史永远 0 行，而黑盒用例只看「修改生效了」是绿的。
 	mock.ExpectBegin()
+	// FOR UPDATE 必须真出现在 SQL 里：sqlite 基座不渲染它（driver 明说不支持行级锁），
+	// 单测里唯一能钉住「加锁没被删掉」的地方就是这里（postgres dialector + sqlmock）。
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2 FOR UPDATE`).
+		WithArgs(id, 1).WillReturnRows(pre)
 	mock.ExpectExec(`UPDATE "tickets"`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// 锚定结尾：不带 FOR UPDATE 的那条读法只能匹配到 post，不会替 pre 顶包。
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2\s*$`).
+		WithArgs(id, 1).WillReturnRows(post)
+	// PG 下批量插入带 RETURNING "id" → 走的是 Query 而不是 Exec
+	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
+	// sqlmock.Rows 是一次性消费的：post 那批行在上面已被读走，这里必须新建一批，
+	// 否则重读拿到 0 行 → record not found（不是代码错，是期望写错）
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
+		WithArgs(id, 1).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "title", "status"}).AddRow(id, "新标题", "open"))
 	mock.ExpectCommit()
 
 	got, err := svc.Update(ctx, id, map[string]interface{}{"title": "新标题"}, testActor())
 	require.NoError(t, err)
-	assert.Equal(t, "新标题", got.Title, "gorm Updates 后会刷到 struct")
+	assert.Equal(t, "新标题", got.Title, "响应体取自重读的 struct")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -542,23 +575,29 @@ func TestTicketService_Update_关闭工单_写closed_at(t *testing.T) {
 	ctx := context.Background()
 
 	id := uuid.NewString()
-	rows := sqlmock.NewRows([]string{"id", "title", "status"}).
+	pre := sqlmock.NewRows([]string{"id", "title", "status"}).
 		AddRow(id, "工单", "in_progress")
-
-	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
-		WithArgs(id, 1).
-		WillReturnRows(rows)
+	post := sqlmock.NewRows([]string{"id", "title", "status", "closed_at"}).
+		AddRow(id, "工单", "closed", time.Now())
 
 	// 不强校验 SQL, 只确保 Updates 跑过
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2 FOR UPDATE`).
+		WithArgs(id, 1).WillReturnRows(pre)
 	mock.ExpectExec(`UPDATE "tickets"`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-	// 注入的是 clause.Expr, gorm 不回写 struct → Update 末尾要重读一次拿真值
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2\s*$`).
+		WithArgs(id, 1).WillReturnRows(post)
+	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).
+			AddRow(uuid.NewString()).AddRow(uuid.NewString()))
+	// 注入的是 clause.Expr, gorm 不回写 struct → Update 末尾要重读一次拿真值。
+	// rows 一次性消费，故新建一批（复用 post 会读到 0 行变成 record not found）
 	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
-		WithArgs(id, 1).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "title", "status", "closed_at"}).
+		WithArgs(id, 1).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "title", "status", "closed_at"}).
 			AddRow(id, "工单", "closed", time.Now()))
+	mock.ExpectCommit()
 
 	updates := map[string]interface{}{"status": "closed"}
 	got, err := svc.Update(ctx, id, updates, testActor())
@@ -579,9 +618,12 @@ func TestTicketService_Update_不存在返回ErrNotFound(t *testing.T) {
 	svc := NewTicketService(gormDB)
 	ctx := context.Background()
 
-	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
+	// pre 读不到 → 事务内返回 ErrNotFound → gorm 自动 Rollback（不留悬挂事务）
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2 FOR UPDATE`).
 		WithArgs("nonexistent", 1).
 		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
 
 	got, err := svc.Update(ctx, "nonexistent", map[string]interface{}{"title": "x"}, testActor())
 	assert.Nil(t, got)
@@ -596,12 +638,11 @@ func TestTicketService_Update_DB错误_透传(t *testing.T) {
 	id := uuid.NewString()
 	rows := sqlmock.NewRows([]string{"id", "title", "status"}).
 		AddRow(id, "t", "open")
-	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1`).
-		WithArgs(id, 1).
-		WillReturnRows(rows)
 
 	dbErr := errors.New("connection reset")
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "tickets" WHERE id = \$1 LIMIT \$2 FOR UPDATE`).
+		WithArgs(id, 1).WillReturnRows(rows)
 	mock.ExpectExec(`UPDATE "tickets"`).
 		WillReturnError(dbErr)
 	mock.ExpectRollback()
@@ -609,6 +650,155 @@ func TestTicketService_Update_DB错误_透传(t *testing.T) {
 	_, err := svc.Update(ctx, id, map[string]interface{}{"title": "x"}, testActor())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr)
+}
+
+// ==================== M25 经手历史（真 sqlite 黑盒） ====================
+//
+// 这一组读的是 ticket_history 表本身 —— sqlmock 那组只能验「SQL 发出去了」，
+// 验不了「落库的值对不对」。
+
+// historyOf 读某张票的历史行，按 field_name 建索引。
+// 只在「每个字段最多一行」的场景用 —— 同字段多行时后者会覆盖前者，
+// 要全序请直接查（且别指望靠顺序分辨同秒的两行，T-45）。
+func historyOf(t *testing.T, db *gorm.DB, ticketID uuid.UUID) map[string]models.TicketHistory {
+	t.Helper()
+	var rows []models.TicketHistory
+	require.NoError(t, db.Where("ticket_id = ?", ticketID).Order("field_name").Find(&rows).Error)
+	byField := make(map[string]models.TicketHistory, len(rows))
+	for _, r := range rows {
+		require.NotNil(t, r.FieldName, "kind=updated 的行必须带字段名")
+		byField[*r.FieldName] = r
+	}
+	return byField
+}
+
+func seedHistoryTicket(t *testing.T, db *gorm.DB) uuid.UUID {
+	t.Helper()
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	id := uuid.New()
+	require.NoError(t, db.Create(&models.Ticket{ //nolint:exhaustruct
+		ID: id, TicketNumber: "TICKET-20260101-A", Title: "原标题", Status: "open",
+		Priority: "normal", CreatedAt: created, UpdatedAt: created,
+	}).Error)
+	return id
+}
+
+// 字段级 diff + actor 快照 + 同批次 + 系统列排除。
+// 其中 old_value 必须是**写入前**的值：这是「pre 在 UPDATE 之前读」的唯一黑盒判据 ——
+// 若 pre 被挪到 UPDATE 之后，old 会等于 new，历史就成了「改了但不知道从什么改成什么」。
+func TestTicketService_Update_留痕_字段级diff与actor快照(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+	actorID := uuid.New()
+
+	_, err := svc.Update(context.Background(), id.String(),
+		map[string]interface{}{"title": "新标题", "priority": "high"},
+		Actor{ID: &actorID, Name: "燕如"})
+	require.NoError(t, err)
+
+	got := historyOf(t, db, id)
+	require.Len(t, got, 2, "两个字段变更 → 两行")
+
+	title := got["title"]
+	require.NotNil(t, title.OldValue)
+	require.NotNil(t, title.NewValue)
+	assert.Equal(t, "原标题", *title.OldValue, "old 必须是写入前的值")
+	assert.Equal(t, "新标题", *title.NewValue)
+	assert.Equal(t, models.TicketHistoryKindUpdated, title.Kind)
+	assert.Equal(t, "燕如", title.ActorName, "actor_name 是快照，不是外键引用")
+	require.NotNil(t, title.ActorID)
+	assert.Equal(t, actorID, *title.ActorID)
+
+	assert.Equal(t, "normal", *got["priority"].OldValue)
+	assert.Equal(t, "high", *got["priority"].NewValue)
+
+	assert.Equal(t, title.BatchID, got["priority"].BatchID, "同一次 PUT 的多行共享 batch_id")
+	assert.False(t, title.CreatedAt.IsZero(), "created_at 必须落库")
+
+	// 系统列：updated_at 每次 PUT 必被 gorm 补，记它等于每行都带一条噪声，
+	// 把「谁改了什么」淹掉；id / created_at / ticket_number 同理。
+	for _, sys := range []string{"updated_at", "created_at", "id", "ticket_number"} {
+		_, ok := got[sys]
+		assert.False(t, ok, "%s 是系统列，不得进历史", sys)
+	}
+}
+
+// 传了键但没有实质变化 → 0 行历史。
+// 判据必须落在**按列比**上：gorm 对 map 更新无条件补 updated_at，这一行一定发生，
+// 拿「有没有 UPDATE」当判据会永远为真。
+func TestTicketService_Update_留痕_无实质变化不写行(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+
+	_, err := svc.Update(context.Background(), id.String(),
+		map[string]interface{}{"title": "原标题"}, testActor()) // 值与原值相同
+	require.NoError(t, err)
+
+	assert.Empty(t, historyOf(t, db, id), "值没变不留痕")
+}
+
+// 模型外列（tickets 表里有、models.Ticket 里没有）改了也必须留痕 ——
+// `{"alert_id": X}` 走 gorm 的裸列兜底**真的写库**，用 struct 比会整个漏掉。
+func TestTicketService_Update_留痕_模型外列也留痕(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	require.NoError(t, db.Exec("ALTER TABLE tickets ADD COLUMN alert_id TEXT").Error)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+
+	_, err := svc.Update(context.Background(), id.String(),
+		map[string]interface{}{"alert_id": "a-1"}, testActor())
+	require.NoError(t, err)
+
+	got := historyOf(t, db, id)
+	require.Contains(t, got, "alert_id", "模型外列的改动同样要留痕")
+	assert.Nil(t, got["alert_id"].OldValue, "原本没有值 → old 是 NULL（不是空串）")
+	require.NotNil(t, got["alert_id"].NewValue)
+	assert.Equal(t, "a-1", *got["alert_id"].NewValue)
+}
+
+// 两次操作必须是两个批次：否则 UI 会把先后两次改动并成一坨。
+// 断言刻意落在**批次集合**上而不是「第几行」：同字段的两行 created_at 可能同秒，
+// 靠顺序区分就是 T-45（没有 ORDER BY 的顺序没有定义）。
+func TestTicketService_Update_留痕_两次操作批次不同(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+	ctx := context.Background()
+
+	_, err := svc.Update(ctx, id.String(), map[string]interface{}{"title": "第一次"}, testActor())
+	require.NoError(t, err)
+	_, err = svc.Update(ctx, id.String(), map[string]interface{}{"title": "第二次"}, testActor())
+	require.NoError(t, err)
+
+	var rows []models.TicketHistory
+	require.NoError(t, db.Where("ticket_id = ?", id).Find(&rows).Error)
+	require.Len(t, rows, 2, "两次 PUT 各留一行")
+	batches := map[uuid.UUID]struct{}{}
+	for _, r := range rows {
+		batches[r.BatchID] = struct{}{}
+	}
+	assert.Len(t, batches, 2, "两次 PUT 是两个批次，不能被并成一坨")
+}
+
+// 历史插入失败 → 整个 Update 回滚（同事务）。
+// 制造失败的方式：把 ticket_history 表删掉，插入必报 no such table。
+// 这条守的是「失败即整单回滚」的承诺：宁可改不了，也不留一条无痕的修改。
+func TestTicketService_Update_留痕_插历史失败整单回滚(t *testing.T) {
+	db := newTicketSQLiteDB(t)
+	id := seedHistoryTicket(t, db)
+	svc := NewTicketService(db)
+
+	require.NoError(t, db.Exec("DROP TABLE ticket_history").Error)
+
+	_, err := svc.Update(context.Background(), id.String(),
+		map[string]interface{}{"title": "不该留下"}, testActor())
+	require.Error(t, err, "历史写不进去时 Update 必须失败，而不是默默改掉")
+
+	var after models.Ticket
+	require.NoError(t, db.First(&after, "id = ?", id.String()).Error)
+	assert.Equal(t, "原标题", after.Title, "整单回滚：字段改动不得留下")
 }
 
 func TestTicketService_Get_DB错误_透传(t *testing.T) {

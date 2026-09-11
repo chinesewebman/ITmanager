@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TicketFilter 工单列表筛选
@@ -408,16 +409,17 @@ func validateTicketEnumValues(updates map[string]interface{}) error {
 }
 
 func (s *ticketService) Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error) {
-	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，统一为 1 次 First
-	var t models.Ticket
-	if err := s.db.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	// 空 updates 直接返当前记录（不写库）
+	// 空 updates 直接返当前记录（不写库、不留痕）：不进事务 —— 没有要写的行，
+	// 也就没有 pre-image 与历史可言。
+	// 🐛 BUG#24: 原版 len==0 走 Get + 主路径 First 重复，这里统一为 1 次 First。
 	if len(updates) == 0 {
+		var t models.Ticket
+		if err := s.db.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
 		return &t, nil
 	}
 	// 键归一化到小写 + 挡掉禁改列：保证「校验的键 == 落库的键」（同 channel_service.go）。
@@ -466,7 +468,6 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	// 已知边界：只传 closed_at 不传 status 的请求不进这段逻辑（gorm 原样写列）。那种请求能
 	// 给已关闭的工单补时间，也能把一张 open 的工单写成「有 closed_at 却不 closed」——
 	// 后者会复现本段要治的时间线假事件。没有已知调用方，登记在 §8，不在这里替对接方决定。
-	injectedClosedAt := false
 	if status, ok := updates["status"].(string); ok {
 		var explicit interface{}
 		if v, ok := updates["closed_at"]; ok {
@@ -475,25 +476,78 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 		updates["closed_at"] = gorm.Expr(
 			"CASE WHEN ? = 'closed' THEN COALESCE(?, closed_at, ?) ELSE NULL END",
 			status, explicit, time.Now())
-		injectedClosedAt = true
 	}
-	if err := s.db.WithContext(ctx).Model(&t).Updates(updates).Error; err != nil {
+	// 写入与留痕同事务：diff 的 pre-image 必须**属于本次写入**，否则并发 PUT 会让
+	// 第二条历史的 from 归错。pre 用原始行 map 而不是 struct —— 见 diffTicketRows 注释。
+	var out models.Ticket
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 持锁读 pre。真 PG 上是行锁（同一张票的并发 PUT 串行化）；sqlite 基座不渲染
+		// FOR UPDATE（driver 明说不支持行级锁），故单测**验不到**加锁本身，只验路径。
+		var pre map[string]interface{}
+		if err := tx.Table("tickets").Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", id).Take(&pre).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if err := tx.Model(&models.Ticket{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		// post 同样取原始行：map 能看见「库里有、模型里没有」的列（tickets 有 12 个），
+		// 用 struct 比会漏掉 `{"alert_id": X}` 这类**真的写进了库**的改动。
+		var post map[string]interface{}
+		if err := tx.Table("tickets").Where("id = ?", id).Take(&post).Error; err != nil {
+			return err
+		}
+		// 传了键但没有实质变化（例如 title 传的就是原值）→ 0 行历史。
+		// 注意 gorm 此时仍会补 updated_at，所以「空 diff 就不写」这条**必须**按列比，
+		// 不能拿「有没有发生 UPDATE」当判据。
+		if changes := diffTicketRows(pre, post); len(changes) > 0 {
+			ticketID, err := uuid.Parse(id)
+			if err != nil {
+				return fmt.Errorf("工单 id 不是合法 UUID，经手历史无法落库: %w", err)
+			}
+			if err := insertTicketHistory(tx, ticketID, uuid.New(), actor, changes); err != nil {
+				return err
+			}
+		}
+		// 响应体重读一次 struct：map 更新不回写任何 struct 字段，且 gorm 对 map 里的
+		// clause.Expr **不回写**（schema 的 fallbackSetter 显式跳过 Expr）。不重读则刚关闭的
+		// 工单回 `closed_at: null`、重开的工单回旧的关闭时间（M24 实测结论）。
+		// 用零值 struct 接：带主键的 struct 会让 gorm 追加一条主键条件，生成
+		// `WHERE id = $1 AND "tickets"."id" = $2`（asset_service.Restore 末尾同款）。
+		return tx.First(&out, "id = ?", id).Error
+	})
+	if err != nil {
 		return nil, err
 	}
-	// gorm 对 map 里的 clause.Expr **不回写 struct 字段**（schema 的 fallbackSetter 显式跳过
-	// Expr），所以 t.ClosedAt 此刻还是 First 读到的旧值。直接把 &t 返给 handler 会让响应体与
-	// 库里不一致：刚关闭的工单回 `closed_at: null`，重开的工单回旧的关闭时间。重读一次拿真值
-	// （PK 单行 SELECT），与 asset_service.Restore 末尾同款。
-	if injectedClosedAt {
-		// 用**新 struct 实例**接（asset_service.Restore 末尾同款）：t 此刻已带主键，
-		// 直接 First(&t, …) 会让 gorm 追加一条主键条件，生成
-		// `WHERE id = $1 AND "tickets"."id" = $2`，而且填不回这个已经装满旧值的 struct ——
-		// 实测两支都会踩（sqlmock 报参数不符 / 用例读到上一轮的旧时间）。
-		var fresh models.Ticket
-		if err := s.db.WithContext(ctx).First(&fresh, "id = ?", t.ID).Error; err != nil {
-			return nil, err
-		}
-		t = fresh
+	return &out, nil
+}
+
+// insertTicketHistory 把一次操作的字段变更写成 ticket_history 行。
+//
+// 一字段一行、同批次共享 batch_id（UI 靠它分组）：沿用 asset_history 的既有形状，
+// 少发明一套约定；代价是「一次操作 = N 行」，`Create` 一次批量 INSERT 补回来。
+//
+// source / request_id 暂不填（列可空）：它们的取值语义未定 —— 是「操作来路」还是
+// 「工单来路」，以及 API Key 路径算不算 api，都需要先拍板再写死。登记在
+// docs/FIX-PLAN-TICKET-HISTORY.md，不在这里替调用方决定。
+func insertTicketHistory(tx *gorm.DB, ticketID, batchID uuid.UUID, actor Actor, changes []fieldChange) error {
+	rows := make([]models.TicketHistory, 0, len(changes))
+	for _, c := range changes {
+		field := c.Field                          // 取副本地址：range 变量取址在旧 Go 上会让所有行指向同一个字段名
+		rows = append(rows, models.TicketHistory{ //nolint:exhaustruct
+			ID:        uuid.New(),
+			TicketID:  ticketID,
+			BatchID:   batchID,
+			Kind:      models.TicketHistoryKindUpdated,
+			FieldName: &field,
+			OldValue:  c.Old,
+			NewValue:  c.New,
+			ActorID:   actor.ID,
+			ActorName: actor.Name,
+		})
 	}
-	return &t, nil
+	return tx.Create(&rows).Error
 }
