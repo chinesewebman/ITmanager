@@ -28,6 +28,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -37,10 +38,12 @@ import (
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
 	"network-monitor-platform/internal/integration"
+	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/migrate"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2078,4 +2081,49 @@ func TestDBSmoke_AuditLogsPathIndex(t *testing.T) {
 		`EXPLAIN (COSTS OFF) SELECT * FROM audit_logs WHERE path LIKE 'x%'`)
 	assert.Contains(t, plan, "idx_audit_logs_path",
 		"path LIKE 前缀查询应走索引：\n%s", plan)
+}
+
+// TestDBSmoke_AuditFieldTruncation 审计字段超长/多字节/控制字符必须能落库（M29-C / G-44）。
+//
+// 为什么必须真 PG：sqlite **不强制** VARCHAR(n) 长度、也不校验 UTF-8（T-48 同族），
+// 修前那条「长路径/超长 request_id → 22001/22021 → 整行静默丢失」在 sqlite 上根本
+// 复现不出来 —— 只写 sqlite 用例会**假绿**。
+//
+// 为什么走 middleware 而不是 db.Create：buildAuditEntry 未导出，直插测的是 GORM 而不是
+// 本次改的净化代码，变异门禁恒不成立（见 db_smoke_test.go 的 TestDBSmoke_AuditInsert）。
+func TestDBSmoke_AuditFieldTruncation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openSmokeDB(t)
+
+	marker := "trunc-" + uuid.NewString()[:8]
+
+	r := gin.New()
+	r.Use(middleware.AuditLog(middleware.AuditConfig{DB: db, Async: false}))
+	r.GET("/api/assets/:id", func(c *gin.Context) { c.Status(200) })
+
+	// 三样一起上：超长多字节 path（600 汉字 > varchar(500)）、超长 request_id
+	// （60 字符 > varchar(50)）、以及夹在其中的 CR/LF。
+	req := httptest.NewRequest("GET", "/api/assets/"+strings.Repeat("中", 600), nil)
+	req.Header.Set("X-Request-ID", marker+"\r\n"+strings.Repeat("r", 60))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Code)
+
+	var got models.AuditLog
+	require.NoError(t, db.Where("request_id LIKE ?", marker+"%").First(&got).Error,
+		"审计行必须落库 —— 修前这里是 22001/22021，整行静默丢失（只留一行 slog.Warn）")
+
+	// path：按**字符**截到 500（按字节截断会切出非法 UTF-8 → 22021 照样丢行）
+	require.Equal(t, 500, utf8.RuneCountInString(got.Path), "path 必须截到 varchar(500) 个字符")
+	assert.True(t, utf8.ValidString(got.Path), "path 必须是合法 UTF-8（否则 PG 22021 拒收）")
+
+	// request_id：varchar(50)，且 CR/LF 被剥掉（否则落库值会断行，导出 CSV/SIEM 时伪造记录）
+	require.Equal(t, 50, utf8.RuneCountInString(got.RequestID),
+		"request_id 必须截到 varchar(50) 个字符")
+	assert.True(t, utf8.ValidString(got.RequestID))
+	assert.NotContains(t, got.RequestID, "\r")
+	assert.NotContains(t, got.RequestID, "\n")
+	require.True(t, strings.HasPrefix(got.RequestID, marker), "截断不得丢掉前缀（证明是本次这行）")
+
+	t.Logf("✅ 审计字段截断落库: path=%d runes, request_id=%q", utf8.RuneCountInString(got.Path), got.RequestID)
 }
