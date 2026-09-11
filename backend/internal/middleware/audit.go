@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/redact"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -90,15 +91,21 @@ func AuditLog(cfg AuditConfig) gin.HandlerFunc {
 // buildAuditEntry 收集请求上下文
 func buildAuditEntry(c *gin.Context, cfg AuditConfig) *models.AuditLog {
 	entry := &models.AuditLog{
-		ID:        uuid.New(),
-		Action:    cfg.ActionFunc(c),
-		Resource:  resourceFromPath(c),
-		Method:    c.Request.Method,
-		Path:      c.Request.URL.Path,
+		ID:       uuid.New(),
+		Action:   cfg.ActionFunc(c),
+		Resource: resourceFromPath(c),
+		Method:   c.Request.Method,
+		// G-44：以下字段全部走 sanitizeField（净化 + 按字符截断到列宽）。
+		// 审计行是取证链，丢一行比日志难看严重得多 —— 而 PG 的 varchar(n) 按**字符**
+		// 计数、且拒收非法 UTF-8，所以「超长」和「按字节切出半个汉字」都会让整行
+		// INSERT 被拒（22001/22021）→ 静默丢行。两者都在这里一次性关掉。
+		Path:      sanitizeField(c.Request.URL.Path, 500),
 		IP:        c.ClientIP(),
-		UserAgent: truncate(c.GetHeader("User-Agent"), 500),
+		UserAgent: sanitizeField(c.GetHeader("User-Agent"), 500),
 		Status:    c.Writer.Status(),
-		RequestID: c.GetHeader("X-Request-ID"),
+		// 列宽 varchar(50)，而它此前完全不截断，且挂载点包含**未认证**的登录路由
+		// （routes.go:227）→ 攻击者发个超长 X-Request-ID 就能让登录审计行消失。
+		RequestID: sanitizeField(c.GetHeader("X-Request-ID"), 50),
 		CreatedAt: time.Now(),
 	}
 
@@ -112,7 +119,9 @@ func buildAuditEntry(c *gin.Context, cfg AuditConfig) *models.AuditLog {
 		}
 	}
 	if username := c.GetString("username"); username != "" {
-		entry.Username = truncate(username, 100)
+		// 纵深防御：登录路由的 username 已经过 handlers.sanitizeAuditUsername，
+		// 但 protected 组走的是 auth.go 直接 set 的原值（不经那道净化）。
+		entry.Username = sanitizeField(username, 100)
 	}
 
 	// resource_id from URL param :id
@@ -122,9 +131,12 @@ func buildAuditEntry(c *gin.Context, cfg AuditConfig) *models.AuditLog {
 		}
 	}
 
-	// 错误信息 (如果有)
+	// 错误信息 (如果有)。
+	// 注：全仓没有 error_msg 的 setter，这是条**当前不可达**的路径；仍一并改掉是因为
+	// 它就在同一函数里、同一类缺陷（按字节截断 varchar(1000)），留着就是给下一个人
+	// 埋的同一个坑，而改动对可达输入零影响（分支不执行）。
 	if errMsg := c.GetString("error_msg"); errMsg != "" {
-		entry.ErrorMsg = truncate(errMsg, 1000)
+		entry.ErrorMsg = sanitizeField(errMsg, 1000)
 	}
 
 	return entry
@@ -149,7 +161,7 @@ func resourceFromPath(c *gin.Context) string {
 		if len(p) > 0 && p[0] == ':' {
 			continue
 		}
-		return truncate(p, 100)
+		return sanitizeField(p, 100)
 	}
 	return "unknown"
 }
@@ -176,4 +188,29 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max]
+}
+
+// truncateRunes 按**字符**截断到 max 个 rune（口径同 service.truncateRunes）。
+// 不能用上面的 truncate（按 byte）：`truncate("中"*200, 500)` 会切在半个汉字中间，
+// 产出非法 UTF-8，PG 拒收（22021）→ 审计行照样丢，只是从「超长」换成「编码非法」。
+// 尺子必须是 rune —— varchar(n) 数的是字符。
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// sanitizeField 把不可信文本规整成可安全落审计列的字段：剥控制字符 → 按字符截断到列宽。
+//
+// 两件事各有理由，缺一不可：
+//   - 剥控制字符（redact.StripControl）：审计行是行式消费的（SIEM / 日志导出 / CSV），
+//     CR/LF 能把一行伪造成多条记录（CWE-117）；NUL/非法字节让 PG 拒收（22021）。
+//   - 按字符截断：varchar(n) 按字符计数，超长撞 22001 → 整行丢失。
+//
+// **不做 redact.Text（脱敏）**：审计字段是取证材料，脱敏会破坏其证据价值。
+// 这里只防「伪造」与「丢行」，不防「泄漏」——那是日志出口的职责，别把两件事混一起。
+func sanitizeField(s string, maxRunes int) string {
+	return truncateRunes(redact.StripControl(s), maxRunes)
 }

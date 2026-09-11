@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
@@ -322,4 +323,100 @@ func TestAuditLog_InvalidUUIDLogWarn(t *testing.T) {
 
 	assert.Equal(t, 200, w.Code, "请求仍成功 (uuid parse 失败不阻塞)")
 	assert.NoError(t, mock.ExpectationsWereMet(), "INSERT 应执行 (即使 user_id 非法)")
+}
+
+// ==================== G-44：审计字段净化 + 按字符截断 ====================
+
+// 尺子必须是 rune：varchar(n) 按字符计数，按字节截断会把多字节字符切成非法 UTF-8，
+// PG 拒收（22021）→ 审计行照样丢，只是从「超长」换成「编码非法」。
+func TestSanitizeField_按字符截断且输出合法UTF8(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		max       int
+		wantRunes int
+		want      string // 非空则断言精确值
+	}{
+		{"多字节超长按字符截断", strings.Repeat("中", 600), 500, 500, ""},
+		{"ASCII 超长按字符截断", strings.Repeat("a", 507), 500, 500, ""},
+		{"恰好等于上限不动", strings.Repeat("中", 500), 500, 500, ""},
+		{"未超限原样返回", "资产/中文/名", 100, 7, "资产/中文/名"},
+		{"CRLF 并进同一行", "a\r\nb", 500, 2, "ab"},
+		{"NUL 与 DEL 被删", "a\x00b\x7fc", 500, 3, "abc"},
+		{"空串", "", 500, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := sanitizeField(c.in, c.max)
+			assert.True(t, utf8.ValidString(out), "输出必须是合法 UTF-8，实际 %q", out)
+			assert.Equal(t, c.wantRunes, utf8.RuneCountInString(out))
+			assert.NotContains(t, out, "\r")
+			assert.NotContains(t, out, "\n")
+			if c.want != "" {
+				assert.Equal(t, c.want, out)
+			}
+		})
+	}
+}
+
+// 走真实路由拿 context（resourceFromPath 依赖 c.FullPath()），再直接断言 buildAuditEntry
+// 的产物 —— 比隔着 sqlmock 的 SQL 参数更容易读，且测的正是本次改的代码。
+func TestBuildAuditEntry_长路径与超长RequestID被净化(t *testing.T) {
+	var captured *gin.Context
+	r := gin.New()
+	r.GET("/api/assets/:id", func(c *gin.Context) {
+		captured = c
+		c.Status(200)
+	})
+
+	req := httptest.NewRequest("GET",
+		"/api/assets/"+strings.Repeat("中", 600)+"%0d%0a[FAKE]", nil)
+	req.Header.Set("X-Request-ID", strings.Repeat("r", 60))
+	req.Header.Set("User-Agent", "UA/1.0 "+strings.Repeat("中", 600)+"\r\nfake-ua")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.NotNil(t, captured, "handler 必须被命中")
+
+	entry := buildAuditEntry(captured, AuditConfig{
+		ActionFunc: func(c *gin.Context) string { return c.Request.Method },
+	})
+
+	// path：截到 varchar(500) 且是合法 UTF-8（按字节截断这里会留下半个汉字）
+	assert.Equal(t, 500, utf8.RuneCountInString(entry.Path), "path 必须截到列宽 500 字符")
+	assert.True(t, utf8.ValidString(entry.Path), "path 必须是合法 UTF-8，实际 %q", entry.Path)
+	assert.NotContains(t, entry.Path, "\r")
+	assert.NotContains(t, entry.Path, "\n")
+
+	// request_id：列宽只有 50，此前完全不截断 —— 超长即 22001 丢整行
+	assert.Equal(t, 50, utf8.RuneCountInString(entry.RequestID),
+		"request_id 必须截到列宽 50 字符")
+
+	// user_agent：同样 500，且多字节不被切坏
+	assert.Equal(t, 500, utf8.RuneCountInString(entry.UserAgent))
+	assert.True(t, utf8.ValidString(entry.UserAgent))
+
+	// 正常值不受影响：resource 取自路由模式，短且无需截断
+	assert.Equal(t, "assets", entry.Resource)
+}
+
+// 未超限的普通请求必须逐字不变（防止净化误伤正常审计内容）。
+func TestBuildAuditEntry_正常请求字段不变(t *testing.T) {
+	var captured *gin.Context
+	r := gin.New()
+	r.GET("/api/assets/:id", func(c *gin.Context) { captured = c; c.Status(200) })
+
+	req := httptest.NewRequest("GET", "/api/assets/abc", nil)
+	req.Header.Set("X-Request-ID", "req-123")
+	req.Header.Set("User-Agent", "curl/8.0")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	entry := buildAuditEntry(captured, AuditConfig{
+		ActionFunc: func(c *gin.Context) string { return c.Request.Method },
+	})
+	assert.Equal(t, "/api/assets/abc", entry.Path)
+	assert.Equal(t, "req-123", entry.RequestID)
+	assert.Equal(t, "curl/8.0", entry.UserAgent)
+	assert.Equal(t, "assets", entry.Resource)
+	assert.Equal(t, "GET", entry.Method)
 }
