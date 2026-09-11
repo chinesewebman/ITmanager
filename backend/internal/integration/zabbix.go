@@ -148,6 +148,14 @@ func (z *ZabbixClient) GetMetricItems(ctx context.Context) ([]Item, error) {
 	return result.Result, nil
 }
 
+// zabbixTriggerLimit 是 trigger.get 的**本条 API 自己的**上限，与 GetMetricItems 的 5000
+// 恰好同值但互不耦合 —— 本包既有的做法是每个请求内联写自己的上限（见 :133 的 5000 与
+// 这里原本的 100）。提成常量只因为 service.go 的截断判定还要再用一次。
+//
+// M27/B：原值 100，超过 100 条进行中告警时**静默丢弃**（无日志、无计数、无 UI 痕迹），
+// 且按 lastchange 倒序 → 丢的是最老的。100 对真实环境太小（需求 §1.5 实测过触发条件）。
+const zabbixTriggerLimit = 5000
+
 // GetTriggers 获取告警列表（C-P7：ctx 透传）。
 func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 	z.mu.Lock()
@@ -167,10 +175,14 @@ func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 			"skipDependent": true,
 			"filter":        map[string]interface{}{"value": 1},
 			"selectHosts":   "extend",
-			"selectItems":   "extend",
-			"sortfield":     "lastchange",
-			"sortorder":     "DESC",
-			"limit":         100,
+			// M27/B：selectItems 已移除 —— Trigger.Items 在本包没有任何读取点
+			// （ConvertToAlert 只读 Hosts / Description / Priority），
+			// 白拉一份 items 只是把响应体积和源侧负载乘上去。
+			"sortfield": "lastchange",
+			"sortorder": "DESC",
+			// +1 是必须的：源侧恰好返回 zabbixTriggerLimit 条时，「正好这么多」与
+			// 「被截断到 limit」在响应里不可区分 —— 只有多要 1 条才分得清（需求 §2.4）。
+			"limit": zabbixTriggerLimit + 1,
 		},
 		Auth: z.auth,
 		ID:   2,
@@ -256,7 +268,8 @@ type Item struct {
 	LastValue string `json:"lastvalue"`
 	Units     string `json:"units"`
 	// Hosts v2.3 Zabbix 兜底: GetMetricItems selectHosts=extend 时填充。
-	// trigger.get 的 selectItems 不会填充，留 nil 不影响已有调用方。
+	// trigger.get 自 M27/B 起不再请求 items（selectItems 已移除），故本字段在告警
+	// 路径上恒为 nil —— 全包无读取点，留 nil 不影响已有调用方。
 	Hosts []Host `json:"hosts,omitempty"`
 }
 type Event struct {

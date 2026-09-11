@@ -62,8 +62,9 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 		results = map[string]int{"netbox": count}
 		err = e
 	case "zabbix":
-		count, e := h.svc.SyncFromZabbix(ctx)
-		results = map[string]int{"zabbix": count}
+		// M27/D-6：truncated 是 0/1 标志（不是条数），与 glpi_skipped 同位置透出。
+		count, truncated, e := h.svc.SyncFromZabbix(ctx)
+		results = map[string]int{"zabbix": count, "zabbix_truncated": truncated}
 		err = e
 	case "zabbix_metrics":
 		// v2.3: Zabbix 兜底采集，单独走 item.get → metric_snapshots

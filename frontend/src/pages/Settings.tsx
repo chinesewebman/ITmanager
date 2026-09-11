@@ -257,8 +257,16 @@ function Settings() {
     try {
       const res: any = await integrationApi.syncZabbix()
       const synced = res?.data?.data?.synced?.zabbix
+      // M27/D-6/D-10：截断必须露出来，但**文案不许插值这个数** —— zabbix_truncated 是
+      // 0/1 标志，写成「另有 ${truncated} 条未导入」会把「静默丢票」反转成「少报丢票」：
+      // 源侧 6000 条时 UI 显示「另有 1 条」，运维看到 1 就不会去查那 1000 条。
+      // 注意与 handleSyncGLPI 的差别是有意的：那边插值的 glpi_skipped **是条数**。
+      const truncated = res?.data?.data?.synced?.zabbix_truncated ?? 0
       if (res?.data?.code === 0) {
-        message.success(`Zabbix 同步完成，新增 ${synced ?? 0} 条告警`)
+        const base = `Zabbix 同步完成，新增 ${synced ?? 0} 条告警`
+        message.success(
+          truncated > 0 ? `${base}；另有告警因超过条数上限未导入（详见后端日志）` : base,
+        )
       } else {
         message.error(res?.data?.message || '同步失败')
       }

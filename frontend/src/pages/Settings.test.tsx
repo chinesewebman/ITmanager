@@ -7,6 +7,7 @@ import "@testing-library/jest-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import Settings from "./Settings";
+import { message } from "antd";
 // G-33 M1：跨语言配置契约样本（后端 internal/service/channel_service_test.go 读同一文件）
 import channelConfigSamples from "./__fixtures__/channelConfigSamples.json";
 
@@ -659,5 +660,86 @@ describe("W4-M4 渠道保存按钮 loading 防连点", () => {
     expect(notificationApi.createChannel).toHaveBeenCalledTimes(1);
 
     resolveSend({ data: { code: 0, data: {} } });
+  });
+});
+
+// M27/D-6/D-10：Zabbix 同步的截断必须露出来，且**文案不许把这个标志当条数插值**。
+//
+// 为什么这条不是「锦上添花」：truncated 是 0/1 标志。写成「另有 ${truncated} 条未导入」
+// 时，源侧 6000 条告警只会显示「另有 1 条」—— 运维看到 1 就不会去查那 1000 条，
+// 「静默丢弃」被换成了「少报丢弃」，比原来的 bug 更难发现（需求 §2.5）。
+describe("Settings M27 Zabbix 同步截断透出", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    // 前置 1：按钮是 disabled={!integrationStatus?.zabbix?.enabled}，
+    // 不给 enabled=true 的话点击不触发 handler，断言会拿到 undefined（在错误方向变红）。
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: { zabbix: { enabled: true } } },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  async function renderIntegrationsTab() {
+    render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /第三方集成|集成/ }));
+  }
+
+  it("truncated=1 → 提示「超过条数上限」，且不把标志当条数写出来", async () => {
+    // 前置 2：zabbix_truncated 必须为 1，否则截断文案根本不渲染，用例空转
+    vi.mocked(integrationApi.syncZabbix).mockResolvedValue({
+      data: { code: 0, data: { synced: { zabbix: 2, zabbix_truncated: 1 } } },
+    } as any);
+
+    await renderIntegrationsTab();
+    // Zabbix 卡片是三个同步按钮里的第一个（Zabbix / NetBox / GLPI）
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    fireEvent.click(buttons[0]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toContain("超过条数上限");
+    expect(msg).toContain("新增 2 条告警");
+    // 基文案本来就有「新增 2」这个数字，所以不能断言「不含任何数字」——
+    // 要钉的是「没把 truncated 当条数插值」这个具体句式。
+    expect(msg).not.toMatch(/另有\s*1\s*条/);
+  });
+
+  it("truncated=0 → 只有基文案，不出现上限字样", async () => {
+    vi.mocked(integrationApi.syncZabbix).mockResolvedValue({
+      data: { code: 0, data: { synced: { zabbix: 3, zabbix_truncated: 0 } } },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    fireEvent.click(buttons[0]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toBe("Zabbix 同步完成，新增 3 条告警");
+    expect(msg).not.toContain("上限");
+  });
+
+  it("后端没给 zabbix_truncated（旧后端/字段缺失）→ 不炸、不误报截断", async () => {
+    vi.mocked(integrationApi.syncZabbix).mockResolvedValue({
+      data: { code: 0, data: { synced: { zabbix: 1 } } },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    fireEvent.click(buttons[0]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    expect(vi.mocked(message.success).mock.calls[0][0]).toBe("Zabbix 同步完成，新增 1 条告警");
   });
 });

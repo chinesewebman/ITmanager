@@ -409,7 +409,7 @@ func TestSyncFromZabbix_保留历史且不重复(t *testing.T) {
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
 
 	// 第一次：预过滤只命中 problem 行 → 历史行不算「已存在」，必须插入一条新的 problem 行
-	n, err := svc.SyncFromZabbix(context.Background())
+	n, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err, "首次同步失败 —— 加回了 ON CONFLICT？alerts.trigger_id 没有唯一索引")
 	require.Equal(t, 1, n)
 
@@ -420,7 +420,7 @@ func TestSyncFromZabbix_保留历史且不重复(t *testing.T) {
 	assert.Equal(t, "problem", rows[1].Status)
 
 	// 第二次：新插入的 problem 行进了预过滤 → 不再插入
-	n, err = svc.SyncFromZabbix(context.Background())
+	n, _, err = svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "同 trigger 的未恢复告警已存在，不应重复插入")
 
@@ -475,7 +475,7 @@ func TestSyncFromZabbix_ProblemStart来自LastChange(t *testing.T) {
 	srv := fakeZabbixServer(t, strconv.FormatInt(lastChange.Unix(), 10))
 
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
-	n, err := svc.SyncFromZabbix(context.Background())
+	n, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -509,7 +509,7 @@ func TestSyncFromZabbix_LastChange缺失回落(t *testing.T) {
 
 	before := time.Now()
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
-	n, err := svc.SyncFromZabbix(context.Background())
+	n, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -564,7 +564,7 @@ func TestSyncFromZabbix_本地已确认的告警不再重复插入(t *testing.T)
 
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
 
-	n, err := svc.SyncFromZabbix(context.Background())
+	n, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已 ack 的故障不该因为被确认而复活成新行（G-27）")
 

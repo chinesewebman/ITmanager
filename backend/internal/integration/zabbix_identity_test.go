@@ -135,7 +135,7 @@ func TestSyncFromZabbix_身份判据六行表(t *testing.T) {
 			seedZabbixAlert(t, db, c.seededStatus, c.seededStart)
 
 			f := newZabbixFake(t, zabbixOneTrigger("100", c.lastChange))
-			n, err := f.service().SyncFromZabbix(context.Background())
+			n, _, err := f.service().SyncFromZabbix(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, c.wantSynced, n, "synced 计数（= 同事务 COUNT 前后差）")
 
@@ -167,7 +167,7 @@ func TestSyncFromZabbix_空结果与无主机行(t *testing.T) {
 	t.Run("源侧无告警 → 0 且不查库", func(t *testing.T) {
 		db := newUpsertTestDB(t)
 		f := newZabbixFake(t, `[]`)
-		n, err := f.service().SyncFromZabbix(context.Background())
+		n, _, err := f.service().SyncFromZabbix(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, n)
 		var cnt int64
@@ -179,7 +179,7 @@ func TestSyncFromZabbix_空结果与无主机行(t *testing.T) {
 		db := newUpsertTestDB(t)
 		f := newZabbixFake(t, `[{"triggerid":"100","description":"孤儿 trigger",`+
 			`"priority":5,"hosts":[],"value":"1","lastchange":"1756728000"}]`)
-		n, err := f.service().SyncFromZabbix(context.Background())
+		n, _, err := f.service().SyncFromZabbix(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, n, "没有 host 的 trigger 不该产生告警行（ConvertToAlert 会读 Hosts[0]）")
 		var cnt int64
@@ -201,7 +201,7 @@ func TestSyncFromZabbix_预置行不是zabbix来源时不参与去重(t *testing
 	}).Error)
 
 	f := newZabbixFake(t, zabbixOneTrigger("100", "1756728000"))
-	n, err := f.service().SyncFromZabbix(context.Background())
+	n, _, err := f.service().SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "manual 行不是「同一个告警」，不得把 Zabbix 告警挡在门外")
 

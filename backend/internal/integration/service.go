@@ -152,13 +152,28 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 }
 
 // SyncFromZabbix 从 Zabbix 同步告警（C-P6 + C-P7）。
-func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
+//
+// 返回 (synced, truncated, err)：truncated 是 **0/1 标志**（不是条数）—— 源侧的进行中
+// 告警超过 zabbixTriggerLimit 时为 1。单独透出是因为「静默丢告警」比「同步报错」更难
+// 发现（同 SyncFromGLPI 的 skipped）。
+func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, truncated int, err error) {
 	triggers, err := s.zabbix.GetTriggers(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
+	}
+	// M27/B：GetTriggers 请求 limit = zabbixTriggerLimit+1，所以「收到超过上限」是可判定的。
+	// 恰好多要 1 条是必须的：源侧正常返回正好等于 limit 时（就是这么多），
+	// 与「被截断到 limit」不可区分。
+	if len(triggers) > zabbixTriggerLimit {
+		truncated = 1
+		// 日志只插值常量（不含 t.TriggerID 等源侧可控文本）→ 不引入日志注入面。
+		// 按 lastchange 倒序（GetTriggers 的 sortorder=DESC），故被丢的是**最老的**告警。
+		log.Printf("Zabbix 返回的告警数超过上限 %d，源侧仍有告警本次未导入（按 lastchange 倒序，被丢的是最老的）",
+			zabbixTriggerLimit)
+		triggers = triggers[:zabbixTriggerLimit]
 	}
 	if len(triggers) == 0 {
-		return 0, nil
+		return 0, truncated, nil
 	}
 
 	triggerIDs := make([]string, 0, len(triggers))
@@ -174,7 +189,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 		Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).
 		Select("trigger_id", "problem_start", "status").
 		Find(&existing).Error; err != nil {
-		return 0, fmt.Errorf("Zabbix 已存在查询失败: %w", err)
+		return 0, truncated, fmt.Errorf("Zabbix 已存在查询失败: %w", err)
 	}
 
 	// exact：同一 trigger 的同一「故障发生」。
@@ -238,7 +253,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 	}
 
 	if len(toInsert) == 0 {
-		return 0, nil
+		return 0, truncated, nil
 	}
 	// M27/D-4：迁移 000027 建了部分唯一索引 uq_alerts_zabbix_identity。上面的 exact/open
 	// 预过滤是 TOCTOU —— 预查之后、插入之前若有并发同步插了同一身份，CreateInBatches
@@ -251,7 +266,6 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 	// 虚报」是 Ticket 特有的（Ticket 的 BeforeCreate 自己填 ID，gorm 因此不加 RETURNING）；
 	// Alert 路径实测不虚报。保留 COUNT 是因为它①对 INSERT 语句路径的变化免疫，
 	// ②与 SyncFromGLPI 的计数法一致，读者不必分辨两种写法。
-	synced := 0
 	if err := database.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var before, after int64
 		if err := tx.Model(&models.Alert{}).
@@ -274,11 +288,11 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 		synced = int(after - before)
 		return nil
 	}); err != nil {
-		return 0, fmt.Errorf("Zabbix 批量插入失败: %w", err)
+		return 0, truncated, fmt.Errorf("Zabbix 批量插入失败: %w", err)
 	}
 
-	log.Printf("从 Zabbix 同步了 %d 个告警", synced)
-	return synced, nil
+	log.Printf("从 Zabbix 同步了 %d 个告警（截断标志 %d）", synced, truncated)
+	return synced, truncated, nil
 }
 
 // alertIdentityKey 是 M27/A 的去重身份：同一 trigger 的**同一次故障发生**。
@@ -448,11 +462,14 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 		results["netbox"] = n
 	}
 
-	if n, err := s.SyncFromZabbix(ctx); err != nil {
+	if n, trunc, err := s.SyncFromZabbix(ctx); err != nil {
 		log.Printf("Zabbix 同步失败: %v", err)
 		errs = append(errs, fmt.Errorf("zabbix: %w", err))
 	} else {
 		results["zabbix"] = n
+		// M27/D-6：截断标志一并透出 —— 静默丢告警比同步报错更难发现。
+		// 失败分支刻意不写：与 glpi_skipped 同形（失败时连键都没有，前端 ?? 0 兜住）。
+		results["zabbix_truncated"] = trunc
 	}
 
 	if n, skip, err := s.SyncFromGLPI(ctx); err != nil {
