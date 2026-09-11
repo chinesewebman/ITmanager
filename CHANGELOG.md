@@ -36,6 +36,35 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
   新 trap：T-50（部分索引 + `ON CONFLICT` 谓词必须**蕴含**索引谓词，写宽即 `42P10`）、T-51（`migrate.Down`
   只滚最新一层，新增迁移会让既有回滚用例静默错位）。
 
+- **M28 安全与运维正确性收口 — 5 项台账结案 + 3 条新 trap**（`5cec594` 需求文档 → `d7eb44e` A →
+  `e149b11` B → `0050c85` C → `0b1d7cc` D/E → 本次提交台账；方案 `docs/FIX-PLAN-HARDENING.md`）
+  — **A（G-11 API Key 白名单 CIDR 永不命中）**：写入侧一直接受 CIDR（`validateIPWhitelist`），
+  鉴权侧却做 `entry == clientIP` **字符串精确比较** → 填了 CIDR 的 Key 永远 403，且**两侧都不报错**。
+  鉴权侧改用 `ipAllowedByWhitelist()` 复用 `parseTrustedNets` + `isTrustedPeer`（裸 IP 补 `/32`/`/128`，
+  CIDR 走 `Contains`，IPv6 文本形式差异一并解决）。**B（G-8 `RejectAPIKeyAuth` fail-open）**：守卫靠
+  `api_key_id` 非空判「是 API Key 身份」，而该键**只由前置 `AuthMiddleware` 设置** → 任何漏挂它的路由上
+  守卫静默放行；判据改为「身份是否已建立」（`user_id` 为空 ⇒ 上游没跑）→ 500 + `Abort`（选 500 不选 403：
+  服务器配置错误要进错误率告警）。**C（G-29 容器日志无上限）**：compose 加 `x-logging` 锚点
+  （`json-file` + `max-size: 10m` / `max-file: 5`），10 个服务各挂一行。**D（G-12② 死函数）**：删除
+  `healthCheck`——硬编码返回 `"database": "connected"` 却**不做任何 ping**，真探针是
+  `livenessHandler`/`readinessHandler`。**E（G-38 包级 map 竞态）**：`notification.customSenders`
+  加 `sync.RWMutex`（生产当前无写入者，属消除未来竞态面）。
+  验证：27 包全绿 + `vet`/`gofmt` 干净 + `-race` 干净；变异 M28-M1…M28-M7 全红在**断言**上
+  （首版两条变异曾因删块后 `fmt` 未使用而红在编译上，见 T-31）；新增测试含 19 组表驱动的
+  `TestIPAllowedByWhitelist` 与 4 个真实请求穿过的中间件/路由级用例。
+  新 trap：T-52（安全控制两侧必须共享语义）、T-53（fail-open 守卫判据不能是「只有前置才会设的键」）、
+  T-54（同一个 `URL.Path`，`%#v` 安全、裸拼接可被 `%0d%0a` 伪造日志行）。
+- ⚠️ **行为突变告知（M28/A 的副作用，运维需复核）**：A 修完后，**存量**库里此前因字符串精确比较而
+  **永不命中**的 CIDR 白名单条目**将开始生效**。若某把 Key 的 `ip_whitelist` 里留着 `0.0.0.0/0`
+  或 `::/0`（在旧行为下只是"死条目"、不产生任何限制），修复后它会**真的放行任意来源**。
+  请复核现有 API Key 的 `ip_whitelist` 是否仍是期望值（G-42 登记了「写入侧无过宽 CIDR 守卫」这件事，
+  本轮刻意不做——拒绝 `/0` 会把运维锁死在"不能编辑既有条目"上，正确做法是保存时告警，需独立一轮）。
+- **M28/F 新登记（未修，非本轮引入）**：**G-43** —— `apierr.Respond` 的 5xx 日志行裸拼 `URL.Path`，
+  可用 `%0d%0a` 伪造日志行（CWE-117，实测复现；`gin.Logger()` 用 `%#v` 反而安全，`audit.go:97` 落库侧
+  同源）。**G-34/G-35**（`redact` 规则 2/3 的值边界漏 + 规则 1 输出被规则 3 二次误伤）由「未修」改为
+  **「已登记、待独立模块」**，附实测边界表：`password=&SECRET` / `password=;SECRET` /
+  `Authorization: Bearer "SECRET` 三条真漏，而 rev1 曾误判为漏的 `token="S` **实际不漏**。
+
 ### 文档 (docs)
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）
