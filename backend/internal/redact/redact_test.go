@@ -171,6 +171,109 @@ func TestText_不误伤正常文本(t *testing.T) {
 	}
 }
 
+// ==================== M30：值边界与相互咬合的不变量 ====================
+//
+// 本组是「先固化不变量、再改规则」的前半（M28/F 的交接前置，见
+// docs/FIX-PLAN-REDACT-BOUNDARY.md §5.1）：断言的全部是**现状即绿**的行为，
+// 目的是在动 redact.go 之前把不许改坏的东西钉死。
+// 「漏」的修复项用例（改前应当红）随实现一起提交。
+
+// TestText_边界锁定 — §1.4：修 G-35（URL 端口不再被规则 3 吃掉）时，这些输出一个字都不许动。
+func TestText_边界锁定(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// 引号形态必须**回写**（${1}${2}***）：F2 的引号组一旦写成非捕获，前三条立刻红。
+		{"未闭合引号值", `token="S`, `token="***`},
+		{"JSON 引号值", `password="SECRET"`, `password="***"`},
+		{"JSON 花括号值（审计 P1：} ] 不收窄）", `{"password":"ab}c"}`, `{"password":"***"}`},
+		{"冒号键名", `X-Api-Key: SECRET`, `X-Api-Key: ***`},
+		{"连字符键名", `api-key=SECRET`, `api-key=***`},
+		{"值含右花括号", `password=ab}c`, `password=***`},
+		{"值被方括号包裹", `password=[SECRET]`, `password=***`},
+		{"值被圆括号包裹", `password=(SECRET)`, `password=***`},
+		{"方括号值后跟裸字符", `password=[SECRET]x`, `password=***`},
+		{"值尾的 & 不吃（非敏感参数保留）", `password=SECRET&x=1`, `password=***&x=1`},
+		{"空 Bearer 值原样（§6 接受）", `Authorization: Bearer ""`, `Authorization: Bearer ""`},
+		{"scheme-relative 且 host 不带点（§6 接受）", `//token:8080/x`, `//token:***`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
+// TestText_回归不变量 — §3.1「回归」行里现状即绿的部分。
+// 前三条是**方案 A（回看 `://` 就跳过规则 3）被否决的依据**：它们现状是遮住的，
+// 回看方案会把它们变成明文。谁要改回看，先看这三条。
+func TestText_回归不变量(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"协议残缺的键值（方案 A 反例 1）", `://access_token=SECRET`, `://access_token=***`},
+		{"协议残缺的键值（方案 A 反例 2）", `foo:://password=SECRET`, `foo:://password=***`},
+		{"协议残缺的键值（方案 A 反例 3）", `x=://access_token=SECRET`, `x=://access_token=***`},
+		{"query 里的 access_token", `?a=1&access_token=X`, `?a=1&access_token=***`},
+		{"Authorization Basic", `Authorization: Basic dXNlcjpwYXNz`, `Authorization: Basic ***`},
+		{"Bearer 值以分隔符开头", `Authorization: Bearer &SECRET`, `Authorization: Bearer ***`},
+		{"普通 host 带端口（对照：不该脱敏）", `http://host:8080/x`, `http://host:8080`},
+		{"敏感词后跟裸字母（对照：不该脱敏）", `http://tokens:8080/x`, `http://tokens:8080`},
+		{"userinfo 整体丢弃", `http://user:pass@host/x`, `http://host`},
+		{"中文与 URL 混排不切坏字符", `中文前缀 http://host:8080/x 中文后缀 password=SECRET`,
+			`中文前缀 http://host:8080 中文后缀 password=***`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
+// TestText_已知残余_钉住 — §6 登记的**未修**残余。
+//
+// 这些断言写的是**已知泄漏/已知不命中**，不是「期望行为」。钉住它们的目的：
+// ① 让残余可见（不会因为「没人知道」而被当成已修）；② 谁把它们修了，这里会红，
+// 从而必须同步 TODO / TRAPS（结构化的那条对应 TODO **G-46**）。
+func TestText_已知残余_钉住(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			// G-46：嵌套值需要嵌套匹配，属「不换状态机」的范围（§6）。对象形态
+			// `{"password":{"a":"SECRET"}}` 同样漏，此处只钉数组形态作代表。
+			"结构化值内的元素不遮盖（G-46）",
+			`{"password":["SECRET"]}`,
+			`{"password":***"SECRET"]}`,
+		},
+		{
+			// 值**中间**的引号把值类截断，尾巴留明文。收窄「引号只在值首起作用」
+			// 会与 §1.4 的「引号形态回写」冲突，故登记不修。
+			"值中间的引号截断",
+			`password=SEC"RET`,
+			`password=***"RET`,
+		},
+		{
+			// 键词必须落在 `-`/`_` 分段边界上（与注释里的 design=/monkey= 同一取舍）。
+			// 同族的还有 `_password=SECRET`、`1password=SECRET`（实测同样不命中）。
+			"键名不落在 -/_ 边界（clientsecret）",
+			`clientsecret=SECRET`,
+			`clientsecret=SECRET`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, Text(c.in))
+		})
+	}
+}
+
 // ==================== StripControl ====================
 
 func TestStripControl_删控制字符保留可打印(t *testing.T) {
