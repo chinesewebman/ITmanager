@@ -575,3 +575,39 @@ F 项无代码，不单独占一次推送。
   变异后 `cp` 还原，`grep -c '<<: *default-logging'` = 10。
 
 **说明**：本项无 Go 代码改动，`scripts/db_smoke.sh` 不受影响。
+
+### 8.4 D 项（G-12②）— 已交付 2026-09-11
+
+删除 `backend/internal/api/routes.go` 的 `healthCheck`（原 :464-469，6 行）。它返回
+`{"status":"ok","version":"1.0.0","database":"connected"}` 且 `database` 恒为 `"connected"`
+（不真 ping DB）——是一条**误导性的假健康检查**，好在零调用点。
+
+删除前复核：`grep -rn healthCheck backend/` 仅命中定义行自身（含 `_test.go` 与字符串形式）；
+真实探针是紧随其后的 `livenessHandler`（不依赖 DB）与 `readinessHandler`（真 ping DB + 503 摘流），未被触碰。
+
+**验证**：`go build ./...` / `go vet ./...` 干净 —— 若真有引用，编译期立刻红。
+
+### 8.5 E 项（G-38）— 已交付 2026-09-11
+
+**改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/internal/notification/sender.go` | import 新增 `sync`；`customSenders` 加 `customSendersMu sync.RWMutex`；`RegisterSender` 加 `Lock`；新增 `lookupCustomSender`（`RLock`）；`Resolver` 改调 `lookupCustomSender` |
+| `backend/internal/notification/notification_test.go` | import 新增 `sync`；新增 `TestResolver_并发注册与解析无竞态`（1 writer `RegisterSender` + 4 reader `Resolver`，`close(start)` 起跑线 + 2000 轮，cleanup 走锁） |
+
+**未 retire `RegisterSender`**：它是导出符号、有 5 处测试依赖，与 D 项的私有零引用死函数不同类（§2.5）。
+
+**验证**：
+- `go test ./...` **27 包全绿**；`go test -race ./internal/notification/` 绿；`go vet` / `gofmt -l` 干净。
+- **变异反证**：
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M28-M7 | 去掉 `RegisterSender` 的 `Lock` 与 `lookupCustomSender` 的 `RLock`（其余不动，可编译） | **红**：`go test -race` 连跑 3 次，3/3 报 `DATA RACE`（迭代过程中 `customSendersMu` 仍被声明，无未使用错误） |
+
+  变异后 `cp` 还原，`grep -c 'customSendersMu.RLock()'` = 1。
+
+**关键教训（写入 §5.3 的 T-53 配套）**：rev1 的用例把读者写成 `NewSender`——它只按 `ch.Type` 走
+switch、**从不读 `customSenders`**，所以修前也是绿的。这是「测试名字对了、被观测对象错了」的假绿，
+只有靠**实测变异**才会暴露（推理不会）。

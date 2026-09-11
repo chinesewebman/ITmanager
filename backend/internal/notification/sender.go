@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -92,14 +93,34 @@ func NewSender(ch *models.NotificationChannel) (Sender, error) {
 }
 
 // SenderRegistry 注册自定义 Sender (用于测试 mock)
-var customSenders = map[string]Sender{}
+//
+// G-38：这两处访问必须走锁。map 的并发读写不是「数据不一致」而是 Go runtime 直接
+// `fatal error: concurrent map read and map write`（**不可 recover**，整个进程挂掉）。
+// 当前生产无写入者（RegisterSender 只在测试里调用），但它是「将来会被当插件点」的形状。
+// 保护方式与仓库其余处一致（sync.RWMutex，见 middleware/rate_limit.go、metrics、eventbus）。
+var (
+	customSendersMu sync.RWMutex
+	customSenders   = map[string]Sender{}
+)
 
 // RegisterSender 注册一个渠道类型的 Sender (覆盖默认)
-func RegisterSender(channelType string, s Sender) { customSenders[channelType] = s }
+func RegisterSender(channelType string, s Sender) {
+	customSendersMu.Lock()
+	defer customSendersMu.Unlock()
+	customSenders[channelType] = s
+}
+
+// lookupCustomSender 读注册表；Resolver 之外不要直接访问 customSenders。
+func lookupCustomSender(channelType string) (Sender, bool) {
+	customSendersMu.RLock()
+	defer customSendersMu.RUnlock()
+	s, ok := customSenders[channelType]
+	return s, ok
+}
 
 // Resolver 工厂选项: 优先返回注册的 mock, 否则默认实现
 func Resolver(ch *models.NotificationChannel) (Sender, error) {
-	if s, ok := customSenders[ch.Type]; ok {
+	if s, ok := lookupCustomSender(ch.Type); ok {
 		return s, nil
 	}
 	return NewSender(ch)

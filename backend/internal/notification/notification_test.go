@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,6 +160,56 @@ func TestRegisterSender_覆盖默认(t *testing.T) {
 func TestResolver_未知类型返错(t *testing.T) {
 	_, err := Resolver(&models.NotificationChannel{Type: "pigeon"})
 	assert.Error(t, err)
+}
+
+// TestResolver_并发注册与解析无竞态 钉住 G-38：customSenders 是包级 map，
+// RegisterSender（写）与 Resolver（读）并发时必须走锁 —— 否则 Go runtime 直接
+// `fatal error: concurrent map read and map write`，不可 recover，整个进程挂掉。
+//
+// 需要 `go test -race` 才有检出能力：普通 `go test` 下本用例也是绿的。
+// 读者必须用 Resolver —— NewSender 只按 ch.Type 走 switch，**从不读 customSenders**，
+// 用它当读者两者不访问同一内存，修前也是绿的（假绿）。
+func TestResolver_并发注册与解析无竞态(t *testing.T) {
+	const typ = "g38-race"
+	t.Cleanup(func() {
+		// 走锁清理，避免给后续用例留下未同步的写
+		customSendersMu.Lock()
+		delete(customSenders, typ)
+		customSendersMu.Unlock()
+	})
+
+	var wg sync.WaitGroup
+	start := make(chan struct{}) // 起跑线：让读写尽量重叠，跨 CI/单核环境也能稳定触发
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 2000; i++ {
+			RegisterSender(typ, &mockSender{typ: typ})
+		}
+		close(stop)
+	}()
+
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, _ = Resolver(&models.NotificationChannel{Type: typ})
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }
 
 // mockSender 测试用 mock

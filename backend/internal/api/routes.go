@@ -461,14 +461,6 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 	return r
 }
 
-func healthCheck(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":   "ok",
-		"version":  "1.0.0",
-		"database": "connected",
-	})
-}
-
 // livenessHandler C-P1: 进程存活探针（K8s livenessProbe）
 // 只确认进程能响应 HTTP，不依赖 DB/外部服务
 func livenessHandler(c *gin.Context) {
