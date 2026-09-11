@@ -945,6 +945,199 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 存活探针（旧路径兼容）
+         * @description 内部转发到 `GET /healthz`：只确认进程能响应 HTTP，**不依赖 DB / 外部服务**，故恒 200。
+         *     K8s livenessProbe 用组外 `/healthz`；本路径供仍引用旧地址的 manifest 兼容。
+         */
+        get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 获取集成配置状态
+         * @description 返回 NetBox / Zabbix / GLPI 的 `enabled` + `url`（Zabbix 另含 `user`）。
+         *     `has_*` 布尔位**仅 canManage 角色**（admin / ops_admin）可见 —— 它们泄露
+         *     「凭据是否已配置」，对 readonly / auditor / user 不返回。
+         *     ⚠️ 回传集成 URL 与 Zabbix 用户名属**已登记的读地板**（TODO.md:59）；
+         *     本契约只如实描述现状，不改变响应内容。
+         */
+        get: operations["getIntegrationStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 触发一次同步
+         * @description 同步方向：NetBox 设备 / Zabbix 告警 / GLPI 工单 / Zabbix 指标。
+         *     `type` 缺省、为空串、或 body 不是合法 JSON → 按 `all` 处理；
+         *     **非空但取值不在词表内 → 400**（原先静默走 all，BUG#7 已收紧）。
+         *     部分数据源失败时返回 **500**，但 `data.synced` 仍带已成功项的计数（失败项无键）。
+         */
+        post: operations["syncIntegrations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/zabbix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 更新 Zabbix 配置（运行时生效）
+         * @description 仅更新**内存配置**并热重载客户端，**不落盘** —— 重启后回到 yaml / env 值。
+         *     `password` 留空 = 保留旧值（避免 UI 清空密码时把后端改成空）；`url` / `user` 必填。
+         *     该路由挂 `RejectAPIKeyAuth`：API Key 身份一律 403（堵住用长期凭据改写集成出站地址）。
+         */
+        put: operations["updateZabbix"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/zabbix/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 测试 Zabbix 连通性
+         * @description 仅 Login 一次以验证 URL / 账号密码；**不入 DB、不写指标**。
+         *     失败返回 400，错误文本经 `redact.Text` 脱敏。
+         */
+        post: operations["testZabbix"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/netbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 更新 NetBox 配置（运行时生效）
+         * @description 同 Zabbix：仅内存生效 + 热重载，不落盘；`token` 留空 = 保留旧值；`url` 必填。
+         *     挂 `RejectAPIKeyAuth`。
+         */
+        put: operations["updateNetBox"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/netbox/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 测试 NetBox 连通性
+         * @description 拉 1 条设备验证 URL / Token；不入 DB。失败返回 400（错误文本已脱敏）。
+         */
+        post: operations["testNetBox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/glpi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 更新 GLPI 配置（运行时生效）
+         * @description 同 Zabbix：仅内存生效 + 热重载，不落盘；两个 token 各自留空 = 保留旧值；`url` 必填。
+         *     挂 `RejectAPIKeyAuth`。
+         */
+        put: operations["updateGLPI"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/glpi/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 测试 GLPI 连通性
+         * @description InitSession 验证 URL + 两个 token；不入 DB。失败返回 400（错误文本已脱敏）。
+         */
+        post: operations["testGLPI"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1528,6 +1721,105 @@ export interface components {
             ts?: string;
             /** Format: date-time */
             created_at?: string;
+        };
+        /** @description 存活探针响应。不依赖 DB / 外部服务，故恒 200。 */
+        Health: {
+            /**
+             * @example alive
+             * @enum {string}
+             */
+            status?: "alive";
+        };
+        SyncRequest: {
+            /**
+             * @description 缺省 / 空串 / body 非法 JSON → 按 all 处理；非空但不在词表内 → 400
+             * @default all
+             * @enum {string}
+             */
+            type: "netbox" | "zabbix" | "glpi" | "zabbix_metrics" | "all";
+        };
+        /**
+         * @description 同步结果信封。`data.synced` 的键**随 type 而变**（自由形态，未在契约里收口 ——
+         *     见 TODO **G-41**）：netbox / zabbix / glpi / zabbix_metrics 为同步条数；
+         *     `zabbix_truncated` 是 0/1 **标志**（不是条数）；`glpi_skipped` 是档位越界被跳过的条数。
+         *     失败的数据源**连键都没有**（前端以 `?? 0` 兜底）。
+         */
+        SyncResult: {
+            code?: number;
+            message?: string;
+            data?: {
+                /** @description 键随 type 而变，见上；取值均为整数（含 0/1 标志位）。 */
+                synced?: {
+                    [key: string]: number;
+                };
+            };
+        };
+        /**
+         * @description 集成配置状态。`enabled` = 该项 URL 非空。
+         *     ⚠️ `has_*` 布尔位**仅 canManage（admin / ops_admin）返回** —— 它们泄露「凭据是否已配置」。
+         *     回传 url / user 属已登记的读地板（TODO.md:59），本契约只描述现状。
+         */
+        IntegrationStatus: {
+            code?: number;
+            data?: {
+                netbox?: {
+                    enabled: boolean;
+                    /** @description 未配置时为空串 */
+                    url: string;
+                    /** @description 仅 canManage 返回 */
+                    has_token?: boolean;
+                };
+                zabbix?: {
+                    enabled: boolean;
+                    /** @description 未配置时为空串 */
+                    url: string;
+                    /** @description 对所有已认证角色可见 */
+                    user: string;
+                    /** @description 仅 canManage 返回 */
+                    has_password?: boolean;
+                };
+                glpi?: {
+                    enabled: boolean;
+                    /** @description 未配置时为空串 */
+                    url: string;
+                    /** @description 仅 canManage 返回 */
+                    has_app_token?: boolean;
+                    /** @description 仅 canManage 返回 */
+                    has_user_token?: boolean;
+                };
+            };
+        };
+        /** @description 配置已生效（**仅内存**）。message 会说明「重启后回到 yaml / env 值」。 */
+        IntegrationUpdateResult: {
+            code?: number;
+            message?: string;
+            data?: {
+                /** @description 生效后的集成基址（回显，非凭据） */
+                url?: string;
+                /** @description 仅 Zabbix 返回 */
+                user?: string;
+            };
+        };
+        ZabbixConfigInput: {
+            /** Format: uri */
+            url: string;
+            user: string;
+            /** @description 留空 = 保留旧值。仅存内存、不落盘，且**不在任何响应里回显**。 */
+            password?: string;
+        };
+        NetBoxConfigInput: {
+            /** Format: uri */
+            url: string;
+            /** @description 留空 = 保留旧值。仅存内存、不落盘，且**不在任何响应里回显**。 */
+            token?: string;
+        };
+        GLPIConfigInput: {
+            /** Format: uri */
+            url: string;
+            /** @description 留空 = 保留旧值。仅存内存、不落盘，且**不在任何响应里回显**。 */
+            app_token?: string;
+            /** @description 留空 = 保留旧值。仅存内存、不落盘，且**不在任何响应里回显**。 */
+            user_token?: string;
         };
     };
     responses: never;
@@ -3400,6 +3692,262 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MetricSnapshot"][];
                 };
+            };
+        };
+    };
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 进程存活 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    getIntegrationStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationStatus"];
+                };
+            };
+        };
+    };
+    syncIntegrations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SyncRequest"];
+            };
+        };
+        responses: {
+            /** @description 同步完成 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncResult"];
+                };
+            };
+            /** @description type 取值不在词表内 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 至少一个数据源同步失败（data.synced 仍含成功项） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncResult"];
+                };
+            };
+        };
+    };
+    updateZabbix: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZabbixConfigInput"];
+            };
+        };
+        responses: {
+            /** @description 已生效 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationUpdateResult"];
+                };
+            };
+            /** @description url / user 缺失 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    testZabbix: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 连通 OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 连通失败（错误文本已脱敏） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    updateNetBox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetBoxConfigInput"];
+            };
+        };
+        responses: {
+            /** @description 已生效 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationUpdateResult"];
+                };
+            };
+            /** @description url 缺失 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    testNetBox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 连通 OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 连通失败（错误文本已脱敏） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    updateGLPI: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GLPIConfigInput"];
+            };
+        };
+        responses: {
+            /** @description 已生效 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationUpdateResult"];
+                };
+            };
+            /** @description url 缺失 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    testGLPI: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 连通 OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 连通失败（错误文本已脱敏） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
