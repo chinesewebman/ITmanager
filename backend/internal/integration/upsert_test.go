@@ -525,12 +525,16 @@ func TestSyncFromZabbix_LastChange缺失回落(t *testing.T) {
 		"回落必须打日志；静默回落正是 M26 要消除的失败模式。实际日志: %q", buf.String())
 }
 
-// TestSyncFromZabbix_本地已确认的告警会重复插入 把**已知边界**钉住（TODO G-27）。
+// TestSyncFromZabbix_本地已确认的告警不再重复插入 是 G-27 的靶心（M27/A 修的正是它）。
 //
-// 预过滤只认 status='problem'，本地已 ack 的行（status='acknowledged'）不算「已存在」
-// → 同一 trigger 再插一行。这是 G-22 轮刻意不改的语义决策（改法见 G-27），
-// 此断言的作用是：谁改了预过滤语义，必须一起改这里，而不是让它悄悄漂移。
-func TestSyncFromZabbix_本地已确认的告警会重复插入(t *testing.T) {
+// 旧语义：预过滤只认 status='problem' → 本地已 ack 的行（status='acknowledged'）不算
+// 「已存在」→ 同一 trigger 再插一行，运维每点一次「确认」就多一条待处理告警。
+// 新语义：判据是「同一 trigger 的同一次故障发生」（trigger_id + problem_start），
+// 与本地状态无关 —— ack 过的故障不该因为被确认而复活成新行。
+//
+// 本 fixture 的 trigger 不带 lastchange → 走**降级分支**（身份不可知 → 同 trigger 且
+// 未解决即算已存在），所以它守的是 D-2/D-3 那条判据，不是 exact 判据。
+func TestSyncFromZabbix_本地已确认的告警不再重复插入(t *testing.T) {
 	db := newUpsertTestDB(t)
 
 	acked := models.Alert{
@@ -562,13 +566,12 @@ func TestSyncFromZabbix_本地已确认的告警会重复插入(t *testing.T) {
 
 	n, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, n, "当前语义：已 ack 的行不算「已存在」，会再插一行（TODO G-27）")
+	assert.Equal(t, 0, n, "已 ack 的故障不该因为被确认而复活成新行（G-27）")
 
 	var rows []models.Alert
 	require.NoError(t, db.Where("trigger_id = ?", "100").Order("created_at").Find(&rows).Error)
-	require.Len(t, rows, 2, "已知边界：同一 trigger 出现 ack 行 + problem 行两行（TODO G-27）")
-	assert.Equal(t, "acknowledged", rows[0].Status, "ack 行必须原样保留")
-	assert.Equal(t, "problem", rows[1].Status)
+	require.Len(t, rows, 1, "只能有原来的 ack 那一行 —— 多出来的那行就是 G-27 的重复告警")
+	assert.Equal(t, "acknowledged", rows[0].Status, "ack 行必须原样保留（不得被覆盖成 problem）")
 }
 
 // TestSyncFromGLPI_两次同步不重复 守**预过滤**（existingSet）这条幂等路径。

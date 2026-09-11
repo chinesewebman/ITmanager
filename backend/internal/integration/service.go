@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -164,15 +165,34 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 	for _, t := range triggers {
 		triggerIDs = append(triggerIDs, t.TriggerID)
 	}
+	// M27/A：判据要两种，所以不再按 status 过滤 —— 留 status 过滤会让 usable 分支看不到
+	// resolved 行，而那正是「本地已解决、源侧仍 firing」时必须命中的行。
+	// 只取判据需要的三列（problem 是 TEXT，不拉）。
+	// source = 'zabbix' 与 000027 的索引谓词一致，否则 Go 侧与库侧对「同一身份」判断分叉。
 	var existing []models.Alert
 	if err := database.DB.WithContext(ctx).
-		Where("trigger_id IN ? AND status = ?", triggerIDs, "problem").
+		Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).
+		Select("trigger_id", "problem_start", "status").
 		Find(&existing).Error; err != nil {
 		return 0, fmt.Errorf("Zabbix 已存在查询失败: %w", err)
 	}
-	existingSet := make(map[string]struct{}, len(existing))
+
+	// exact：同一 trigger 的同一「故障发生」。
+	// 零值/NULL 的 problem_start 都经 IsZero() 排除：真 PG 把 NULL 扫成零值，与真正的
+	// 零值不可区分（M26 §1.6 实测）。排除的代价只是退回下面的降级判据，不会漏判成插入。
+	exact := make(map[string]struct{}, len(existing))
+	// open：**仅**降级分支用（lastchange 不可用 → 身份不可知）。
+	// 判据必须是 Go 形态的 != "resolved"，不能写成 SQL 的 status <> 'resolved'：
+	// 三值逻辑下后者对 NULL 求值为 NULL → 该行不进集合；Go 下 NULL 扫成 "" → 进集合。
+	// 后者才与 D-2 的失败方向一致（宁可多一行可见的重复，不可静默吞掉后续再触发）。
+	open := make(map[string]struct{}, len(existing))
 	for _, e := range existing {
-		existingSet[e.TriggerID] = struct{}{}
+		if !e.ProblemStart.IsZero() {
+			exact[alertIdentityKey(e.TriggerID, e.ProblemStart)] = struct{}{}
+		}
+		if e.Status != "resolved" {
+			open[e.TriggerID] = struct{}{}
+		}
 	}
 
 	now := time.Now()
@@ -181,18 +201,26 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 		if len(t.Hosts) == 0 {
 			continue
 		}
-		if _, ok := existingSet[t.TriggerID]; ok {
-			continue // 跳过已存在（避免重复）
-		}
 		alert := t.ConvertToAlert()
 		// M26：problem_start 取 Zabbix 的 lastchange（故障实际开始时刻），不是同步时刻。
 		// 不写这一列会让告警列表有数据、而全部基于 problem_start 的 KPI/SLA 恒空
 		// —— 静默的空，前端也不渲染该列，看不出来（需求 §1.2、§2.3）。
 		// D-8：created_at 仍保持 now（入库时刻），两列语义不同，不要合并。
 		problemStart, st := parseUnixSeconds(t.LastChange)
-		if st != timeOK {
+		if st == timeOK {
+			// M27/A：同一 trigger 的同一故障只入一次 —— 无论本地是 problem / acknowledged
+			// 还是 resolved。M26 之前的判据只认 problem，运维点一次「确认」就多出一条
+			// 未确认的重复行（G-27）。
+			if _, ok := exact[alertIdentityKey(t.TriggerID, problemStart)]; ok {
+				continue
+			}
+		} else {
+			// M27/A 降级：lastchange 不可用 → 身份不可知，退到「同 trigger 且未解决即算已存在」。
 			logTimeUnusable("Zabbix trigger", t.TriggerID, "lastchange", t.LastChange, st)
 			problemStart = now
+			if _, ok := open[t.TriggerID]; ok {
+				continue
+			}
 		}
 		toInsert = append(toInsert, models.Alert{
 			TriggerID:    t.TriggerID,
@@ -212,15 +240,54 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (int, error) {
 	if len(toInsert) == 0 {
 		return 0, nil
 	}
-	// 不加 ON CONFLICT：同一 trigger 会「触发 → 恢复 → 再触发」，多行历史是预期语义
-	// （上面的预过滤只跳过「当前未恢复」的），且 alerts.trigger_id 上没有唯一索引 ——
-	// 加了只会让整条语句在真 PG 上 42P10 失败（见 docs/FIX-PLAN-NETBOX-UPSERT.md §1.2-3）。
-	if err := database.DB.WithContext(ctx).
-		CreateInBatches(toInsert, 100).Error; err != nil {
+	// M27/D-4：迁移 000027 建了部分唯一索引 uq_alerts_zabbix_identity。上面的 exact/open
+	// 预过滤是 TOCTOU —— 预查之后、插入之前若有并发同步插了同一身份，CreateInBatches
+	// 整批原子 → 撞索引 → 整批新告警一起回滚，同步全失败。配 ON CONFLICT 把「硬失败」
+	// 变成「幂等跳过」。
+	// 谓词必须与索引逐字一致：不带 TargetWhere 的 ON CONFLICT (trigger_id, problem_start)
+	// 在部分索引下 PG 报 42P10（同 GLPI 侧 :322-326 与 000026）。
+	//
+	// 计数用同事务 COUNT 前后差，而不是 res.RowsAffected：T-49 记的那个「RowsAffected
+	// 虚报」是 Ticket 特有的（Ticket 的 BeforeCreate 自己填 ID，gorm 因此不加 RETURNING）；
+	// Alert 路径实测不虚报。保留 COUNT 是因为它①对 INSERT 语句路径的变化免疫，
+	// ②与 SyncFromGLPI 的计数法一致，读者不必分辨两种写法。
+	synced := 0
+	if err := database.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before, after int64
+		if err := tx.Model(&models.Alert{}).
+			Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).Count(&before).Error; err != nil {
+			return err
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "trigger_id"}, {Name: "problem_start"}},
+			TargetWhere: clause.Where{Exprs: []clause.Expression{
+				clause.Expr{SQL: "source = 'zabbix' AND trigger_id IS NOT NULL AND trigger_id <> ''"},
+			}},
+			DoNothing: true,
+		}).CreateInBatches(toInsert, 100).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.Alert{}).
+			Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).Count(&after).Error; err != nil {
+			return err
+		}
+		synced = int(after - before)
+		return nil
+	}); err != nil {
 		return 0, fmt.Errorf("Zabbix 批量插入失败: %w", err)
 	}
-	log.Printf("从 Zabbix 同步了 %d 个告警", len(toInsert))
-	return len(toInsert), nil
+
+	log.Printf("从 Zabbix 同步了 %d 个告警", synced)
+	return synced, nil
+}
+
+// alertIdentityKey 是 M27/A 的去重身份：同一 trigger 的**同一次故障发生**。
+// 用 Unix 秒而不是格式化字符串：lastchange 本身就是 Unix 秒，且 Unix() 与 Location 无关
+// —— M26 在 pgx 与 sqlite 上各踩过一次时区坑（T-48），这里不给自己留第二个入口。
+// 抽成函数而不是在两处内联同一段格式化：exact 的**构造**和**查询**必须同源，
+// 写成两遍就是给将来「只改一处」留一个静默失效的口子（方向是漏判 → 插重复行）。
+func alertIdentityKey(triggerID string, problemStart time.Time) string {
+	return triggerID + "|" + strconv.FormatInt(problemStart.Unix(), 10)
 }
 
 // SyncFromGLPI 从 GLPI 同步工单（C-P6 + C-P7）。
