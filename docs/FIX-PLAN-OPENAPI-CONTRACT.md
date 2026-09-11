@@ -406,4 +406,23 @@ M31-M3 是本轮最关键的变异：它证明**新断言抓的是旧断言结�
 - 另：步 3 手工 YAML 曾因 `description` 以反引号开头（YAML 保留字符）解析失败，已改为单引号标量
 ### 8.3 门禁（含 `validate:api` 与 `gen:api` 漂移检查的首次实跑输出）
 ### 8.4 实现后审计与处置
+
+**步 5（D-5 鉴权语义）实测**：先取证再改。对全部 `/api` 路由发**无凭据**请求，
+非 401 的恰为 3 条 —— `GET /health → 200`、`POST /auth/login → 400`、`POST /auth/logout → 200`，
+与 D-5 列的三条一致。改动：顶层加 `security: [{BearerAuth: []}]`；这三条各加 `security: []`。
+改完复跑同一探针做**双向**核对（spec 声明公开集合 vs 运行时未认证可达集合）→
+两侧均 3 条、**零 MISMATCH**。
+
+顺带修正一处**既有错误标注**：`/auth/logout` 原先写着 `security: [{BearerAuth: []}]`，
+但它没挂 `AuthMiddleware`（无凭据也恒 200）—— 即顶层默认缺失时，spec 对这条是**反着错**的。
+`/auth/skip-password-change` 的 `security: [BearerAuth]` 与之相反、是对的（在 protected 组内），
+顶层默认生效后成为冗余但无害，本轮**不动**（避免无谓 diff）。
+
 ### 8.5 残余
+
+- **R-5（新）：鉴权语义声明**尚无守门用例**。步 4 的集合相等只管 (method,path) 的存在性，
+  管不到 `security:` 的值；今天「spec 说哪些端点是公开的」只是**声明**，没有任何测试在核它。
+  与 D-1 否决 allowlist 的理由同源（软控制 / 交付态恒绿 vacuous）—— 建议下一步补一条
+  `TestRoutes_OpenAPI公开端点集合相等`：运行时「无凭据请求非 401」集合 == spec「operation 上
+  显式 `security: []`」集合，两个方向都断言。本轮探针已验证该断言**今天恒绿且非空转**（两侧各 3 条），
+  可直接固化。

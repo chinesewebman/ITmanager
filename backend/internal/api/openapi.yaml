@@ -27,6 +27,13 @@ servers:
   - url: http://localhost/api
     description: 生产环境
 
+# 顶层默认：**所有** operation 都需要 Bearer 认证（AuthMiddleware）。
+# 未认证即可访问的只有三条，各自在 operation 上显式写 `security: []` ——
+# GET /health、POST /auth/login、POST /auth/logout（实测方式：对全部 /api 路由发无凭据请求，
+# 非 401 的恰为这三条）。新增公开端点必须同步加 `security: []`，否则 spec 与实际不符。
+security:
+  - BearerAuth: []
+
 tags:
   - name: 认证
     description: 登录、登出相关接口
@@ -61,6 +68,7 @@ paths:
         - 认证
       summary: 用户登录
       operationId: login
+      security: [] # 公开：登录本身没有凭据可带。反爆破靠 RateLimit（5 req/min per IP）
       requestBody:
         required: true
         content:
@@ -91,8 +99,10 @@ paths:
         - 认证
       summary: 用户登出
       operationId: logout
-      security:
-        - BearerAuth: []
+      description: |
+        公开端点（未挂 AuthMiddleware）—— 服务端无会话可清，token 由客户端自行丢弃，
+        故无凭据也能调、恒 200。此前这里误标 `BearerAuth`，与实现不符，已改。
+      security: []
       responses:
         '200':
           description: 登出成功
@@ -1650,6 +1660,7 @@ paths:
         内部转发到 `GET /healthz`：只确认进程能响应 HTTP，**不依赖 DB / 外部服务**，故恒 200。
         K8s livenessProbe 用组外 `/healthz`；本路径供仍引用旧地址的 manifest 兼容。
       operationId: getHealth
+      security: [] # 公开：探针不能带凭据（K8s livenessProbe 同款）
       responses:
         '200':
           description: 进程存活
