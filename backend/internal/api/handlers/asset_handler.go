@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/csv"
 	"errors"
 	"net/http"
@@ -220,22 +221,30 @@ func (h *AssetHandler) RestoreAsset(c *gin.Context) {
 func (h *AssetHandler) ExportAssets(c *gin.Context) {
 	format := c.DefaultQuery("format", "csv")
 
-	// 导出走全量查询（不分页）
-	items, _, err := h.svc.List(c.Request.Context(), service.AssetFilter{Page: 1, PageSize: 500})
+	// 导出走专用全量查询（不分页、不计数）。M32：原先是 List(Page:1, PageSize:500)，
+	// 被 List 的 500 硬顶截断且总数被丢弃 → 静默产出不完整的对账文件。
+	items, err := h.svc.ListAll(c.Request.Context())
 	if err != nil {
 		apierr.Internal(c, "导出资产失败", err)
 		return
 	}
 
+	// X-Total-Count = 本次导出的数据行数（不含 CSV 表头）。
+	// 取 len(items) 而不是另发一次 COUNT(*)：头值恒等于 body 行数，不存在
+	// COUNT 与 SELECT 之间的竞态窗口。调用方用它自校验完整性。
+	c.Header("X-Total-Count", strconv.Itoa(len(items)))
+
 	if format == "csv" {
 		// C-F7: 用 encoding/csv 正确转义（含逗号/换行/双引号）
 		// 并对 = + - @ 	 \r 开头字段加前导单引号防止 Excel 公式注入（DDE）
-		c.Header("Content-Type", "text/csv; charset=utf-8")
 		c.Header("Content-Disposition", `attachment; filename=assets.csv`)
 		c.Header("X-Content-Type-Options", "nosniff")
 
-		w := csv.NewWriter(c.Writer)
-		defer w.Flush()
+		// 先写满内存缓冲再一次性发出：要么完整 200、要么 500 无 body。
+		// 直接 csv.NewWriter(c.Writer) 是边写边发，中途失败会产出「半截 CSV + 已 200」，
+		// 且原实现 _ = w.Write / defer w.Flush() 把错误全丢了 —— 那本身就是静默不完整。
+		var buf bytes.Buffer
+		w := csv.NewWriter(&buf)
 		_ = w.Write([]string{"ID", "Name", "Type", "Status"})
 		for _, a := range items {
 			row := []string{
@@ -246,6 +255,15 @@ func (h *AssetHandler) ExportAssets(c *gin.Context) {
 			}
 			_ = w.Write(row)
 		}
+		w.Flush()
+		if err := w.Error(); err != nil {
+			apierr.Internal(c, "导出资产失败", err)
+			return
+		}
+		// 显式设 CL：body 超过 net/http 的 2KB 缓冲时不会自动带 CL，会退化成 chunked，
+		// 客户端就无法校验「收全了没有」。此处长度与即将写出的字节数恒等（同一 buf）。
+		c.Header("Content-Length", strconv.Itoa(buf.Len()))
+		c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
 		return
 	}
 

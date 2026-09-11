@@ -38,6 +38,8 @@ type AssetFilter struct {
 // AssetService 资产业务接口
 type AssetService interface {
 	List(ctx context.Context, f AssetFilter) (items []models.Asset, total int64, err error)
+	// ListAll 返回全部资产（导出专用，不分页、不计数）。语义与 List 不同，见实现处注释。
+	ListAll(ctx context.Context) (items []models.Asset, err error)
 	Get(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 	Create(ctx context.Context, asset *models.Asset) error
 	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error)
@@ -93,6 +95,28 @@ func (s *assetService) List(ctx context.Context, f AssetFilter) ([]models.Asset,
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+// ListAll 返回全部资产（导出专用，不分页、不计数）。
+//
+// 为什么不让导出复用 List：List 的语义是「给我第 N 页」，pageSize 有 500 硬顶
+// （防止交互式分页被一次拉爆）。导出要的是「给我全部」—— 把 PageSize 调大只会
+// 被那个硬顶接管，导出行为一个字不变（docs/FIX-PLAN-EXPORT-FIDELITY.md §2.1）。
+//
+// 与 List 的等价性契约：本轮两者都没有过滤参数，故「ListAll 的集合 == List 无过滤
+// 时逐页拼起来的集合」。将来给 List 加过滤/软删除/scope 必须同步改这里，
+// 否则导出会多返回行，推翻需求 §3.4 的「导出不构成提权」论证。
+//
+// 排序加 id 兜底：created_at 同刻时（批量导入是常态）单靠 created_at 顺序不稳定，
+// 导出产物就没法做 diff —— 对账场景要的就是可 diff（需求 §0）。
+func (s *assetService) ListAll(ctx context.Context) ([]models.Asset, error) {
+	var items []models.Asset
+	if err := s.db.WithContext(ctx).Model(&models.Asset{}).
+		Order("created_at DESC, id DESC").
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (s *assetService) Get(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error) {

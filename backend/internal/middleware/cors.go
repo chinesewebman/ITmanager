@@ -33,7 +33,9 @@ func CORS(cfg *config.Config) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Requested-With")
-			c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Disposition")
+			// X-Total-Count 是 M32 新增的导出完整性声明；不 expose 的话，
+			// 契约里声明了、跨域前端却读不到。
+			c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Disposition, X-Total-Count")
 			c.Header("Access-Control-Max-Age", "600")
 		}
 

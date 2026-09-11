@@ -288,7 +288,15 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 			assets := protected.Group("/assets")
 			{
 				assets.GET("", assetH.ListAssets)
-				assets.GET("/export", assetH.ExportAssets) // 静态段必须早于 /:id，否则 /export 被当成 :id
+				// 静态段必须早于 /:id，否则 /export 被当成 :id。
+				// M32: 导出是一次全表读（去掉 500 上限后单请求成本 O(N)）。组级 100/min
+				// 允许 1 秒内突发 100 个全表导出 → 可打满连接池，故单独收紧到 10/min。
+				// 本行排在组级 AuditLog 之后，被 429 拒掉的请求仍会写审计行 —— 对批量
+				// 数据端点这是想要的（留下滥用记录），与 :222-224 登录那处「限流必须排在
+				// 审计前」不冲突（那里的问题是未认证即可无限写库）。
+				assets.GET("/export",
+					middleware.RateLimit(middleware.DefaultRateLimitConfig(10)),
+					assetH.ExportAssets)
 				assets.GET("/:id", assetH.GetAsset)
 				assets.POST("", canWrite, assetH.CreateAsset)
 				assets.PUT("/:id", canWrite, assetH.UpdateAsset)

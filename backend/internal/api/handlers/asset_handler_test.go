@@ -21,6 +21,7 @@ import (
 // mockAssetService 手写 mock（避免引入 sqlmock / testify/mock）
 type mockAssetService struct {
 	listFunc    func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
+	listAllFunc func(ctx context.Context) ([]models.Asset, error)
 	getFunc     func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 	createFunc  func(ctx context.Context, a *models.Asset) error
 	updateFunc  func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
@@ -31,6 +32,9 @@ type mockAssetService struct {
 
 func (m *mockAssetService) List(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error) {
 	return m.listFunc(ctx, f)
+}
+func (m *mockAssetService) ListAll(ctx context.Context) ([]models.Asset, error) {
+	return m.listAllFunc(ctx)
 }
 func (m *mockAssetService) Get(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error) {
 	return m.getFunc(ctx, id)
