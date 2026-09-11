@@ -396,18 +396,46 @@ func TestRoutes_OpenAPISpec_可达且合法YAML(t *testing.T) {
 // colonParamRe 把 gin 的 :id / :shift_id 归一成 OpenAPI 的 {id} / {shift_id}。
 var colonParamRe = regexp.MustCompile(`:([A-Za-z_][A-Za-z0-9_]*)`)
 
-// openAPI两侧集合 从**运行时**取契约比对的两侧，供下面两个方向相反的用例共用：
-//
-//	real — gin 实际注册的 /api 路由（`:id` 归一成 `{id}`）
-//	spec — 从 /openapi.yaml HTTP 端点解析出的 (method, path)
-//
-// 前提校验放在这里（两侧非空、server url 以 /api 结尾）：任一前提不成立就当场失败，
-// 否则比对会静默退化成「永远不匹配」的绿。
-func openAPI两侧集合(t *testing.T) (real, spec map[string]bool) {
-	t.Helper()
-	r := setupTestRouter(t)
+// openAPIParamRe 反向：把 spec 的 `{id}` 换成可请求的具体值。
+var openAPIParamRe = regexp.MustCompile(`\{[A-Za-z_][A-Za-z0-9_]*\}`)
 
-	real = map[string]bool{}
+// httpMethodKeys spec 里 path item 下算作 operation 的键。
+var httpMethodKeys = map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true}
+
+// openAPI契约文档 spec 中本组门禁用到的顶层字段，与 openapi.yaml 一一对应。
+type openAPI契约文档 struct {
+	Servers []struct {
+		URL string `yaml:"url"`
+	} `yaml:"servers"`
+	Security []map[string]any          `yaml:"security"`
+	Paths    map[string]map[string]any `yaml:"paths"`
+}
+
+// openAPI文档解析 从 /openapi.yaml **HTTP 端点**取 spec（与 /swagger 消费的是同一份 embed 产物，
+// 不是磁盘上的另一个副本）并钉住解析前提：任一前提不成立就当场失败，
+// 否则下面的集合比对会静默退化成「永远不匹配」的绿。
+func openAPI文档解析(t *testing.T, r *gin.Engine) openAPI契约文档 {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var doc openAPI契约文档
+	require.NoError(t, yaml.Unmarshal(w.Body.Bytes(), &doc))
+
+	// spec 的 path 是相对 server url 的，而路由侧剥的是 /api 前缀——两者必须一致。
+	require.NotEmpty(t, doc.Servers, "spec 必须声明 servers")
+	require.True(t, strings.HasSuffix(doc.Servers[0].URL, "/api"),
+		"server url 必须以 /api 结尾（当前 %q），否则与剥前缀的比对口径不符", doc.Servers[0].URL)
+	require.NotEmpty(t, doc.Paths, "spec 没有 paths")
+	return doc
+}
+
+// 真实路由集合 gin 实际注册的 /api 路由，键为 `METHOD /path`（`:id` 归一成 `{id}`）。
+func 真实路由集合(t *testing.T, r *gin.Engine) map[string]bool {
+	t.Helper()
+	real := map[string]bool{}
 	for _, rt := range r.Routes() {
 		if !strings.HasPrefix(rt.Path, "/api/") {
 			continue // /healthz、/metrics、/swagger/*any、/openapi.yaml 不在 spec 的 server 前缀内
@@ -415,37 +443,31 @@ func openAPI两侧集合(t *testing.T) (real, spec map[string]bool) {
 		real[rt.Method+" "+colonParamRe.ReplaceAllString(strings.TrimPrefix(rt.Path, "/api"), "{$1}")] = true
 	}
 	require.NotEmpty(t, real, "路由集合为空，比对会空转")
+	return real
+}
 
-	// spec 走 HTTP 端点取：与 /swagger 消费的是同一份 embed 产物（不是磁盘上的另一个副本）
-	req := httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var doc struct {
-		Servers []struct {
-			URL string `yaml:"url"`
-		} `yaml:"servers"`
-		Paths map[string]map[string]any `yaml:"paths"`
-	}
-	require.NoError(t, yaml.Unmarshal(w.Body.Bytes(), &doc))
-
-	// spec 的 path 是相对 server url 的，而上面剥的是 /api 前缀——两者必须一致。
-	require.NotEmpty(t, doc.Servers, "spec 必须声明 servers")
-	require.True(t, strings.HasSuffix(doc.Servers[0].URL, "/api"),
-		"server url 必须以 /api 结尾（当前 %q），否则与剥前缀的比对口径不符", doc.Servers[0].URL)
-	require.NotEmpty(t, doc.Paths, "spec 没有 paths")
-
-	httpMethods := map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true}
-	spec = map[string]bool{}
+// openAPI声明端点集合 spec 里声明的全部 (method, path)，键格式同 真实路由集合。
+func openAPI声明端点集合(doc openAPI契约文档) map[string]bool {
+	spec := map[string]bool{}
 	for path, ops := range doc.Paths {
 		for method := range ops {
-			if !httpMethods[method] {
+			if !httpMethodKeys[method] {
 				continue // parameters / summary / servers 等非方法键
 			}
 			spec[strings.ToUpper(method)+" "+path] = true
 		}
 	}
+	return spec
+}
+
+// openAPI两侧集合 取契约比对的两侧，供下面方向不同的用例共用：
+//
+//	real — gin 实际注册的 /api 路由（`:id` 归一成 `{id}`）
+//	spec — /openapi.yaml 声明的 (method, path)
+func openAPI两侧集合(t *testing.T, r *gin.Engine) (real, spec map[string]bool) {
+	t.Helper()
+	real = 真实路由集合(t, r)
+	spec = openAPI声明端点集合(openAPI文档解析(t, r))
 	require.NotEmpty(t, spec, "spec 未解析出任何端点，比对会空转")
 	return real, spec
 }
@@ -459,7 +481,7 @@ func openAPI两侧集合(t *testing.T) (real, spec map[string]bool) {
 // 断言方向是 **spec ⊆ 路由**。与 `TestRoutes_OpenAPI契约集合相等` 方向不同、不可互相替代：
 // 本条挡「spec 写了不存在的端点」，那条多挡「路由没补文档」。
 func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
-	real, spec := openAPI两侧集合(t)
+	real, spec := openAPI两侧集合(t, setupTestRouter(t))
 	for k := range spec {
 		assert.True(t, real[k],
 			"OpenAPI 声明了 %s，但 SetupRouter 未注册该路由（幻影端点）", k)
@@ -471,7 +493,7 @@ func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
 // M31 D-1：契约门禁 = 集合相等，**不设 allowlist** —— allowlist 会把「未文档化」洗成合法态，
 // 理由字符串是软控制，交付态恒绿 vacuous。新增路由必须同时补 openapi.yaml，否则这里红。
 func TestRoutes_OpenAPI契约集合相等(t *testing.T) {
-	real, spec := openAPI两侧集合(t)
+	real, spec := openAPI两侧集合(t, setupTestRouter(t))
 
 	var 未文档化, 幻影 []string
 	for k := range real {
@@ -497,6 +519,92 @@ func TestRoutes_OpenAPI契约集合相等(t *testing.T) {
 	// 哨兵：两侧都要有真实体量，防「集合被整体清空 → 空集等于空集」的假绿
 	assert.GreaterOrEqual(t, len(real), 60, "真实路由数骤降，集合比对可能已空转")
 	assert.GreaterOrEqual(t, len(spec), 60, "spec 端点数骤降，集合比对可能已空转")
+}
+
+// TestRoutes_OpenAPI公开端点集合相等 钉住「spec 声明的公开端点 == 运行时无凭据可达的端点」。
+//
+// M31 R-5：集合相等只管 (method, path) 的**存在性**，管不到 `security:` 的**值** ——
+// 顶层默认生效后，「哪些端点是公开的」仍只是声明，没有任何测试在核它（与 D-1 否决 allowlist
+// 同源：软控制 / 交付态恒绿 vacuous）。本用例把它变成双向断言。
+//
+// 运行时侧的判据：无凭据发请求，**401 = 需要认证**。前提是受保护端点都在 AuthMiddleware 层
+// 用 401 拒绝（当前如此，下面用 GET /assets 钉住这个前提）；将来若有公开端点自行返回 401，
+// 会先撞在这条前提上而不是静默误判。
+func TestRoutes_OpenAPI公开端点集合相等(t *testing.T) {
+	r := setupTestRouter(t)
+
+	doc := openAPI文档解析(t, r)
+	require.NotEmpty(t, doc.Security,
+		"openapi.yaml 顶层缺 security —— 按 OpenAPI 语义等于声明「所有端点无需鉴权」（D-5）")
+
+	// 运行时侧：遍历真实路由发**无凭据**请求，非 401 即未挂 AuthMiddleware。
+	// 受保护端点在中间件层就被拒，不会进 handler，故这里没有副作用。
+	//
+	// 只放**公开的**进集合（不是 `m[k] = 非401`）：后者会让受保护端点以 `false` 的形态留在
+	// 键里，而下面的差集循环遍历的是键 —— 于是全部 93 条都会被算成公开。
+	运行时公开 := map[string]bool{}
+	for k := range 真实路由集合(t, r) {
+		method, path, _ := strings.Cut(k, " ")
+		req := httptest.NewRequest(method, "/api"+openAPIParamRe.ReplaceAllString(path, "00000000-0000-0000-0000-000000000000"), nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			运行时公开[k] = true
+		}
+	}
+	require.NotEmpty(t, 运行时公开, "运行时公开端点集合为空，比对会空转")
+	assert.False(t, 运行时公开["GET /assets"],
+		"GET /assets 无凭据竟非 401 —— 「非 401 即公开」的前提被破坏，本用例会误判")
+
+	// spec 侧：operation 上显式 `security: []` 才算公开（顶层有默认时，未写等于继承认证）。
+	spec公开 := map[string]bool{}
+	for path, ops := range doc.Paths {
+		for method, raw := range ops {
+			if !httpMethodKeys[method] {
+				continue
+			}
+			op, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			sec, 写了 := op["security"]
+			if 写了 && isEmptySecurity(sec) {
+				spec公开[strings.ToUpper(method)+" "+path] = true
+			}
+		}
+	}
+	require.NotEmpty(t, spec公开, "spec 一个公开端点都没声明 —— 顶层默认一旦缺失，本用例会静默全绿")
+
+	var 该公开未公开, 不该公开却公开 []string
+	for k := range 运行时公开 {
+		if !spec公开[k] {
+			该公开未公开 = append(该公开未公开, k)
+		}
+	}
+	for k := range spec公开 {
+		if !运行时公开[k] {
+			不该公开却公开 = append(不该公开却公开, k)
+		}
+	}
+	sort.Strings(该公开未公开)
+	sort.Strings(不该公开却公开)
+
+	assert.Empty(t, 该公开未公开,
+		"以下端点在运行时无凭据即可访问，spec 却把它们声明成需要认证（缺 `security: []`）：\n  %s",
+		strings.Join(该公开未公开, "\n  "))
+	assert.Empty(t, 不该公开却公开,
+		"以下端点 spec 声明 `security: []`（公开），运行时却挂鉴权：\n  %s",
+		strings.Join(不该公开却公开, "\n  "))
+}
+
+// isEmptySecurity 判断 operation 的 security 值是否为「公开」的空数组。
+// yaml.v3 把 `security: []` 解成空切片，把裸 `security:` 解成 nil —— 两者都算空。
+func isEmptySecurity(v any) bool {
+	if v == nil {
+		return true
+	}
+	l, ok := v.([]any)
+	return ok && len(l) == 0
 }
 
 // ==================== 资产诊断端点 (P0-1) ====================
