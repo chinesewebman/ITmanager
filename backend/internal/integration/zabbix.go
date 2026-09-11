@@ -10,6 +10,7 @@ import (
 
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/httpx"
+	"network-monitor-platform/internal/redact"
 )
 
 // ZabbixClient Zabbix 客户端（C-P7：走 httpx）。
@@ -200,6 +201,17 @@ func (z *ZabbixClient) GetTriggers(ctx context.Context) ([]Trigger, error) {
 	return result.Result, nil
 }
 
+// zabbixErrText 净化 Zabbix 返回的 JSON-RPC 错误文本。
+//
+// 它是 **HTTP 200 响应体**里的第三方可控字符串（json.Unmarshal 会把 "\r\n" 解成真
+// CR/LF），因此不经过 httpx —— 那里只在 HTTP 层失败时构造 redactedErr，业务错误码走的
+// 是这条路径，任何出口净化都碰不到它（M29-E）。两个职责都要做，且顺序固定 Strip→Text：
+//   - 剥控制字符：调用方是 log.Printf（不转义），CR/LF 能伪造整行假日志（CWE-117）
+//   - 脱敏：错误文本可能回显我们发出去的 auth 等字段（G-28 残余）
+func zabbixErrText(msg string) string {
+	return redact.Text(redact.StripControl(msg))
+}
+
 // doRequest 走 httpx：自动 retry/熔断/metrics。
 // v1.1: 检测 Zabbix "Session terminated, re-login" (code -10002) 错误，
 // 触发自动重登一次后重试。
@@ -235,11 +247,12 @@ func (z *ZabbixClient) doRequest(ctx context.Context, req ZabbixAPIRequest) ([]b
 			}
 			var apiResp2 ZabbixAPIResponse
 			if err := json.Unmarshal(respBody2, &apiResp2); err == nil && apiResp2.Error != nil {
-				return nil, fmt.Errorf("Zabbix API 错 %d (重登后): %s", apiResp2.Error.Code, apiResp2.Error.Message)
+				return nil, fmt.Errorf("Zabbix API 错 %d (重登后): %s", apiResp2.Error.Code,
+					zabbixErrText(apiResp2.Error.Message))
 			}
 			return respBody2, nil
 		}
-		return nil, fmt.Errorf("Zabbix API 错 %d: %s", apiResp.Error.Code, apiResp.Error.Message)
+		return nil, fmt.Errorf("Zabbix API 错 %d: %s", apiResp.Error.Code, zabbixErrText(apiResp.Error.Message))
 	}
 	return respBody, nil
 }

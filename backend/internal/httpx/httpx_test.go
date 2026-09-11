@@ -337,4 +337,26 @@ func TestDo_错误文本不含URL凭据(t *testing.T) {
 		assert.NotContains(t, err.Error(), secret, "上游响应体里的 URL 凭据也要塌缩")
 		assert.Contains(t, err.Error(), "→ 400")
 	})
+
+	// M29-D：上游响应体是第三方可控文本，可能带真 CR/LF。调用方是 log.Printf
+	// （不转义），一行假日志就是这么来的；且顺序必须是 Strip→Text，否则被 CR/LF
+	// 切开的凭据尾部会漏出去。
+	t.Run("4xx 响应体含 CR/LF", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte("password=YWJjZGVmZ2hp\namtsbW5vcHFy\r\n[FAKE] forged"))
+		}))
+		defer srv.Close()
+		c := New(DefaultConfig(srv.URL), "test", &fakeRecorder{status: map[string]int{}})
+		_, _, err := c.Do(testCtx(), "GET", "/x", nil)
+		if err == nil {
+			t.Fatal("期望 4xx 错")
+		}
+		msg := err.Error()
+		assert.NotContains(t, msg, "\r", "CR/LF 必须被剥掉，否则可伪造日志行：%q", msg)
+		assert.NotContains(t, msg, "\n", "CR/LF 必须被剥掉，否则可伪造日志行：%q", msg)
+		assert.NotContains(t, msg, "amtsbW5vcHFy", "被 CR/LF 切开的凭据尾部不得泄漏：%q", msg)
+		assert.Contains(t, msg, "password=***", "键名保留便于定位：%q", msg)
+		assert.Contains(t, msg, "forged", "只应去掉控制字符，内容不丢：%q", msg)
+	})
 }

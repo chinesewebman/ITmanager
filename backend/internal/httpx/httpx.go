@@ -30,15 +30,23 @@ import (
 	"network-monitor-platform/internal/redact"
 )
 
-// redactedErr 让离开 httpx 的错误文本先过脱敏（TODO G-28）。
+// redactedErr 让离开 httpx 的错误文本先过脱敏（TODO G-28）与净化（G-43 同族）。
 //
 // 为什么在源头做：`http.Client.Do` / `http.NewRequestWithContext` 的失败都是 *url.Error，
 // 其 Error() 含完整 URL——集成 URL 的 query（`?access_token=`）、path（飞书/Slack hook
 // token）、userinfo 都在里面。调用方只会 `log.Printf("%v", err)`，逐个出口接脱敏必然漏，
 // 所以在这里一次性收口；Unwrap 保留错误链，errors.Is/As 照旧。
+//
+// M29：出口除脱敏外还要剥控制字符。错误文本里可能夹带上游响应体片段，而调用方是
+// `log.Printf`（**不转义**，与 slog/gin.Logger 不同）——CR/LF 能伪造出一整行假日志。
+// 顺序固定 Strip→Text：反过来会让被 CR/LF 切开的凭据尾部漏出去（实测见
+// redact.StripControl 注释）。
+//
+// 覆盖面：**只含 httpx 起源的错误**。第三方错误文本不走 httpx 的出口要各自处理
+// （如 integration/zabbix.go 的 JSON-RPC 错误，HTTP 200 不经过这里）。
 type redactedErr struct{ err error }
 
-func (e *redactedErr) Error() string { return redact.Text(e.err.Error()) }
+func (e *redactedErr) Error() string { return redact.Text(redact.StripControl(e.err.Error())) }
 func (e *redactedErr) Unwrap() error { return e.err }
 
 // Config 客户端配置。
