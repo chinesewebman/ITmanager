@@ -52,12 +52,14 @@ func init() {
 //
 // ON CONFLICT 目标的索引形态**刻意与生产一致**：
 //   - assets.net_box_id 有唯一索引（000015 建的，upsert 的仲裁者）；
-//   - alerts.trigger_id **没有**唯一索引 —— 生产也没有（000013 只加列），且同一 trigger 的
-//     多行历史是预期语义。把 ON CONFLICT 加到这里会立刻报
-//     "does not match any PRIMARY KEY or UNIQUE constraint"（与 PG 42P10 同源）。
+//   - alerts 有**部分**唯一索引 uq_alerts_zabbix_identity（000027 建的，M27/A）——
+//     注意是 (trigger_id, **problem_start**) 两列，**不是** trigger_id 单列：同一 trigger
+//     的多行历史（触发 → 恢复 → 再触发）仍是预期语义，只有「同一次故障发生」才唯一。
 //   - tickets.external_id 有**部分**唯一索引（000026 建的，谓词与生产逐字相同）。
-//     **方向别搞反**：带**匹配 TargetWhere** 的 ON CONFLICT (external_id) 可以仲裁；
-//     **不带** TargetWhere 才会报上面那个错。它不是「external_id 上没有索引」。
+//     **方向别搞反**：带**匹配 TargetWhere** 的 ON CONFLICT 可以仲裁；
+//     **不带** TargetWhere（或列集/谓词对不上）才会报
+//     "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"
+//     —— 与 PG 42P10 同源。它不是「这一列上没有索引」。
 const upsertTestSchema = `
 CREATE TABLE assets (
     id TEXT PRIMARY KEY DEFAULT (gen_random_uuid()),
@@ -81,6 +83,13 @@ CREATE TABLE alerts (
     false_positive_note TEXT, ticket_id TEXT, asset_id TEXT, source TEXT,
     repeat_count INTEGER, created_at DATETIME, updated_at DATETIME
 );
+-- 000027 的部分唯一索引，谓词与迁移逐字相同（sqlite 支持部分索引）。
+-- 少了它，SyncFromZabbix 的 ON CONFLICT (trigger_id, problem_start) WHERE ... 会直接报
+-- "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"，
+-- 本文件的 Zabbix 用例会全红 —— 那是基座缺件，不是被测代码的问题。
+CREATE UNIQUE INDEX uq_alerts_zabbix_identity
+    ON alerts(trigger_id, problem_start)
+    WHERE source = 'zabbix' AND trigger_id IS NOT NULL AND trigger_id <> '';
 
 CREATE TABLE tickets (
     id TEXT PRIMARY KEY,

@@ -1190,7 +1190,19 @@ func TestDBSmoke_Migration026BlockedByDuplicates(t *testing.T) {
 
 	migrate.FS = network_monitor_platform.MigrationsFS
 
-	// ① 滚掉 000026，制造出「可以插重复行」的窗口
+	// ① 滚掉 000026（以及它之上的一切），制造出「可以插重复行」的窗口。
+	// 先把 26 以上的层循环滚光，而不是写死「多 Down 一次」：migrate.Down 只滚**最新已应用**
+	// 那一层，每新增一个迁移本用例就要再改一次，而漏改的症状是下面 require.True(idxGone)
+	// 变红、错误信息指向「down 000026 没删掉索引」这个**错误方向**（M27 加 000027 时实测）。
+	for {
+		var above int64
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version > 26`).
+			Scan(&above).Error, "读取 26 以上已应用层数失败")
+		if above == 0 {
+			break
+		}
+		require.NoError(t, migrate.Down(db), "回滚 26 以上的迁移失败（剩 %d 层）", above)
+	}
 	require.NoError(t, migrate.Down(db), "回滚 000026 失败")
 	var idxGone bool
 	require.NoError(t, db.Raw(
@@ -1311,13 +1323,14 @@ func TestDBSmoke_GLPITimeZoneWallClock(t *testing.T) {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000026（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
-//     故十三次 Down = 26 → 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000027（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
+//     故十四次 Down = 27 → 26 → 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //     **多滚 / 少滚都不会被链上断言发现**：下面全是「索引没了」的 assert.False，晚一步仍为真。
-//     故本用例在**首尾各加一条正向断言**：开头钉「第一次 Down 滚的确实是 000026」，
+//     故本用例在**首尾各加一条正向断言**：开头钉「头一次 Down 滚的确实是 000027」，
 //     结尾钉「000012 必须还在（多滚一层的唯一暴露点）」。
 //     下面每一步只写「回滚 0000NN」不写序数：序数本身会随新增迁移整体后移，是这行
-//     注释里最容易变成假话的部分（历史上就写重过两个「第三次」），版本号才是不变量。
+//     注释里最容易变成假话的部分（历史上就写重过两个「第三次」，M27 加 000027 时
+//     又整体后移一位），版本号才是不变量。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
@@ -1344,39 +1357,62 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
-	// 前置 3（M16/M20/M25/M26）：最新几个迁移必须已应用，且 000026 必须是**下一次** Down 的对象。
+	// 前置 3（M16/M20/M25/M26/M27）：最新几个迁移必须已应用，且 000027 必须是**下一次** Down 的对象。
 	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
 	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-	var has26, has25, has24, has23 int64
+	var has27, has26, has25, has24, has23 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&has27).Error)
+	if has27 == 0 {
+		t.Fatalf("库未应用到 000027 —— 头一次 Down 会滚掉 000026，整条断言链静默后移")
+	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
 		Scan(&has26).Error)
 	if has26 == 0 {
-		t.Fatalf("库未应用到 000026 —— 第一次 Down 会滚掉 000025，整条断言链静默后移")
+		t.Fatalf("库未应用到 000026 —— 下一个 Down 会滚掉 000025，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
 		Scan(&has25).Error)
 	if has25 == 0 {
-		t.Fatalf("库未应用到 000025 —— 第二次 Down 会滚掉 000024，整条断言链静默后移")
+		t.Fatalf("库未应用到 000025 —— 下一个 Down 会滚掉 000024，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
 		Scan(&has24).Error)
 	if has24 == 0 {
-		t.Fatalf("库未应用到 000024 —— 第三次 Down 会滚掉 000023，整条断言链静默后移")
+		t.Fatalf("库未应用到 000024 —— 下一个 Down 会滚掉 000023，整条断言链静默后移")
 	}
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&has23).Error)
 	if has23 == 0 {
-		t.Fatalf("库未应用到 000023 —— 第四次 Down 会滚掉 000021，整条断言链静默后移")
+		t.Fatalf("库未应用到 000023 —— 下一个 Down 会滚掉 000021，整条断言链静默后移")
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// Down = 回滚 000027：只删部分唯一索引，数据不动
+	require.NoError(t, migrate.Down(db), "回滚 000027 失败")
+	var v27 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&v27).Error)
+	assert.Zero(t, v27, "首次 Down 必须滚掉 000027 —— 否则后面每一次 Down 都在滚错的那一层")
+	var zabbixIdxExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_alerts_zabbix_identity')`).
+		Scan(&zabbixIdxExists).Error)
+	assert.False(t, zabbixIdxExists, "down 000027 应 DROP uq_alerts_zabbix_identity")
+	// 000018 的普通索引不归 000027 管，滚掉它是越界（同步预查靠它，见 up 里的说明）
+	var trigIdxStillThere bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_alerts_trigger_id')`).
+		Scan(&trigIdxStillThere).Error)
+	assert.True(t, trigIdxStillThere, "down 000027 不得顺手删掉 000018 的 idx_alerts_trigger_id")
 
 	// Down = 回滚 000026：只删部分唯一索引，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000026 失败")
 	var v26 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
 		Scan(&v26).Error)
-	assert.Zero(t, v26, "第一次 Down 必须滚掉 000026 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v26, "本次 Down 必须滚掉 000026 —— 否则后面每一次 Down 都在滚错的那一层")
 	var glpiIdxExists bool
 	require.NoError(t, db.Raw(
 		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_tickets_glpi_external_id')`).
@@ -1394,7 +1430,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	var v25 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
 		Scan(&v25).Error)
-	assert.Zero(t, v25, "第二次 Down 必须滚掉 000025 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v25, "本次 Down 必须滚掉 000025 —— 否则后面每一次 Down 都在滚错的那一层")
 	var thTables int64
 	require.NoError(t, db.Raw(
 		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'ticket_history'`).
@@ -1406,7 +1442,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	var v24 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
 		Scan(&v24).Error)
-	assert.Zero(t, v24, "第三次 Down 必须滚掉 000024 —— 否则后面每一次 Down 都在滚错的那一层")
+	assert.Zero(t, v24, "本次 Down 必须滚掉 000024 —— 否则后面每一次 Down 都在滚错的那一层")
 	var statusDef *string
 	require.NoError(t, db.Raw(
 		`SELECT column_default FROM information_schema.columns
@@ -1421,7 +1457,7 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	var v23 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
 		Scan(&v23).Error)
-	assert.Zero(t, v23, "第四次 Down 必须滚掉 000023")
+	assert.Zero(t, v23, "本次 Down 必须滚掉 000023")
 
 	// Down = 回滚 000021：删除 path text_pattern_ops 索引
 	require.NoError(t, migrate.Down(db), "回滚 000021 失败")
@@ -1495,13 +1531,13 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	assert.True(t, exists, "down 不得 DROP 000001 建的 tickets.ticket_type（丢列丢数据）")
 
 	// 收尾正向断言：**多滚一层唯一的暴露点**。
-	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十三次 Down 会一路全绿，
+	// 链上其余断言都是「某个索引没了」，晚一步仍然为真 —— 十四次 Down 会一路全绿，
 	// 同时把 000012 也滚掉。只有「000012 必须还在」能挡住它。
 	var v12 int64
 	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 12`).
 		Scan(&v12).Error)
 	assert.Equal(t, int64(1), v12,
-		"十三次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
+		"十四次 Down 应止步于 000013 —— 000012 也被滚掉说明本用例多滚了一层（链上其余断言挡不住）")
 }
 
 // explainSeqScanOff 在**单连接**上禁掉顺序扫描后跑 EXPLAIN，返回完整计划文本。
