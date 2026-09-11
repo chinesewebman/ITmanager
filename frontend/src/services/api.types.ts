@@ -458,6 +458,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tickets/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 获取工单经手历史 */
+        get: operations["listTicketHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -1403,6 +1420,40 @@ export interface components {
             code?: number;
             data?: components["schemas"]["Ticket"][];
         };
+        TicketHistory: {
+            id: string;
+            ticket_id: string;
+            /** @description 同一次 PUT 产生的多行共享同一个值；前端按它分组，避免同秒两次操作并成一组 */
+            batch_id: string;
+            /**
+             * @description created 的出生行 field_name 为 null（那一次改的不是某字段，而是「这张票存在了」）
+             * @enum {string}
+             */
+            kind: "created" | "updated";
+            field_name: string | null;
+            /** @description 文本快照（时间戳按 RFC3339）。超 500 字符按 rune 截断并追加「…(截断)」 */
+            old_value: string | null;
+            new_value: string | null;
+            /** @description 裸 UUID、无外键（同 audit_logs.resource_id）；写入时的操作者 */
+            actor_id: string | null;
+            /** @description 写入时点的姓名快照 —— 用户改名后旧记录仍显示当时的名字 */
+            actor_name: string;
+            /** @description 开放值（manual/email/api/glpi/alert/zabbix）。当前恒为空串，取值待定（D-6） */
+            source: string;
+            /** @description 预留，当前恒为空串（D-6） */
+            request_id: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        TicketHistoryList: {
+            code?: number;
+            data?: {
+                items?: components["schemas"]["TicketHistory"][];
+                total?: number;
+                page?: number;
+                size?: number;
+            };
+        };
         User: {
             /** Format: uuid */
             id?: string;
@@ -2323,6 +2374,39 @@ export interface operations {
         responses: {
             /** @description 更新成功 */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listTicketHistory: {
+        parameters: {
+            query?: {
+                page?: number;
+                /** @description 每页条数，默认 20，上限 500（超出由 service 层夹住） */
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TicketHistoryList"];
+                };
+            };
+            /** @description 工单不存在（不返回空列表 —— 那会被读成「这张票还没被改过」） */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

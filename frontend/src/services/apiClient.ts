@@ -26,6 +26,9 @@ export type AlertDTO = components['schemas']['Alert']
 /** Ticket 工单对象 */
 export type TicketDTO = components['schemas']['Ticket']
 
+/** TicketHistory 工单经手历史行（M25） */
+export type TicketHistoryDTO = components['schemas']['TicketHistory']
+
 /** Rack 机柜对象 */
 export type RackDTO = components['schemas']['Rack']
 

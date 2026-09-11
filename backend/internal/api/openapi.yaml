@@ -812,6 +812,41 @@ paths:
         '200':
           description: 更新成功
 
+  # M25 经手历史。准入与 GET /tickets/{id} 同级（「跟工单本身的可见性」，用户 2026-09-11 拍板③）——
+  # 这与 GET /audit-logs 收在 canAudit 的先例相反，是有意放宽，见 docs/FIX-PLAN-TICKET-HISTORY.md §2.6。
+  /tickets/{id}/history:
+    get:
+      tags:
+        - 工单管理
+      summary: 获取工单经手历史
+      operationId: listTicketHistory
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          description: 每页条数，默认 20，上限 500（超出由 service 层夹住）
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketHistoryList'
+        '404':
+          description: 工单不存在（不返回空列表 —— 那会被读成「这张票还没被改过」）
+
   # ==================== 用户 ====================
   /users:
     get:
@@ -2502,6 +2537,91 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Ticket'
+
+    # M25 经手历史。一行 = 一次请求里一个字段的一次变更（append-only，只增不改）。
+    #
+    # 注意与上面 TicketList 的对比：这里的 data 是**如实**的 {items,total,page,size}
+    # —— TicketList.data 声明成裸数组是既有漂移（已另行登记），不在此步顺手改。
+    #
+    # 所有字段都**没有 omitempty**：可空列在 JSON 里是真 null，不是「缺键」。
+    # 前端要靠这个区分「字段没被改过」（键在，值是 null）与「响应里没这段」。
+    #
+    # 因此这里**如实声明 required**（本文件其余响应 schema 多不声明，属既有宽松写法）：
+    # 不声明的话生成物会把每个字段都标成可选，消费者被迫写一堆 ?. 和 ?? —— 而那是假的，
+    # 键一定在。声明了 required 才能用 types/index.ts 的 _Equal 断言把漂移变成 tsc 报错
+    # （同 P1-4 对 User 的做法）。
+    TicketHistory:
+      type: object
+      required:
+        - id
+        - ticket_id
+        - batch_id
+        - kind
+        - field_name
+        - old_value
+        - new_value
+        - actor_id
+        - actor_name
+        - source
+        - request_id
+        - created_at
+      properties:
+        id:
+          type: string
+        ticket_id:
+          type: string
+        batch_id:
+          type: string
+          description: 同一次 PUT 产生的多行共享同一个值；前端按它分组，避免同秒两次操作并成一组
+        kind:
+          type: string
+          enum: [created, updated]
+          description: created 的出生行 field_name 为 null（那一次改的不是某字段，而是「这张票存在了」）
+        field_name:
+          type: string
+          nullable: true
+        old_value:
+          type: string
+          nullable: true
+          description: 文本快照（时间戳按 RFC3339）。超 500 字符按 rune 截断并追加「…(截断)」
+        new_value:
+          type: string
+          nullable: true
+        actor_id:
+          type: string
+          nullable: true
+          description: 裸 UUID、无外键（同 audit_logs.resource_id）；写入时的操作者
+        actor_name:
+          type: string
+          description: 写入时点的姓名快照 —— 用户改名后旧记录仍显示当时的名字
+        source:
+          type: string
+          description: 开放值（manual/email/api/glpi/alert/zabbix）。当前恒为空串，取值待定（D-6）
+        request_id:
+          type: string
+          description: 预留，当前恒为空串（D-6）
+        created_at:
+          type: string
+          format: date-time
+
+    TicketHistoryList:
+      type: object
+      properties:
+        code:
+          type: integer
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/TicketHistory'
+            total:
+              type: integer
+            page:
+              type: integer
+            size:
+              type: integer
 
     # ==================== 用户 ====================
     User:
