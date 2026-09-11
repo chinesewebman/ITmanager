@@ -306,6 +306,9 @@ cd frontend && npx tsc --noEmit && npx eslint src --ext .ts,.tsx && npx vitest r
 
 M31-M3 是本轮最关键的变异：它证明**新断言抓的是旧断言结构性看不见的方向**（旧断言遍历 spec、只看幻影）。
 
+> ⚠️ **以上归因已被步 4 实测推翻**：删路由同样会命中旧断言（它遍历 spec 断言真实路由存在）。
+> 真正只有新断言能抓的是「路由存在、spec 缺失」（M31-M1/M4）。见 §8.2 更正。
+
 ### 5.4 台账动作
 
 1. `TODO.md`：G-37 标记结案（附交付摘要 + 变异编号 + 行为突变），`:58` 行结案并指向本文档，新增 **G-47**。
@@ -378,6 +381,29 @@ M31-M3 是本轮最关键的变异：它证明**新断言抓的是旧断言结�
 
 ### 8.1 逐项 before/after（实测）
 ### 8.2 变异反证（M31-M1..M4，逐条先 `go build`）
+
+**实测（步 4，2026-09-12）。每条先 `go build ./...` → BUILD_OK，再跑 `go test ./internal/api/ -run OpenAPI -count=1 -v`；
+变异施加后一律 `cp` 还原并复跑绿。**
+
+| 变异 | 施加 | `无幻影路径`（旧） | `契约集合相等`（新） | `validate:api` | 结论 |
+|---|---|---|---|---|---|
+| M31-M1 | 删 `openapi.yaml` 的 `/tickets`（48 行） | **PASS** | **FAIL**（「已在 SetupRouter 注册、openapi.yaml 未声明」） | — | ✅ **真·新方向**：旧断言遍历 spec，看不见「路由缺文档」 |
+| M31-M3 | 删 `routes.go:345` `tickets.GET("/:id/history")` | **FAIL**（幻影端点） | **FAIL** | — | ⚠️ 旧断言**也红**（见下更正） |
+| M31-M2 | `/tickets/{id}` 的 `put:` → `post:` | **FAIL**（幻影端点） | **FAIL** | — | 如计划所述：**不能**单独证明新方向 |
+| M31-M4 | `/tickets/{id}` 的 `get:` → `GET:`（大写） | **PASS** | **FAIL**（路由缺文档） | **FAIL**：`#/paths/~1tickets~1{id} must NOT have additional properties` | ✅ 新方向 + `validate:api` 双证 |
+
+> **更正 §5.3 对 M31-M3 的归因**（实测推翻）：计划态写「删路由后旧断言遍历 spec 仍全绿」——**不成立**。
+> 旧断言是遍历 spec 的每条 path 断言「真实路由存在」，删掉一条注册正好命中它，实测 **FAIL**。
+> 因此 M3 不是新方向的守卫，只是一条两断言都覆盖的交叉验证。
+> **真正只有新断言能抓的是 M1/M4 的方向**：路由存在、spec 缺失（旧断言从不遍历路由侧）。
+> 原判据「M3 是本轮最关键的变异」随之作废；结论方向不变（D-1 集合相等仍有必要），但证据换成 M1/M4。
+
+### 8.3 门禁（含 `validate:api` 与 `gen:api` 漂移检查的首次实跑输出）
+
+- `npx swagger-cli validate ../backend/internal/api/openapi.yaml` → `openapi.yaml is valid`（步 2 起接线，步 3/4 复跑）
+- `npm run gen:api` + `git diff --exit-code -- src/services/api.types.ts` → 无漂移（步 3 起产物随 spec 同步提交）
+- 步 4 未动 spec，`gen:api` 产物零变化
+- 另：步 3 手工 YAML 曾因 `description` 以反引号开头（YAML 保留字符）解析失败，已改为单引号标量
 ### 8.3 门禁（含 `validate:api` 与 `gen:api` 漂移检查的首次实跑输出）
 ### 8.4 实现后审计与处置
 ### 8.5 残余

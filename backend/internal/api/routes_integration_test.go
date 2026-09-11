@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -395,18 +396,18 @@ func TestRoutes_OpenAPISpec_可达且合法YAML(t *testing.T) {
 // colonParamRe 把 gin 的 :id / :shift_id 归一成 OpenAPI 的 {id} / {shift_id}。
 var colonParamRe = regexp.MustCompile(`:([A-Za-z_][A-Za-z0-9_]*)`)
 
-// TestRoutes_OpenAPI无幻影路径 钉住「OpenAPI 声明的 (method, path) 必须真实注册」。
+// openAPI两侧集合 从**运行时**取契约比对的两侧，供下面两个方向相反的用例共用：
 //
-// G-37：spec 曾把通知渠道写成 /notification/channels（真实是 /notification-channels）、
-// 告警确认写成 /alerts/{id}/acknowledge（真实是 /alerts/{id}/ack）、渠道测试写成 post（真实是 put）
-// ——按 spec 生成的客户端一律 404，而既有 OpenAPI 测试只做字符串包含（`paths:` 存在即绿）。
+//	real — gin 实际注册的 /api 路由（`:id` 归一成 `{id}`）
+//	spec — 从 /openapi.yaml HTTP 端点解析出的 (method, path)
 //
-// 断言方向是 **spec ⊆ 路由**：只挡幻影端点，不要求每条路由都已文档化
-// （未文档化清单见 TODO G-37 残余，那属「文档完整度」而非「契约正确性」）。
-func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
+// 前提校验放在这里（两侧非空、server url 以 /api 结尾）：任一前提不成立就当场失败，
+// 否则比对会静默退化成「永远不匹配」的绿。
+func openAPI两侧集合(t *testing.T) (real, spec map[string]bool) {
+	t.Helper()
 	r := setupTestRouter(t)
 
-	real := map[string]bool{}
+	real = map[string]bool{}
 	for _, rt := range r.Routes() {
 		if !strings.HasPrefix(rt.Path, "/api/") {
 			continue // /healthz、/metrics、/swagger/*any、/openapi.yaml 不在 spec 的 server 前缀内
@@ -421,35 +422,81 @@ func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
-	var spec struct {
+	var doc struct {
 		Servers []struct {
 			URL string `yaml:"url"`
 		} `yaml:"servers"`
 		Paths map[string]map[string]any `yaml:"paths"`
 	}
-	require.NoError(t, yaml.Unmarshal(w.Body.Bytes(), &spec))
+	require.NoError(t, yaml.Unmarshal(w.Body.Bytes(), &doc))
 
-	// spec 的 path 是相对 server url 的，而上面剥的是 /api 前缀——两者必须一致，
-	// 否则本用例会静默变成「永远不匹配」。先钉住前提，再比对。
-	require.NotEmpty(t, spec.Servers, "spec 必须声明 servers")
-	require.True(t, strings.HasSuffix(spec.Servers[0].URL, "/api"),
-		"server url 必须以 /api 结尾（当前 %q），否则与剥前缀的比对口径不符", spec.Servers[0].URL)
-	require.NotEmpty(t, spec.Paths, "spec 没有 paths")
+	// spec 的 path 是相对 server url 的，而上面剥的是 /api 前缀——两者必须一致。
+	require.NotEmpty(t, doc.Servers, "spec 必须声明 servers")
+	require.True(t, strings.HasSuffix(doc.Servers[0].URL, "/api"),
+		"server url 必须以 /api 结尾（当前 %q），否则与剥前缀的比对口径不符", doc.Servers[0].URL)
+	require.NotEmpty(t, doc.Paths, "spec 没有 paths")
 
 	httpMethods := map[string]bool{"get": true, "post": true, "put": true, "delete": true, "patch": true}
-	checked := 0
-	for path, ops := range spec.Paths {
+	spec = map[string]bool{}
+	for path, ops := range doc.Paths {
 		for method := range ops {
 			if !httpMethods[method] {
 				continue // parameters / summary / servers 等非方法键
 			}
-			checked++
-			assert.True(t, real[strings.ToUpper(method)+" "+path],
-				"OpenAPI 声明了 %s %s，但 SetupRouter 未注册该路由（幻影端点）", strings.ToUpper(method), path)
+			spec[strings.ToUpper(method)+" "+path] = true
 		}
 	}
-	// 哨兵：只防「spec 被整体清空 → subset 断言空转」，不覆盖单条 path 被删（那属 G-37 残余）
-	assert.GreaterOrEqual(t, checked, 60, "spec 覆盖端点数骤降，subset 断言可能已空转")
+	require.NotEmpty(t, spec, "spec 未解析出任何端点，比对会空转")
+	return real, spec
+}
+
+// TestRoutes_OpenAPI无幻影路径 钉住「OpenAPI 声明的 (method, path) 必须真实注册」。
+//
+// G-37：spec 曾把通知渠道写成 /notification/channels（真实是 /notification-channels）、
+// 告警确认写成 /alerts/{id}/acknowledge（真实是 /alerts/{id}/ack）、渠道测试写成 post（真实是 put）
+// ——按 spec 生成的客户端一律 404，而既有 OpenAPI 测试只做字符串包含（`paths:` 存在即绿）。
+//
+// 断言方向是 **spec ⊆ 路由**。与 `TestRoutes_OpenAPI契约集合相等` 方向不同、不可互相替代：
+// 本条挡「spec 写了不存在的端点」，那条多挡「路由没补文档」。
+func TestRoutes_OpenAPI无幻影路径(t *testing.T) {
+	real, spec := openAPI两侧集合(t)
+	for k := range spec {
+		assert.True(t, real[k],
+			"OpenAPI 声明了 %s，但 SetupRouter 未注册该路由（幻影端点）", k)
+	}
+}
+
+// TestRoutes_OpenAPI契约集合相等 钉住「真实路由 == spec 声明的 (method, path)」**两个方向**。
+//
+// M31 D-1：契约门禁 = 集合相等，**不设 allowlist** —— allowlist 会把「未文档化」洗成合法态，
+// 理由字符串是软控制，交付态恒绿 vacuous。新增路由必须同时补 openapi.yaml，否则这里红。
+func TestRoutes_OpenAPI契约集合相等(t *testing.T) {
+	real, spec := openAPI两侧集合(t)
+
+	var 未文档化, 幻影 []string
+	for k := range real {
+		if !spec[k] {
+			未文档化 = append(未文档化, k)
+		}
+	}
+	for k := range spec {
+		if !real[k] {
+			幻影 = append(幻影, k)
+		}
+	}
+	sort.Strings(未文档化)
+	sort.Strings(幻影)
+
+	assert.Empty(t, 未文档化,
+		"以下路由已在 SetupRouter 注册、openapi.yaml 未声明（新增路由必须补契约）：\n  %s",
+		strings.Join(未文档化, "\n  "))
+	assert.Empty(t, 幻影,
+		"以下端点只在 openapi.yaml 声明、SetupRouter 未注册（照 spec 生成的客户端会 404）：\n  %s",
+		strings.Join(幻影, "\n  "))
+
+	// 哨兵：两侧都要有真实体量，防「集合被整体清空 → 空集等于空集」的假绿
+	assert.GreaterOrEqual(t, len(real), 60, "真实路由数骤降，集合比对可能已空转")
+	assert.GreaterOrEqual(t, len(spec), 60, "spec 端点数骤降，集合比对可能已空转")
 }
 
 // ==================== 资产诊断端点 (P0-1) ====================
