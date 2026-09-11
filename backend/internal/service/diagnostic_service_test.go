@@ -140,6 +140,9 @@ func newDiagTestDB(t *testing.T) *gorm.DB {
 	for _, s := range stmts {
 		require.NoError(t, db.Exec(s).Error)
 	}
+	// M25：CreateFromAlert 也写经手历史（步骤 5c），这个夹具同样要用。
+	// 共用一份 DDL，别在这里另抄一遍 —— 抄两遍迟早只有一份被改。
+	createTicketHistoryTable(t, db)
 	return db
 }
 

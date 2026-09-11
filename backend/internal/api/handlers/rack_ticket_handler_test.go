@@ -125,7 +125,7 @@ type mockTicketService struct {
 	historyFunc   func(ctx context.Context, ticketID string, page, pageSize int) ([]models.TicketHistory, int64, error)
 	createFunc    func(ctx context.Context, t *models.Ticket, a service.Actor) error
 	updateFunc    func(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error)
-	fromAlertFunc func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error)
+	fromAlertFunc func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error)
 }
 
 func (m *mockTicketService) List(ctx context.Context, f service.TicketFilter) ([]models.Ticket, int64, error) {
@@ -143,8 +143,8 @@ func (m *mockTicketService) Create(ctx context.Context, t *models.Ticket, a serv
 func (m *mockTicketService) Update(ctx context.Context, id string, u map[string]interface{}, a service.Actor) (*models.Ticket, error) {
 	return m.updateFunc(ctx, id, u, a)
 }
-func (m *mockTicketService) CreateFromAlert(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
-	return m.fromAlertFunc(ctx, alertID, userID)
+func (m *mockTicketService) CreateFromAlert(ctx context.Context, alertID string, a service.Actor) (*models.Ticket, bool, error) {
+	return m.fromAlertFunc(ctx, alertID, a)
 }
 
 func newTicketRouter(svc service.TicketService) *gin.Engine {
@@ -178,8 +178,8 @@ func newAlertTicketRouter(svc service.TicketService) *gin.Engine {
 func TestTicketCreateFromAlert_新建返回201(t *testing.T) {
 	var gotAlertID, gotUser string
 	svc := &mockTicketService{
-		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
-			gotAlertID, gotUser = alertID, userID
+		fromAlertFunc: func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error) {
+			gotAlertID, gotUser = alertID, actor.Name
 			return &models.Ticket{Title: "core-sw-01 CPU 高", Source: "alert", Priority: "normal"}, true, nil
 		},
 	}
@@ -207,7 +207,7 @@ func TestTicketCreateFromAlert_新建返回201(t *testing.T) {
 // 已关联时幂等返回既有票 —— 200 而非 201，前端据此决定要不要提示「已建单」。
 func TestTicketCreateFromAlert_已关联返回200(t *testing.T) {
 	svc := &mockTicketService{
-		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+		fromAlertFunc: func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error) {
 			return &models.Ticket{Title: "既有工单", TicketNumber: "TICKET-20260910-A"}, false, nil
 		},
 	}
@@ -224,7 +224,7 @@ func TestTicketCreateFromAlert_已关联返回200(t *testing.T) {
 
 func TestTicketCreateFromAlert_告警不存在返回404(t *testing.T) {
 	svc := &mockTicketService{
-		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+		fromAlertFunc: func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error) {
 			return nil, false, service.ErrNotFound
 		},
 	}
@@ -240,7 +240,7 @@ func TestTicketCreateFromAlert_告警不存在返回404(t *testing.T) {
 
 func TestTicketCreateFromAlert_DB错误不泄露(t *testing.T) {
 	svc := &mockTicketService{
-		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+		fromAlertFunc: func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error) {
 			return nil, false, errors.New("pq: duplicate key value violates unique constraint \"tickets_ticket_number_key\"")
 		},
 	}

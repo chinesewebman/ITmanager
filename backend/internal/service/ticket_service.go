@@ -49,7 +49,11 @@ type TicketService interface {
 	Update(ctx context.Context, id string, updates map[string]interface{}, actor Actor) (*models.Ticket, error)
 	// CreateFromAlert 从告警派生一张工单并把 alerts.ticket_id 指回去（TODO D-3）。
 	// created=false 表示该告警已有关联工单，直接返回既有那张（幂等）。
-	CreateFromAlert(ctx context.Context, alertID, userID string) (ticket *models.Ticket, created bool, err error)
+	//
+	// 收 Actor 而不是裸 userID（M25 步骤 5c）：旧签名只把 userID 当 requester 名用，
+	// handler 里 actorFromContext 算出的 ID 被丢掉 → 这条路径的**出生行没有 actor_id**。
+	// 与 Create 收同一个类型，两条建单路径对「谁经手」的表达只有一套。
+	CreateFromAlert(ctx context.Context, alertID string, actor Actor) (ticket *models.Ticket, created bool, err error)
 }
 
 type ticketService struct {
@@ -256,7 +260,7 @@ func (s *ticketService) Create(ctx context.Context, t *models.Ticket, actor Acto
 //
 // 没抢到的请求读出既有 ticket_id 返回那张票（created=false）——重复点击拿到的是同一张票，
 // 不是错误。认领与插票同一事务：插票失败（如工单号撞唯一索引）时认领一并回滚，不留悬空指针。
-func (s *ticketService) CreateFromAlert(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
+func (s *ticketService) CreateFromAlert(ctx context.Context, alertID string, actor Actor) (*models.Ticket, bool, error) {
 	var (
 		out     *models.Ticket
 		created bool
@@ -282,10 +286,20 @@ func (s *ticketService) CreateFromAlert(ctx context.Context, alertID, userID str
 		if res.RowsAffected == 1 {
 			// 抢到认领：工单 ID 就用刚写进 alerts.ticket_id 的那个，任何时刻 ticket_id
 			// 都指向本事务将要插入（或已插入）的那一行。
-			t := ticketFromAlert(&alert, userID)
+			t := ticketFromAlert(&alert, actor.Name)
 			t.ID = newID
 			if err := tx.Create(t).Error; err != nil {
 				return err // 整个事务回滚，上面的认领一并撤销
+			}
+			// M25 步骤 5c：出生行与工单同事务 —— 与 Create 同一条不变式（冲突/失败时
+			// 一起回滚，不留「票在、出生事件不在」的孤儿）。漏掉这行的后果不是「少个字段」：
+			// 值班时一键建单是最常用的建单路径，而它建出来的票**时间线是空的**，
+			// 读起来像「这票建了以后没人碰过」—— 那条时间线在说谎。
+			//
+			// 出生行不填 Source（按 §决策表 D-6）：这条票「从告警来」这一事实由
+			// ticketFromAlert 写下的 tickets.source='alert' 承载，读时间线时取那里。
+			if err := insertTicketBirth(tx, t.ID, uuid.New(), actor); err != nil {
+				return err
 			}
 			out, created = t, true
 			return nil

@@ -130,10 +130,10 @@ func (h *TicketHandler) CreateTicket(c *gin.Context) {
 // （TODO D-3，契约见 docs/FIX-PLAN-ALERT-TICKET.md §3）。
 // 该告警已有关联工单时幂等返回既有那张（200 + created=false），新建返回 201 + created=true。
 func (h *TicketHandler) CreateTicketFromAlert(c *gin.Context) {
-	// 经手人解析收在 actorFromContext 一处：这里只用 Name（旧签名收字符串），
-	// 与 UpdateTicket 走同一个 helper，避免两处各自 parse 而分叉。
-	userID := actorFromContext(c).Name
-	ticket, created, err := h.svc.CreateFromAlert(c.Request.Context(), c.Param("id"), userID)
+	// 经手人解析收在 actorFromContext 一处，与 UpdateTicket/CreateTicket 走同一个 helper，
+	// 避免几处各自 parse 而分叉。整个 Actor 传下去（M25 步骤 5c）—— 旧写法在这里取
+	// `.Name` 就丢掉 ID，出生行于是没有 actor_id。
+	ticket, created, err := h.svc.CreateFromAlert(c.Request.Context(), c.Param("id"), actorFromContext(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "告警不存在或关联的工单已失效")

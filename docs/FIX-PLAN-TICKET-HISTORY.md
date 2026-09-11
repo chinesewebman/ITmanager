@@ -243,8 +243,9 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | D-3 | 历史保留期？ | 不设清理（append-only，无删除路径） | 加保留期需定时任务，属独立决策 |
 | D-4 | `kind` 词表 | `created` / `updated` | 宽粒度下「字段级」已由 `field_name` 表达；不预设 `deleted`（无删除路径） |
 | D-5 | 解析不出 actor 时？ | `actor_id=NULL` + `actor_name` 取得到就存，都取不到存 `"unknown"` | 与 `ticket_handler.go:107-110` 现有处理一致 |
-| **D-7** | `ticket_number` 要不要进历史？ | **不进（现状），登记待拍板** | 它被 §2.3 列为系统列排除 —— 出生后不再变，记进 updated 是噪声。代价是**整张历史表里看不到票号**：出生行只有 `kind=created` + actor，读端点要展示「这张票出生时拿到的号」得回 `tickets` 表取。做法选择：① 出生行的 `new_value` 存票号（与 `field_name=NULL` 的形状有张力）；② 出生行补一行 `field_name='ticket_number'`（与 §2.1「created 时 field_name 为 NULL」冲突）；③ 维持现状，读端点 join `tickets`。**未拍板前不动** |
-| **D-6** | `source` / `request_id` 填什么？ | **暂不填（留 NULL）—— 待拍板** | 语义未定：`source` 是「**操作的来路**」还是「**工单的来路**」？若是前者，API Key 路径算 `api`、JWT 人工算 `manual`（需中间件把认证方式也写进 ctx）；若是后者，直接取工单自己的 `source` 列即可，但那与「经手」无关。`request_id` 需要请求级 ID 中间件，当前不存在。两列都可空，**先留空不阻塞**，等语义定了再补 —— 不在这里替调用方猜一个值写死 |
+| **D-7** | `ticket_number` 要不要进历史？ | **不进**（燕如 2026-09-11 授权决定） | **票号是「出生即定、此后不可变」的标识，不是「变更」** —— 变更流里放一个永不变化的值只是噪音。它被 §2.3 列为系统列排除、又被 `immutableTicketUpdateFields` 禁止改写，两条合起来意味着**它出现在 updated 行里的可能性为零**。读端点也不必 join：`GET /tickets/:id/history` 的**消费场景就是工单详情页**，那里本来就有这张票的 `ticket_number`（`models/ticket.go` 的 json 标签直出）。**唯一会缺票号的场景是「脱离 tickets 表单独读历史」**（全站审计导出）—— 真出现时按需 join，不预先把不可变值冗余进每一行 |
+| **D-6** | `source` / `request_id` 填什么？ | **两列都保持空串**（燕如 2026-09-11 授权决定） | 原问题是「`source` 是操作的来路还是工单的来路」。**按工作流追下去，答案是「两个都不需要在历史里」**：① **出生行的来路**已经有更好来源 —— `tickets.source` 这一列**早就存在且有值**（`Create` 缺省 `manual`、`ticketFromAlert` 写 `alert`、GLPI 写 `glpi`，json 标签直出响应）；把它抄进历史行 = 同一事实存两份，而两份迟早不一致。② **更新行的来路**当前**恒为「人经 API 发起」**（`Update` 只有一个生产调用方 = PUT handler；全仓无 PATCH 路由、GLPI 同步走 `CreateInBatches` 不更新），填进去就是一列恒为 `manual` 的常量。真正要区分「系统 vs 人」时，读 `tickets.source`。③ `request_id` 需要请求级 ID 中间件，**当前不存在** —— 留空是如实，编一个假值才是撒谎。**不删列**：删列要新迁移，而收益只是省两个 `TEXT`；列已建、已测、已在真 PG 冒烟里验过「无外键」，删除的爆炸半径大于收益。**真有非人写入方时**（GLPI 回写 / 规则引擎自动升级）再填，那是 1 行改动、不需要迁移 —— 这正是「留空」比「删列」好的地方。⚠️ 注意 `docs/FIX-PLAN-UI-PERF.md` §8 里步骤 3 那句「验 `source`」已按本决定作废 |
+| **D-8** | `CreateFromAlert` 的经手人参数形态 | **同 `Create`：传 `Actor`**（本轮决定） | 旧签名收 `userID string` 只当 requester 名用，handler 里 `actorFromContext(c)` 算出的 `ID` **被丢掉** —— 后果是这条路径的出生行**没有 `actor_id`**。`Create` 在步骤 2b 已经改成收 `Actor`，两条建单路径对「谁经手」的表达不该有两套。见步骤 5c |
 
 ---
 
@@ -283,7 +284,39 @@ tickets.GET("/:id/history", ticketH.ListTicketHistory)   // 准入与 GET /:id �
 | ~~4~~ ✅ | `resolved_at` 随状态收口 | **已完成**。Update 里与 `closed_at` 并列一条 `CASE`，Create 补同一个不变式的第二个入口。单测（真 sqlite）：进入 resolved 写 now / **重开清空且被清的值进历史**（`old_value` 有值、`new_value` 为 NULL）/ 重复 PUT 不重置 / **`resolved→closed` 保留的反面用例**（照抄 `closed_at` 写法就会红）/ closed 时显式给值被尊重 / **closed→resolved 保留既有解决时刻**（钉住「不加额外分支」这个决定）；Create 侧：出生即 resolved 落 now、显式值不被覆盖、**出生即 closed 不发明解决时刻**。变异 **9/9** 红在预判用例上。真 PG 落成**常驻用例** `TestDBSmoke_TicketResolvedAt`（已进 `db_smoke.sh` 白名单）：nil 参数的类型推断、`ELSE NULL` 在时间列上真是 NULL、`resolved→closed` 保留、历史快照文本逐字比对 |
 | ~~5a~~ ✅ | 读端点（service `ListHistory` + handler + 路由 + `ungatedRoutes` 登记 + 分页 clamp 500） | **已完成**。`ListHistory` 先做存在性检查（不存在 → `ErrNotFound`，**不是空列表** —— 空列表会让前端把「票不存在」读成「票没被改过」，渲染出一个并不存在的详情页）；排序 `created_at DESC, id DESC`（全序，T-45）；`page_size` 上限 500 与 `List` 同口径。单测 6 条：全序（时间相同的一对逼出 `id DESC` 这个次序键，期望顺序写成字面量而不是「按同样规则再排一遍」）、逐页拼起来恰好等于全序序列（重复/漏行都会露出来）、**页大小上限 500 用 501 行数据验**（五行数据下 `LIMIT 10000` 与 `LIMIT 500` 结果一样，那条用例会假绿）、越界页返回空、工单不存在 → `ErrNotFound`、黑盒读到 `Create`+`Update` 真写下的两行。handler 3 条：参数解析与响应形状（含 `actor_name` 必须回传）、缺省分页、404 映射。变异 **10/10** 红在预判用例上，其中 **V-9/V-10 守的是准入层**：不登记 `ungatedRoutes` → 分类闸门红；给它挂上 `canAudit`（推翻拍板③）→ `只读端点未被过度收紧` 红 |
 | ~~5b~~ ✅ | openapi + `gen:api` + 前端手写类型 | **已完成**。`openapi.yaml` 加 `/tickets/{id}/history`（get、`listTicketHistory`、query `page`/`page_size`、**补 404**）+ `TicketHistory`/`TicketHistoryList`。`data` 用**如实**的 `{items,total,page,size}`（照 `AlertList`；紧邻的 `TicketList` 把 `data` 写成裸数组是既有漂移，**不顺手改**）。分页回显键取 `size` —— 全仓不统一（`user_handler.go` 用 `page_size`），取**同页邻居** `GET /tickets` 为准。`TicketHistory` **如实声明 `required`**（本文件其余响应 schema 多不声明）：Go 侧 json 标签没有 `omitempty`，键一定在，不声明则生成物每个字段都带 `?`，消费者被迫写假的 `?.`。可空列（四个指针字段）在 JSON 里是**真 `null` 不是缺键** —— 出生行 `field_name` 就是 `null`。前端 `types/index.ts` 手写 `TicketHistory` + **双向可赋值断言**（`DriftOK` 本地→生成物、`DriftOKRev` 生成物→本地）。**不用 `User` 那种 `_Equal`**：它走条件类型**同一性**比较，结构与生成物一致时**也判 false**（实测），而这里要的是「结构一致」。**两条断言都不多余**：六条变异各红三条（正方向抓本地缺字段/放宽，反方向抓本地多必填/收窄）。方括号 `[X] extends [Y]` 不能省（裸类型参数会分配到 union 成员，漏掉整体等价性）。变异 **6/6** 红在预判断言上。⚠️ **首轮 6 条全被脚本判成「没红」而实际全红** —— tsc 的 TS2344 消息里**不含断言别名**，只给 `行:列`；判据改为「失败行号集合含目标行号」且行号在变异体上重新 grep（同步骤 4 的 V-5，**第二次踩同一个坑**）。门禁：`tsc --noEmit` 干净、`lint` 干净、vitest **37 文件 312 用例全过**、`go test ./internal/api/...` ok、`gen:api` 幂等（sha256 不变，本地复现 CI 那道 `git diff --exit-code` 闸门） |
+| ~~5c~~ ✅ | `CreateFromAlert` 补出生留痕（同事务）+ 签名收 `Actor`（D-8） | **已完成**。`ticket_service.go` 的接口与实现签名改收 `Actor`（旧签名收裸 `userID` 只当 requester 名用）；抢到认领的分支里加 `insertTicketBirth(tx, t.ID, uuid.New(), actor)` —— **与插票同一个 `tx`**，冲突时一起回滚；`ticket_handler.go` 改传 `actorFromContext(c)`（旧写法在那里取 `.Name` 把 ID 丢掉，出生行于是**没有 `actor_id`**；经手人解析由此收在与 `Create`/`Update` 同一个 helper，不再各处 parse）。**测试**：新增 2 条真 sqlite —— ① 写出生历史行（`kind=created`、`field_name`/`old_value`/`new_value` 三列皆 NULL、`batch_id` 非零、`actor_id` + `actor_name` 落库、挂在**刚建的这张票**上、`source` 与 `request_id` 为**空串**（钉住 D-6），而票自己的 `tickets.source='alert'` 承载来路）② 幂等路径（重复点击）不重复留痕。夹具侧把 ticket_history 的 DDL 抽成共享 helper `createTicketHistoryTable`，`newDiagTestDB` 与 `newTicketSQLiteDB` 共用 —— 抄两遍迟早只有一份被改。handler 侧同步 mock 签名，并给 requester 用例补上「**ID 也必须传下去**」的断言。**变异 9/9 红在目标断言上**：出生行整段不写 / actor 传零值 / kind 记成 updated / 挂错票 / 出生行填 source / actor_id 丢失 / actor_name 丢失 / batch_id 零值 / 幂等路径也留痕。⚠️ **本轮删掉了一条不可证伪的断言**（见下方小节）。**门禁**：`gofmt -l` 干净、`go vet ./...` 与 `go vet -tags dbsmoke ./tests/` 均无输出、`go test -count=1 ./...` 27 包全 ok、`internal/service` 84.9%、`internal/api/handlers` 65.0%；前端 0 改动故 tsc/lint/vitest 未跑（如实记录） |
 | 6 | 前端工单详情时间线（按 `batch_id` 分组） | vitest + tsc + eslint |
+
+### 为什么 5c 排在 6 前面（按运营的实际工作流倒推，燕如 2026-09-11 授权定序）
+
+把「一张工单从生到死」在系统里走一遍，看**每一步有没有留痕**：
+
+| 运营动作 | 代码路径 | 出生留痕 |
+|---|---|---|
+| 手工建单（表单） | `POST /tickets` → `Create` | ✅ 步骤 3 |
+| **告警一键建单** | `POST /alerts/:id/ticket` → `CreateFromAlert` | ✅ 步骤 5c |
+| GLPI 同步建单 | `CreateInBatches`（绕开 service） | ❌ 已登记，另一步 |
+| seed 演示数据 | 直接建 | ❌ 不补（演示数据无经手人可言） |
+
+**告警一键建单恰恰是最常用的那条** —— 值班时 Zabbix 报警 → 点「建单」是主线动作，手工填表单是少数。而它现在**是唯一一条「人点了、库里却没有任何经手记录」的路径**：运营打开这张票，时间线是空的，读起来像「这票建了以后没人碰过」，而事实是**系统刚刚从一条告警把它建出来**。这不是「少了个字段」，是**时间线在说谎**。
+
+**为什么先 5c 再做前端（6）**：前端时间线是把已有的历史**显示出来**，早做晚做都不丢数据；而 5c 是**数据本身没记**——今天之前经 `CreateFromAlert` 建的票，出生事实**永久缺失**，补不回来。**能补的先补。**
+
+**顺带把 D-6 的决定钉在代码里**：5c 的出生行**不填 `source`**（理由见 §决策表 D-6 —— 来路读 `tickets.source`），而 `ticketFromAlert` 写下的 `tickets.source='alert'` 正是时间线要显示的「从告警来」。这条路径因此同时是 D-6 决定的**第一个真实用例**。
+
+### 5c 删掉的那条断言：一条永远为真的断言比没有断言更糟（2026-09-11）
+
+写 5c 时顺手在既有的 K-3（插票失败 → 认领回滚）用例里加了一句「出生行也不得残留」（`countHistory == 0`）。变异反证时发现**它红不了**，追下去是两个基座各自堵死了这条路径：
+
+| 想模拟的回归 | sqlite 单测基座 | 真 Postgres |
+|---|---|---|
+| 把出生行写到事务外（`s.db`） | `:memory:` **每条连接一个独立库** —— 写到事务外等于写进另一个库，读回来仍是 0 行，断言恒真 | `ticket_history.ticket_id → tickets(id)` **外键**：工单行还没提交，孤儿出生行**根本插不进去**，报错回滚，断言同样恒真 |
+
+也就是说「**票不在、出生记录却在**」这个状态在两个基座上都不可能被构造出来 —— 真库靠外键（已被 `TestDBSmoke_TicketHistory` 的 `delete_rule == CASCADE` 断言钉住），sqlite 靠「根本看不见」。留下它只会给后来人「这条不变式有测试守着」的错觉。
+
+删掉它，并把这个结论写进用例注释（免得下一个人再补一遍）。**另一半** ——「工单在、出生行不在」—— 由 `TestTicketService_CreateFromAlert_写出生历史行` 守，那一条是可证伪的（V-1 删掉调用即红）。
+
+**教训**：变异反证的价值不止「证明断言有效」，还包括「**证明某条断言无效**」。断言写完先问一句：**什么样的代码改动会让它红？** 答不上来的，就是没在守任何东西。
 
 ### 步骤 0 实测结论（2026-09-11，运行验证；探针文件已删）
 

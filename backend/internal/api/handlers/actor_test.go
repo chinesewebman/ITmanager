@@ -140,14 +140,17 @@ func TestUpdateTicket_username缺失_兜底unknown(t *testing.T) {
 	assert.Nil(t, got.ID)
 }
 
-// 从告警建单的 requester 收的是 **username**（旧签名就是字符串），不是 user_id。
+// 从告警建单的 requester 取的是 **username**，不是 user_id。
 // ctx 里同时有两者时钉住这一点：写成 uuid 字符串的话，工单 requester 会变成一串
 // 数字，人看了不知道是谁，按姓名检索也查不到。
+//
+// M25 步骤 5c 起签名收 Actor，所以顺带钉住第二个方向：**ID 也必须传下去** ——
+// 出生历史行要靠它记 actor_id，旧写法在这里只取 `.Name` 就把它丢了。
 func TestCreateTicketFromAlert_requester取username而非user_id(t *testing.T) {
-	var gotUser string
+	var gotActor service.Actor
 	svc := &mockTicketService{
-		fromAlertFunc: func(ctx context.Context, alertID, userID string) (*models.Ticket, bool, error) {
-			gotUser = userID
+		fromAlertFunc: func(ctx context.Context, alertID string, actor service.Actor) (*models.Ticket, bool, error) {
+			gotActor = actor
 			return &models.Ticket{Title: "工单"}, true, nil
 		},
 	}
@@ -158,5 +161,7 @@ func TestCreateTicketFromAlert_requester取username而非user_id(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
-	assert.Equal(t, "alice", gotUser, "requester 要的是可读姓名，不是 uuid")
+	assert.Equal(t, "alice", gotActor.Name, "requester 要的是可读姓名，不是 uuid")
+	assert.Equal(t, "3f2504e0-4f89-11d3-9a0c-0305e82c3301", gotActor.ID.String(),
+		"actor_id 也必须传下去 —— 出生历史行靠它记「谁建的这张票」")
 }

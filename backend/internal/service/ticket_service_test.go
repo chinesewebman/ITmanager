@@ -169,9 +169,20 @@ func newTicketSQLiteDB(t *testing.T) *gorm.DB {
 		created_at DATETIME,
 		updated_at DATETIME
 	)`).Error)
-	// ticket_history 与迁移 000025 同构（列名/可空性一致），只去掉 PG 专有默认值：
-	// 主键无 gen_random_uuid()（sqlite 没有），created_at 无 DEFAULT NOW()（由 gorm 填）。
-	// 少了这张表，Update 的留痕路径会以 "no such table" 全红 —— 那不是断言在守，是基座缺件。
+	createTicketHistoryTable(t, db)
+	return db
+}
+
+// createTicketHistoryTable 建 ticket_history，与迁移 000025 同构（列名/可空性一致），
+// 只去掉 PG 专有默认值：主键无 gen_random_uuid()（sqlite 没有），created_at 无
+// DEFAULT NOW()（由 gorm 填）。少了这张表，留痕路径会以 "no such table" 全红 ——
+// 那不是断言在守，是基座缺件。
+//
+// 抽成一处而不是每个夹具各写一份：任何写路径（Create / Update / CreateFromAlert）
+// 都要往这张表里写，夹具少建一次，那组用例就整组假红/假绿。同一条 DDL 抄两遍迟早
+// 只有一份被改（M25 步骤 5c 就是撞上 CreateFromAlert 那一组缺表）。
+func createTicketHistoryTable(t *testing.T, db *gorm.DB) {
+	t.Helper()
 	require.NoError(t, db.Exec(`CREATE TABLE ticket_history (
 		id TEXT PRIMARY KEY,
 		ticket_id TEXT NOT NULL,
@@ -186,7 +197,6 @@ func newTicketSQLiteDB(t *testing.T) *gorm.DB {
 		request_id TEXT,
 		created_at DATETIME
 	)`).Error)
-	return db
 }
 
 // 安全审计 H-1 同款（channel_service.go 的先例）：handler 把请求体绑成 map 直接进
