@@ -15,13 +15,17 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1314,6 +1318,320 @@ func TestDBSmoke_GLPITimeZoneWallClock(t *testing.T) {
 	assert.Equal(t, "2026-06-15 02:00:00", got,
 		"GLPI 的 10:00(Asia/Shanghai) 落到 TIMESTAMP 列必须是 02:00 UTC —— "+
 			"10:00 说明 .UTC() 没了（全库时间偏 8 小时）；别的值说明时区名写错了")
+}
+
+// TestDBSmoke_AlertsZabbixIdentityUnique 守 000027 在**真 Postgres** 上建出来的索引形态与谓词边界。
+//
+// 为什么必须上真库：sqlite 单测基座是手写 DDL（upsertTestSchema），它与 000027 是两份
+// 独立文本 —— 那边绿只证明「我以为的索引」可用，证明不了**迁移真建出来的那份**能用。
+// 而 PG 是 ON CONFLICT 的唯一判据（谓词差一个字符 → 42P10，每一次 Zabbix 同步 500，
+// 而全部单测照样绿）。
+//
+// 覆盖三件事：
+//
+//	① 索引存在、是 UNIQUE、且**带 WHERE 谓词**（谓词写宽成全表唯一，人工/其它来源的
+//	   同 trigger 行会互相撞，第二条直接插不进去）；
+//	② 两条同身份（trigger_id + problem_start）的 zabbix 行 → 第二条 23505
+//	   —— 这正是 ON CONFLICT 的仲裁者，没有它 service.go 的 TargetWhere 就是 42P10；
+//	③ 谓词两处收窄各有一条反向用例：source='manual' 同键不冲突、trigger_id='' 同键不冲突。
+//	   再加 problem_start IS NULL 的多行共存（PG 唯一索引视 NULL 互不相等）。
+func TestDBSmoke_AlertsZabbixIdentityUnique(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000027 —— 本用例前置不满足")
+	}
+
+	// ① 索引形态。断言的是 pg_indexes.indexdef 的**实测文本**，不是迁移文件里的源码字面：
+	// PG 会把谓词规范化成 `(source)::text = 'zabbix'::text`、`(trigger_id)::text <> ''::text`，
+	// 照抄源码字面会永远红（红在断言写法上，不是红在漂移上）。
+	var indexdef string
+	require.NoError(t, db.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_alerts_zabbix_identity'`).
+		Scan(&indexdef).Error, "uq_alerts_zabbix_identity 不存在 —— 000027 没生效")
+	assert.Contains(t, indexdef, "UNIQUE", "必须是唯一索引，否则 ON CONFLICT 无仲裁者: %s", indexdef)
+	assert.Contains(t, indexdef, "WHERE", "必须是**部分**索引 —— 全表唯一会让非 zabbix 的同键行互相冲突: %s", indexdef)
+	assert.Contains(t, indexdef, "(trigger_id, problem_start)", "仲裁列必须是这两列: %s", indexdef)
+	assert.Contains(t, indexdef, "trigger_id IS NOT NULL", "谓词少了 IS NOT NULL（与 service.go 的 TargetWhere 会分叉）: %s", indexdef)
+	assert.Contains(t, indexdef, "<> ''::text", "谓词少了 trigger_id <> '': %s", indexdef)
+	assert.Contains(t, indexdef, "= 'zabbix'::text", "谓词少了 source = 'zabbix': %s", indexdef)
+
+	// 自建自清：本用例插的行不能留给后面的用例（尤其 DownPreservesLegacyColumns 会回滚
+	// 000013 拆表，以及 Migration027BlockedByDuplicates 要造重复行 —— 库里留着额外行
+	// 会让那次自检在**不该报**的时候报出来）。按 alert_id 前缀删，不按 trigger_id：
+	// ③ 里有一行的 trigger_id 就是空串，按它删会波及别的用例的行。
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM alerts WHERE alert_id LIKE 'm27smoke%'`).Error
+	})
+
+	const key = "990027-m27-smoke"
+	const start = int64(1756728000)
+	mk := func(alertID, source, triggerID string) *models.Alert {
+		return &models.Alert{
+			AlertID: alertID, Source: source, TriggerID: triggerID,
+			TriggerName: "m27 smoke", HostName: "web-01", Severity: 5, Status: "problem",
+			ProblemStart: time.Unix(start, 0).UTC(),
+		}
+	}
+
+	// ② zabbix 同身份必须被拒
+	require.NoError(t, db.Create(mk("m27smoke-z1", "zabbix", key)).Error)
+	err := db.Create(mk("m27smoke-z2", "zabbix", key)).Error
+	require.Error(t, err, "同身份的第二个 zabbix 告警必须被唯一索引拒绝 —— 否则 ON CONFLICT 无仲裁者")
+	assert.Contains(t, err.Error(), "23505", "应带 SQLSTATE 23505: %v", err)
+
+	// ③a 非 zabbix 来源不受约束（谓词 source='zabbix' 的边界）
+	require.NoError(t, db.Create(mk("m27smoke-m1", "manual", key)).Error,
+		"manual 来源的同键行必须不受此索引约束 —— 谓词写宽了会把人工告警一起管住")
+
+	// ③b trigger_id='' 不受约束（谓词 trigger_id <> '' 的边界）
+	require.NoError(t, db.Create(mk("m27smoke-e1", "zabbix", "")).Error)
+	require.NoError(t, db.Create(mk("m27smoke-e2", "zabbix", "")).Error,
+		"空 trigger_id 的第二行也必须能插 —— 少了 <> '' 会在这里红")
+
+	// ④ problem_start IS NULL 的行不参与唯一性（PG 视 NULL 互不相等）。
+	// 走裸 SQL 是本文件「不手写 INSERT」惯例的**唯一例外**：models.Alert.ProblemStart 是
+	// 非指针 time.Time，GORM 写不出 NULL（M26 §1.6 真 PG 实测）；这条行为又必须钉住 ——
+	// 自检专门放过了 NULL 行，若哪天索引把 NULL 也算成冲突，迁移会变成「永远无法满足」。
+	for i := 1; i <= 2; i++ {
+		require.NoError(t, db.Exec(
+			`INSERT INTO alerts (id, alert_id, source, trigger_id, severity, status)
+			 VALUES (?, ?, 'zabbix', ?, 5, 'problem')`,
+			uuid.New(), fmt.Sprintf("m27smoke-n%d", i), key).Error,
+			"problem_start IS NULL 的第 %d 行必须能共存", i)
+	}
+}
+
+// TestDBSmoke_ZabbixSyncOnConflict 是 ON CONFLICT（D-4）在**真 PG** 上的唯一防线。
+//
+// 为什么不能靠「同步两遍、第二遍 synced==0」：第二遍预过滤已把同一身份全剔除 →
+// toInsert 为空 → 事务根本不进 → 删掉 TargetWhere 它**照样绿**（假绿）。
+// 必须构造「预查之后、插入之前出现冲突行」的交错 —— 那正是 D-4 存在的唯一场景。
+// 用一个一次性 Query 钩子在预过滤 Find 返回后注入该行（同 M26 的 GLPI 用例）。
+//
+// 断言设计成**混合批**（1 冲突 + 1 新），这是必需的而不是「多测一条」：
+// 只有 1 条冲突行时，删掉 ON CONFLICT 会 23505（红），但若把 ON CONFLICT 换成
+// 「RowsAffected 计数」之类就不会红；有了一条真正要插的新行，synced 才同时钉住
+// 「冲突的不算新增」与「该插的确实插了」。
+func TestDBSmoke_ZabbixSyncOnConflict(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000027 —— SyncFromZabbix 的 ON CONFLICT 会 42P10，本用例前置不满足")
+	}
+
+	const conflictSec = 1756728000
+	const newSec = 1756728060
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM alerts WHERE alert_id LIKE 'm27smoke-sync%'`).Error
+	})
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	// 预过滤（Find）返回后注入冲突行 —— TOCTOU 窗口的唯一入口。
+	var once sync.Once
+	require.NoError(t, db.Callback().Query().After("gorm:query").
+		Register("m27:inject-conflict", func(tx *gorm.DB) {
+			// 只在**第一次**查 alerts 时注入；之后的查询（事务里的 COUNT）不再注入，
+			// 否则计数被污染，synced 断言红在夹具上而不是代码上。
+			once.Do(func() {
+				require.NoError(t, db.Create(&models.Alert{
+					AlertID: "m27smoke-sync-injected", Source: "zabbix",
+					TriggerID: "m27smoke-sync-1", TriggerName: "CPU > 90%", HostName: "web-01",
+					Severity: 5, Status: "problem",
+					// 必须 .UTC()：pgx 对 TIMESTAMP 列只写**挂钟数字**（T-48），而同步路径
+					// 写的是 time.Unix(sec,0).UTC()。用本地时区会差 8 小时 → 两行不撞 →
+					// ON CONFLICT 根本没被触发 → 假绿。
+					ProblemStart: time.Unix(conflictSec, 0).UTC(),
+				}).Error, "注入冲突行失败")
+			})
+		}))
+
+	// 假 Zabbix：登录固定成功，trigger.get 吐两条 —— 第一条与注入行同身份（冲突），
+	// 第二条全新。两条的 triggerid 都带 m27smoke-sync 前缀，收尾按前缀清得干净。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case bytes.Contains(raw, []byte(`"user.login"`)):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":"smoke-tok","id":1}`))
+		case bytes.Contains(raw, []byte(`"trigger.get"`)):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":[` +
+				`{"triggerid":"m27smoke-sync-1","description":"CPU > 90%","priority":5,` +
+				`"hosts":[{"hostid":"1","host":"web-01"}],"value":"1","lastchange":"1756728000"},` +
+				`{"triggerid":"m27smoke-sync-2","description":"磁盘满","priority":4,` +
+				`"hosts":[{"hostid":"1","host":"web-01"}],"value":"1","lastchange":"1756728060"}` +
+				`],"id":2}`))
+		default:
+			t.Errorf("未预期的 Zabbix 请求: %s", raw)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Zabbix: config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"},
+		},
+	}, nil)
+
+	n, truncated, err := svc.SyncFromZabbix(context.Background())
+	require.NoError(t, err,
+		"预查后漏进的冲突行必须被 ON CONFLICT 幂等跳过；报 23505 说明 TargetWhere/ON CONFLICT 没了")
+	assert.Equal(t, 0, truncated, "两条不构成截断")
+	assert.Equal(t, 1, n, "只应新增 1 条 —— 冲突那条被跳过；报 2 说明计数把跳过的那条也算进去了")
+
+	var rows []models.Alert
+	require.NoError(t, db.Where("source = 'zabbix' AND trigger_id LIKE 'm27smoke-sync%'").
+		Order("trigger_id").Find(&rows).Error)
+	require.Len(t, rows, 2, "注入行 + 新增 1 条 = 2 行；多出来说明 ON CONFLICT 没生效（插了重复）")
+	assert.Equal(t, "m27smoke-sync-2", rows[1].TriggerID)
+	// 新行必须落在源侧给的故障时刻上，而不是同步时刻 —— 顺带钉住这条管道没被改动带偏。
+	assert.Equal(t, int64(newSec), rows[1].ProblemStart.Unix())
+}
+
+// rollbackTo27 把库回滚到「000027 未应用」，供 000027 的两条升级路径用例共用。
+//
+// 先循环滚掉 27 以上的一切，再滚 000027：migrate.Down 只滚**最新已应用**那一层，
+// 写死次数的话每新增一个迁移本用例就要再改一次，而漏改的症状是下面 require.True(idxGone)
+// 变红、错误信息却指向「down 000027 没删掉索引」这个**错误方向**（M27 加 000027 时在
+// 000026 的同类用例上实测过）。
+func rollbackTo27(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	migrate.FS = network_monitor_platform.MigrationsFS
+	for {
+		var above int64
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version > 27`).
+			Scan(&above).Error, "读取 27 以上已应用层数失败")
+		if above == 0 {
+			break
+		}
+		require.NoError(t, migrate.Down(db), "回滚 27 以上的迁移失败（剩 %d 层）", above)
+	}
+	require.NoError(t, migrate.Down(db), "回滚 000027 失败")
+
+	var idxGone bool
+	require.NoError(t, db.Raw(
+		`SELECT NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_alerts_zabbix_identity')`).
+		Scan(&idxGone).Error)
+	require.True(t, idxGone, "down 000027 没删掉索引 —— 后续步骤会空转、或红在错误方向")
+}
+
+// TestDBSmoke_Migration027AllowsNullProblemStart 守自检里的 `problem_start IS NOT NULL`
+// （IMPL §8 的 M9）。
+//
+// PG 的唯一索引视 NULL 互不相等，所以同 trigger 的多行 NULL problem_start 建索引时
+// **并不冲突**。自检若少了 `problem_start IS NOT NULL`，这些行会被算成重复 → RAISE EXCEPTION
+// → 迁移被拒，而且**永远无法满足**（唯一出路是删数据 —— 而 NULL problem_start 是合法历史数据）。
+// 这条路径真实存在：非指针 time.Time 写不出 NULL，裸 SQL / 早期写入方可以。
+//
+// 反向对照是 TestDBSmoke_Migration027BlockedByDuplicates（非 NULL 重复必须被拒）——
+// 两条合起来才是「自检的粒度刚好」，缺一条就变成「要么误报、要么漏报」只看得到一半。
+func TestDBSmoke_Migration027AllowsNullProblemStart(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000027 —— 本用例前置不满足")
+	}
+
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM alerts WHERE alert_id LIKE 'm27smoke-null%'`).Error
+	})
+
+	rollbackTo27(t, db)
+
+	// 收尾必须把 000027 重新应用上：库留在「索引没了」的状态时，运行时就是
+	// 每一次 Zabbix 同步都 500，且后面 TestDBSmoke_DownPreservesLegacyColumns 的前置会 Fatal。
+	defer func() {
+		if err := migrate.Up(db); err != nil {
+			t.Errorf("复原 000027 失败，库已留在「索引缺失」状态（运行时=Zabbix 同步全 500）: %v", err)
+		}
+	}()
+
+	const nullTrigger = "990027-m27-null"
+	// 裸 SQL 是本文件「不手写 INSERT」惯例的**唯一例外**：ProblemStart 是非指针 time.Time，
+	// GORM 写不出 NULL。这里要的正是 NULL，所以只能裸 SQL。
+	for i := 1; i <= 2; i++ {
+		require.NoError(t, db.Exec(
+			`INSERT INTO alerts (id, alert_id, source, trigger_id, severity, status)
+			 VALUES (?, ?, 'zabbix', ?, 5, 'problem')`,
+			uuid.New(), fmt.Sprintf("m27smoke-null-%d", i), nullTrigger).Error,
+			"第 %d 条 NULL problem_start 行插入失败 —— 索引不是真被删掉了？", i)
+	}
+
+	require.NoError(t, migrate.Up(db),
+		"同 trigger 的多行 NULL problem_start 不构成重复（PG 视 NULL 互不相等）—— "+
+			"自检少了 problem_start IS NOT NULL 会在这里把合法历史数据判成重复，且迁移从此无法满足")
+
+	var idxBack bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_alerts_zabbix_identity')`).
+		Scan(&idxBack).Error)
+	assert.True(t, idxBack, "Up 之后索引必须建出来")
+}
+
+// TestDBSmoke_Migration027BlockedByDuplicates 守 000027 的**前置自检**（D-5 fail-closed）。
+//
+// 库里有重复的 zabbix 身份时 CREATE UNIQUE INDEX 必然失败 —— 但 PG 原生 23505 的 DETAIL
+// 只有一行「Key (trigger_id, problem_start)=(...) already exists」，不含「还有哪几个 trigger
+// 重了」，而迁移失败会让版本记录不落、每次重启重放、服务持续不可用。所以 up 里加了 DO 自检，
+// 把重复的 trigger_id **样本**写进异常文本。
+//
+// 本用例走「升级到一个脏库」这条真实路径：先滚掉索引 → 造重复行 → Up 必须失败。
+// 三步缺一不可 —— 少了第①步（不滚索引）第②步就插不进去，整个用例变成空转。
+func TestDBSmoke_Migration027BlockedByDuplicates(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&applied).Error)
+	if applied == 0 {
+		t.Fatalf("库未应用到 000027 —— 本用例要「回滚索引 → 造重复 → Up 必须失败」，前置不满足")
+	}
+
+	rollbackTo27(t, db)
+
+	const dupTrigger = "990027-m27-dup"
+	// 收尾必须把库恢复成「000027 已应用 + 无重复行」。不做的话：同进程后面的
+	// TestDBSmoke_DownPreservesLegacyColumns 前置会 Fatal（一个红变一片红）；更糟的是
+	// 库留在「索引没了」的状态，而那个状态在运行时就是每一次 Zabbix 同步都 500。
+	defer func() {
+		if err := db.Exec(`DELETE FROM alerts WHERE trigger_id = ?`, dupTrigger).Error; err != nil {
+			t.Errorf("清理重复行失败，库已留在脏状态: %v", err)
+			return
+		}
+		if err := migrate.Up(db); err != nil {
+			t.Errorf("复原 000027 失败，库已留在「索引缺失」状态（运行时=Zabbix 同步全 500）: %v", err)
+		}
+	}()
+
+	// ② 插入两行同身份的 zabbix 告警（此时没有索引，插得进去）
+	for i := 1; i <= 2; i++ {
+		require.NoError(t, db.Create(&models.Alert{
+			AlertID: fmt.Sprintf("m27smoke-dup-%d", i), Source: "zabbix", TriggerID: dupTrigger,
+			TriggerName: "m27 dup", HostName: "web-01", Severity: 5, Status: "problem",
+			ProblemStart: time.Unix(1756728000, 0).UTC(),
+		}).Error, "第 %d 条重复行插入失败 —— 索引不是真被删掉了？", i)
+	}
+
+	// ③ Up 必须失败，且异常文本必须点名重复的 trigger_id（这正是 DO 自检存在的理由）
+	err := migrate.Up(db)
+	require.Error(t, err, "库里有重复 zabbix 身份时 000027 必须失败（fail-closed），绝不能静默跳过建索引")
+	assert.Contains(t, err.Error(), "存在重复的 zabbix 告警身份",
+		"异常文本必须是 DO 自检抛的那条 —— 只有 PG 原生的 23505 说明自检被删了，"+
+			"运维拿不到「哪几个 trigger 重了」: %v", err)
+	assert.Contains(t, err.Error(), dupTrigger, "自检必须把重复的 trigger_id 样本带进异常文本")
 }
 
 // TestDBSmoke_DownPreservesLegacyColumns 回滚 000013 不得删掉 000001 就存在的列。

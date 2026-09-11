@@ -19,6 +19,23 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
 
 - **B1-1 / B1-2 / B1-3 settings 死表单** (`3725f40`) — 修复 + 补 CI 前端测试
 
+- **M26 同步导入保真 — 外部时间戳与词表落库** (`1d51f9f`) — GLPI 的挂钟时间按 `Asia/Shanghai`
+  解析成 UTC 再落 `TIMESTAMP`（此前全库时间偏 8 小时）；GLPI 状态词表补全，越界档位改为**计数透出**而非静默丢票；
+  新增迁移 `000026_tickets_glpi_external_id_unique`（部分唯一索引 + `ON CONFLICT`，重复导入幂等）。
+- **M27 Zabbix 同步导入保真 — 去重键与截断可见** (`fd080c2` → `2bd5e7d` → `d38e581` → `f6d31c5` → `b029469`)
+  — **A（去重键）**：`SyncFromZabbix` 原按 `status='problem'` 判「已存在」，运维点一次「确认」后
+  本地行变 `acknowledged` → 下一轮同步**再插一行**，同一 trigger 出现两行、ack 状态丢失（TODO G-27）。
+  判据改为「**同一 trigger 的同一次故障发生**」：`lastchange` 可用时按 `(trigger_id, problem_start.Unix())`
+  精确去重，缺失时退回「同 trigger 且未解决」（Go 形态 `status != "resolved"`）。
+  新增迁移 `000027_alerts_zabbix_identity_unique`（部分唯一索引 `WHERE source='zabbix' AND trigger_id IS NOT NULL
+  AND trigger_id <> ''` + 同事务 `ON CONFLICT ... DO NOTHING`；预过滤是 TOCTOU，无仲裁者时并发撞车会整批回滚）。
+  **B（截断可见）**：`trigger.get` 上限 100 → 5000，且请求 `limit+1` 让「正好这么多」与「被截断」可区分；
+  `SyncFromZabbix` 返回值 +1（`truncated` 0/1 标志），经 `zabbix_truncated` 透出到设置页提示；
+  顺带去掉无人读取的 `selectItems`（每次同步白拉一份 items）。
+  验证：sqlite 六行行为表 + 真 PG 冒烟 4 条 + 变异反证 M1–M9/S-1…S-4 全红；见 `docs/IMPL-ZABBIX-SYNC.md` §10。
+  新 trap：T-50（部分索引 + `ON CONFLICT` 谓词必须**蕴含**索引谓词，写宽即 `42P10`）、T-51（`migrate.Down`
+  只滚最新一层，新增迁移会让既有回滚用例静默错位）。
+
 ### 文档 (docs)
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）

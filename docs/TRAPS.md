@@ -579,6 +579,71 @@ sqlite 上同样(实测)。而 `ON CONFLICT` 存在的**唯一场景**恰好就�
 **解法**: 在**同一事务内**对目标行做 COUNT 前后差(`before` / `after`), 而不是信 `RowsAffected`。
 守它的用例必须构造**混合批次**(1 冲突 + 1 新): 只有混合批次才能同时区分「真值 1」与「虚报 2」。
 
+### T-50. 部分唯一索引 + `ON CONFLICT`：`WHERE` 必须**蕴含**索引谓词 —— 写宽一段就是 `42P10`
+
+**背景**: M27/D-4 给 `alerts` 建了**部分**唯一索引
+`(trigger_id, problem_start) WHERE source='zabbix' AND trigger_id IS NOT NULL AND trigger_id <> ''`,
+插入走 `clause.OnConflict{Columns, TargetWhere}`。直觉是「照抄索引谓词就行」, 但很容易漏抄一段
+(或反过来觉得「写宽一点更保险」)。
+
+**踩到的真相**(真 PG 18.4 实测, 四种写法各跑一遍):
+
+| # | `ON CONFLICT` 的 WHERE | 结果 |
+|---|---|---|
+| A | 不写 | `ERROR: there is no unique or exclusion constraint matching the ON CONFLICT specification` |
+| B | `trigger_id IS NOT NULL AND trigger_id <> ''`(**少 `source='zabbix'`**) | 同样 `42P10` |
+| C | 与索引谓词逐字相同 | `INSERT 0 1` —— 正常 |
+| D | 逐字相同 + `AND 1=1` | `INSERT 0 0`(冲突被跳过)—— **也正常** |
+
+即: PG 判的是 **蕴含关系**(ON CONFLICT 的谓词必须蕴含索引谓词), **不是文本相等** —— D 证明多写恒真项没关系,
+B 证明**少写一段就废**。所以「写宽一点更保险」是**反的**: 谓词越宽越推不出索引谓词。
+
+同一件事在 sqlite 上宽松得多(仲裁者按**解析树**比较), 于是出现最坏的组合:
+**`go test` 全绿、真 PG 上每一次同步都 500**。
+
+**检测线索**: 报错文本逐字是 `there is no unique or exclusion constraint matching the ON CONFLICT specification`,
+SQLSTATE `42P10`; 或「sqlite 全绿但真 PG 冒烟红」。**注意 `42P10` 与 `23505` 是两件事**:
+`23505` = 有仲裁者但撞了(ON CONFLICT 没生效/没写), `42P10` = 压根找不到仲裁者(谓词/列不匹配)。
+
+**解法**:
+1. `TargetWhere` 从索引定义处**复制粘贴**同一段文本, 不要手敲;
+2. 真 PG 用例断言 `pg_indexes.indexdef` 的**规范化**文本(不是迁移源码字面 —— PG 会改写成
+   `(source)::text = 'zabbix'::text`), 并配一条**反向行为用例**(谓词覆盖不到的来源同键必须能插);
+3. 变异反证必须**删掉 `TargetWhere`** 跑一次真 PG 用例 —— 只跑 sqlite 抓不到 `42P10`。
+
+**来源**: M27/A(2026-09-11, `docs/IMPL-ZABBIX-SYNC.md` §8 的 S-1)。同形陷阱见 M26/000026(GLPI 侧)。
+
+---
+
+### T-51. `migrate.Down` 只滚**最新已应用**那一层 —— 新增迁移会让既有「回滚 N 层」用例**静默错位**, 且错位方向指向别处
+
+**背景**: 迁移回滚类冒烟用例(`TestDBSmoke_DownPreservesLegacyColumns`、
+`TestDBSmoke_Migration026BlockedByDuplicates`)写的是「Down 一次 → 断言某一层的索引没了」。
+
+**踩到的真相**: `migrate.Down`(`internal/migrate/migrate.go`)只回滚**最新已应用版本**, 不是「你指定的那一层」。
+M27 加 000027 时, `Migration026BlockedByDuplicates` 的 `migrate.Down(db)` 滚的变成了 000027,
+于是 `require.True(idxGone)` 变红, 而**失败信息说的是「down 000026 没删掉索引」—— 指向完全错误的方向**,
+照着它查会浪费一轮。同样地, `DownPreservesLegacyColumns` 的「十三次 Down」整体后移一位。
+
+两个方向都危险:
+- **少滚一层** → 断言在错误对象上求值, 可能**假绿**(链上断言全是「索引没了」的 `assert.False`, 晚一步仍为真);
+- **多滚一层** → 拆掉后面用例的前置, 一个红变一片红(`Fatalf` 级联)。
+
+**检测线索**: 新增/删除迁移后, 回滚类用例的红点出现在「上一次 Down 的对象」上。
+`MigrationReapply` / `MigrateRunner` 这类守恒断言(已应用数 == embed 内 `*.up.sql` 数)能更早暴露。
+
+**解法**:
+1. 「滚到第 N 层」写成**循环**(`SELECT count(*) FROM schema_migrations WHERE version > N` + `migrate.Down` 直到 0),
+   不写死次数 —— 版本号是不变量, 序数会整体后移;
+2. 用例首尾各加一条**正向**断言钉住「头一次 Down 滚的是谁」(少了它就只剩 `assert.False`, 多滚少滚都发现不了);
+3. 只写「回滚 0000NN」, **不写「第 N 次」** —— 序数文案是这类注释里最容易变成假话的部分;
+4. 新增迁移时**同一次提交**里改掉所有回滚类用例。
+
+**来源**: M27 步骤 3(2026-09-11); 更早的同形教训见 `docs/FIX-PLAN-NETBOX-UPSERT.md` §4 V-6 的 M10
+(反向变异「只删最后一次 Down」**不会变红、静默空转**)。
+
+---
+
 ---
 
 ## 四、历史 / 已修陷阱 (供考古)
@@ -651,6 +716,8 @@ sqlite 上同样(实测)。而 `ON CONFLICT` 存在的**唯一场景**恰好就�
 | — (M25 轮) | T-47 | ACTIVE |
 | — (M26 轮) | T-48 | ACTIVE |
 | — (M26 轮) | T-49 | ACTIVE |
+| — (M27 轮) | T-50 | ACTIVE |
+| — (M27 轮) | T-51 | ACTIVE |
 
 ---
 

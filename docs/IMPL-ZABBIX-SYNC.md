@@ -517,9 +517,17 @@ CREATE UNIQUE INDEX uq_alerts_zabbix_identity
 
 | 新用例 | 挂哪条路径 | 覆盖 |
 |---|---|---|
-| `TestDBSmoke_AlertsZabbixIdentityUnique` | `:198`（全新） | ① 索引存在 + `UNIQUE` + 含 `WHERE`；② 两条同 `(trigger_id, problem_start)` 的 zabbix 行 → 第二条 23505；③ 同键但 `source='manual'` → **不冲突**；④ 同 trigger 但 `problem_start` 为 **NULL** 的两行 → **不冲突** |
-| `TestDBSmoke_ZabbixSyncOnConflict` | `:198`（全新） | **走真调用点**（假 Zabbix server → 真 `SyncFromZabbix` → 真 PG）：首次插入**不报 42P10**；再用注入式手法造「预过滤后漏进冲突行」的混合批（1 冲突 + 2 新）→ 断言 `synced==2`、无错、表内 3 行 |
+| `TestDBSmoke_AlertsZabbixIdentityUnique` | `:198`（全新） | ① 索引存在 + `UNIQUE` + 含 `WHERE` + 三段谓词逐段断言；② 两条同 `(trigger_id, problem_start)` 的 zabbix 行 → 第二条 23505；③a 同键但 `source='manual'` → **不冲突**；③b 同键但 `trigger_id=''` → **不冲突**；④ 同 trigger 但 `problem_start` 为 **NULL** 的两行 → **不冲突** |
+| `TestDBSmoke_ZabbixSyncOnConflict` | `:198`（全新） | **走真调用点**（假 Zabbix server → 真 `SyncFromZabbix` → 真 PG）：注入式造「预过滤后漏进冲突行」的混合批（**1 冲突 + 1 新**）→ 断言无错、`synced==1`、表内 2 行 |
 | `TestDBSmoke_Migration027BlockedByDuplicates` | `:205`（升级） | 滚掉 000027 → 造两条同键 zabbix 行 → `Up` 必须失败且异常文本含样本键 |
+| `TestDBSmoke_Migration027AllowsNullProblemStart` | `:205`（升级） | **反向对照**（§8 的 M9）：滚掉 000027 → 造两条同 trigger、`problem_start` 全 NULL 的行 → `Up` 必须**成功**且索引建出来 |
+
+**① 断言的是 PG 规范化后的文本，不是迁移源码字面**（实测 `pg_indexes.indexdef`）：
+`WHERE (((source)::text = 'zabbix'::text) AND (trigger_id IS NOT NULL) AND ((trigger_id)::text <> ''::text))`。
+照抄源码里的 `source = 'zabbix'` 会**永远红**（红在断言写法上，不是红在漂移上）。
+
+**混合批的规模**：落地时收成 **1 冲突 + 1 新**（计划里写的是 1+2）。理由：多一条新行不增加
+证伪力 —— 删掉 `TargetWhere` 时**第 1 条**就 42P10 整批失败，规模只影响「红得多快」。
 
 **关于 `ZabbixSyncOnConflict` 的形态**：**不要**写成「连跑两次、第二次 `synced==0`」——
 那个 0 由**预过滤**产生（`toInsert` 为空 → 事务根本不进），删掉 `TargetWhere` 它**照样绿**
@@ -645,3 +653,48 @@ M27 **不改 openapi** → 无需 `gen:api`；但须确认 `git status` 无生�
 `$$ ... $$`，`//go:embed all:migrations` 会自动收进新文件；`000022` 空缺不影响新版本身份
 （14 次 Down 正确）；sqlite 对 conflict target 的匹配是解析树比较（比「逐字」宽松，
 方向安全）；§7.2 三条「不动」用例逐条代入推演成立；升级路径无存量 alerts 行，新用例自造数据即可。
+
+## 10. 落地记录（as-built，2026-09-11）
+
+**提交序列**（每步独立 commit + push，按「小步前进」）：
+
+| 步骤 | commit | 内容 |
+|---|---|---|
+| 2 | `2bd5e7d` | 需求/细节文档定稿 + 审查补记 |
+| 3 | `d38e581` | 迁移 000027（up/down）+ 测试基座索引 + Down 链改造 |
+| 4 | `f6d31c5` | A：去重键 `(trigger_id, problem_start)` + 降级判据 `open` |
+| 5 | `b029469` | B：去 `selectItems` + 上限 100→5000（请求 +1）+ 截断透出到 UI |
+| 6 | 本文所在提交 | 真 PG 冒烟 4 条 + 变异反证 M1–M9 |
+
+**变异反证的实测结果**（每条都红在**断言**上，无一是编译失败 —— T-47）：
+
+| # | 变异 | 实测 |
+|---|---|---|
+| M1 | usable 分支改查 `open[t.TriggerID]` | ✅ 第 ③、④ 行红 |
+| M2 | `open` 构造 `!= "resolved"` → `== "problem"` | ✅ 第 ⑤ 行红 |
+| M3 | `alertIdentityKey` 的 `Unix()` → 日粒度 | ✅ 第 ④ 行红（首次写成 `Format("2006-01-02")` 时**编译失败**，那不是证据，改回 `Unix()/86400` 重跑才作数） |
+| M4 | 删掉 `TargetWhere` | ✅ sqlite 基座红（`ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`）；真 PG 冒烟**另行**红在 `SQLSTATE 42P10` |
+| M6 | `limit` 的 `+1` 去掉 | ✅ 截断单测②红 |
+| M7 | `selectItems` 加回来 | ✅ 截断单测④红 |
+| M8 | 前端文案改成插值 `${truncated}` | ✅ `Settings.test.tsx` 的「不含『另有 1 条』」红 |
+| M9 | 自检删掉 `problem_start IS NOT NULL` | ✅ `..._AllowsNullProblemStart` 红（`Up` 失败，异常指向自检） |
+| S-1 | 删 `TargetWhere` → 真 PG | ✅ `..._ZabbixSyncOnConflict` 红，报错逐字 `there is no unique or exclusion constraint matching the ON CONFLICT specification (SQLSTATE 42P10)` |
+| S-2 | 删 000027 的 DO 自检 | ✅ `..._BlockedByDuplicates` 红在**两条**断言（异常退化成裸 23505，样本键丢失） |
+| S-3a | 索引谓词去掉 `source = 'zabbix'` | ✅ 红在**两处**：indexdef 断言 + ③a（manual 同键行插不进去） |
+| S-3b | 索引谓词去掉 `trigger_id <> ''` | ✅ 红在**两处**：indexdef 断言 + ③b（空 trigger_id 第二行插不进去） |
+| S-4 | down.sql 不 `DROP INDEX` | ✅ `..._BlockedByDuplicates` 红在 `require.True(idxGone)`（少了它整条用例会空转） |
+
+**M5 已删除**：`res.RowsAffected` 在 `Alert` 路径上与真实插入数一致（两人各自探针实测），
+该变异不会红在任何断言上 —— 不可证伪的变异留在表里只会让人以为它被验过。
+
+**已知的假绿（写进测试注释，不假装守住）**：把 `service.go` 里 `exact` 的**查询**那两行删掉，
+六行表**全绿**。第 ①②③ 行走的是整条链（Go 判据 + 索引 + ON CONFLICT），真正的兜底是
+000027 的索引 —— 由 `TestDBSmoke_ZabbixSyncOnConflict` 的注入式混合批守。`exact` 的价值是
+「少一次注定失败的往返 + 把语义写在代码里」，那部分不可证伪，故不声称。
+
+**覆盖**：`SyncFromZabbix` 89.8% 语句覆盖、`alertIdentityKey` 100%、包 85.2%。
+唯一未覆盖块是预过滤的 DB-error 包装 —— 按项目口径（脚本/胶水豁免，核心逻辑 ≥80%）接受，
+不为了刷覆盖率去 mock 数据库错误。
+
+**残留（已登记进 TODO）**：`zabbix_truncated` 这个 key 名是前后端**跨语言**约定，
+两侧各写一遍字面量，改名会静默失效（前端读不到 → 永远显示「未截断」）。
