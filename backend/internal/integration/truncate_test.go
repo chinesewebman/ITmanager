@@ -197,6 +197,7 @@ func Test列宽常量与模型size_tag一致(t *testing.T) {
 		{"colAlertHostName", colAlertHostName, reflect.TypeOf(models.Alert{}), "HostName"},
 		{"colTicketTitle", colTicketTitle, reflect.TypeOf(models.Ticket{}), "Title"},
 		{"colMetricKey", colMetricKey, reflect.TypeOf(models.MetricSnapshot{}), "Key"},
+		{"colAuditResource", colAuditResource, reflect.TypeOf(models.AuditLog{}), "Resource"},
 	}
 	for _, c := range cases {
 		t.Run(c.constName, func(t *testing.T) {

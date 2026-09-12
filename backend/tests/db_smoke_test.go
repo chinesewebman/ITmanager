@@ -2692,9 +2692,10 @@ func TestDBSmoke_ColumnWidthMatchesConstant(t *testing.T) {
 		{"alerts", "host_name", "colAlertHostName"},
 		{"tickets", "title", "colTicketTitle"},
 		{"metric_snapshots", "key", "colMetricKey"},
+		{"audit_logs", "resource", "colAuditResource"},
 	}
 	require.Len(t, want, len(liveWidths),
-		"want 表必须 9 行 == integration.ColumnWidths() 大小（新增/删除列需同步此处）")
+		"want 表必须 10 行 == integration.ColumnWidths() 大小（新增/删除列需同步此处）")
 
 	// 把 table.column 拼回 key，再去 liveWidths 里查期望值 —— 这步是 G-58 的核心：
 	// 任何对 truncate.go 常量的改动都会流到这里、让 expected 跟着变，DDL 不动则断言红。
@@ -2717,7 +2718,7 @@ func TestDBSmoke_ColumnWidthMatchesConstant(t *testing.T) {
 			w.Table, w.Column, int(got.Int64), w.Const, expect)
 	}
 
-	t.Logf("✅ U7b 9 列宽全部 == truncate.go 常量（live ColumnWidths 读取，G-58 闭环）")
+	t.Logf("✅ U7b 10 列宽全部 == truncate.go 常量（live ColumnWidths 读取，G-58 闭环，G-55 audit_logs.resource 已对齐 #3/3）")
 }
 
 // TestDBSmoke_SyncAllFailureOmitsKeys U8（§6 / §7 M5 红点收口 / G-56 警示）

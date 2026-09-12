@@ -28,16 +28,17 @@ const (
 	colAlertHostName    = 255 // alerts.host_name（000013 追加）
 	colTicketTitle      = 255 // tickets.title
 	colMetricKey        = 100 // metric_snapshots.key
+	colAuditResource    = 50  // audit_logs.resource（M36 G-55：原值 100 与列宽 50 漂移；此处即权威源）
 )
 
-// ColumnWidths 把上面的 9 个常量打包成「table.column → 期望列宽」的映射，供跨包测试
+// ColumnWidths 把上面的 10 个常量打包成「table.column → 期望列宽」的映射，供跨包测试
 // （db_smoke_test.go 里的 U7b）实时读取。这是 G-58 的修：U7b 之前把字面量钉在断言里，
 // truncate.go 的常量若漂移（Go 常量漂、DDL 没漂）测试反而绿灯；现在走这张表，常量漂
 // 直接红。
 //
 // 表的列与顺序与上方 const 块一一对应（5 个 assets、2 个 alerts、tickets.title、
-// metric_snapshots.key）；这是 G-55 的教训 —— 字面量必须跟源常量绑死，而不能再
-// 复刻一份独立的「魔法数字」。
+// metric_snapshots.key、audit_logs.resource）；这是 G-55 的教训 —— 字面量必须跟源常量绑死，
+// 而不能再复刻一份独立的「魔法数字」。
 func ColumnWidths() map[string]int {
 	return map[string]int{
 		"assets.name":          colAssetName,
@@ -49,6 +50,7 @@ func ColumnWidths() map[string]int {
 		"alerts.host_name":     colAlertHostName,
 		"tickets.title":        colTicketTitle,
 		"metric_snapshots.key": colMetricKey,
+		"audit_logs.resource":  colAuditResource,
 	}
 }
 
