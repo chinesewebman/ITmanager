@@ -2653,7 +2653,7 @@ func TestDBSmoke_ThirdPartyFieldTruncation(t *testing.T) {
 		utf8.RuneCountInString(metricKey), limits["metric_snapshots.key"])
 }
 
-// TestDBSmoke_ColumnWidthMatchesConstant U7b（§6 / §7 M7a+M7b 红点收口）
+// TestDBSmoke_ColumnWidthMatchesConstant U7b（§6 / §7 M7a+M7b 红点收口 / G-58）
 //
 // 真 PG 的 information_schema 是 DDL 的真源 —— 与 truncate.go 的 9 个常量做精确比对：
 //
@@ -2665,32 +2665,45 @@ func TestDBSmoke_ThirdPartyFieldTruncation(t *testing.T) {
 // 失败判定：任一列宽与字面量不一致 → t.Errorf；U7a 已经有同义断言（gorm tag），U7b 是
 // 真库侧的二次确认。M7「常量偏大」、M7b「常量偏小」都能抓到。
 //
-// 字面量与 truncate.go 的 9 个常量一一对应；db_smoke_test.go 与 integration 跨包，
-// truncate.go 的常量是 unexported —— 把字面量钉死在断言里，每行都注明来源常量名，
-// 任一漂移此用例必先红。
+// G-58 修法：以前 Expect 字段直接写 255/100/500 字面量，仅在 Const 注释里挂常量名，
+// 改 truncate.go 的常量测试照样绿。M33 step 6 mutation report（ad47ef4）§M7b
+// 明确指此缺陷。现在 Expect 字段从 integration.ColumnWidths() 实时拿 ——
+// 常量漂测试必红，DDL 漂测试也必红，两侧都是真源。
 func TestDBSmoke_ColumnWidthMatchesConstant(t *testing.T) {
 	db := openSmokeDB(t)
 
-	// 列宽期望值（= truncate.go 的 9 个常量）。注释里写清对应常量名：常量漂移时此用例必红。
-	// 顺序与 §6 spec 一致：先 5 个 assets、再 2 个 alerts、再 tickets.title、最后 metric.key。
+	// 从 truncate.go 拉期望列宽（G-58：必须是 live 常量，不能再是字面量复刻）。
+	liveWidths := integration.ColumnWidths()
+
+	// 9 列显式列表 —— 只为「可读性 + 错误信息能指到具体常量名」。Expected 由 liveWidths
+	// 填，禁止在结构体里复刻魔法数字。顺序与 §6 spec 一致：先 5 个 assets、再 2 个 alerts、
+	// 再 tickets.title、最后 metric.key。漏写一列 → require.Len 即红；列错序无关紧要。
 	want := []struct {
 		Table  string
 		Column string
-		Expect int
 		Const  string
 	}{
-		{"assets", "name", 255, "colAssetName"},
-		{"assets", "brand", 100, "colAssetBrand"},
-		{"assets", "model", 100, "colAssetModel"},
-		{"assets", "sn", 100, "colAssetSN"},
-		{"assets", "site_name", 100, "colAssetSiteName"},
-		{"alerts", "trigger_name", 500, "colAlertTriggerName"},
-		{"alerts", "host_name", 255, "colAlertHostName"},
-		{"tickets", "title", 255, "colTicketTitle"},
-		{"metric_snapshots", "key", 100, "colMetricKey"},
+		{"assets", "name", "colAssetName"},
+		{"assets", "brand", "colAssetBrand"},
+		{"assets", "model", "colAssetModel"},
+		{"assets", "sn", "colAssetSN"},
+		{"assets", "site_name", "colAssetSiteName"},
+		{"alerts", "trigger_name", "colAlertTriggerName"},
+		{"alerts", "host_name", "colAlertHostName"},
+		{"tickets", "title", "colTicketTitle"},
+		{"metric_snapshots", "key", "colMetricKey"},
 	}
+	require.Len(t, want, len(liveWidths),
+		"want 表必须 9 行 == integration.ColumnWidths() 大小（新增/删除列需同步此处）")
 
+	// 把 table.column 拼回 key，再去 liveWidths 里查期望值 —— 这步是 G-58 的核心：
+	// 任何对 truncate.go 常量的改动都会流到这里、让 expected 跟着变，DDL 不动则断言红。
 	for _, w := range want {
+		key := w.Table + "." + w.Column
+		expect, ok := liveWidths[key]
+		require.True(t, ok,
+			"%s 在 integration.ColumnWidths() 里找不到 —— 表/列名拼错或常量表漏登记", key)
+
 		var got sql.NullInt64
 		require.NoError(t, db.Raw(
 			`SELECT character_maximum_length FROM information_schema.columns
@@ -2698,13 +2711,13 @@ func TestDBSmoke_ColumnWidthMatchesConstant(t *testing.T) {
 		).Scan(&got).Error, "查 %s.%s 列宽失败", w.Table, w.Column)
 		require.True(t, got.Valid,
 			"%s.%s 必须有 character_maximum_length —— 不应是 TEXT/未限", w.Table, w.Column)
-		assert.Equal(t, w.Expect, int(got.Int64),
-			"§7 M7/M7b 红点：%s.%s 的真实列宽(%d) ≠ truncate.go %s(%d) —— "+
+		assert.Equal(t, expect, int(got.Int64),
+			"§7 M7/M7b 红点 / G-58：%s.%s 的真实列宽(%d) ≠ truncate.go %s(%d) —— "+
 				"三者之一必漂：迁移 DDL、模型 tag、truncate.go 常量",
-			w.Table, w.Column, int(got.Int64), w.Const, w.Expect)
+			w.Table, w.Column, int(got.Int64), w.Const, expect)
 	}
 
-	t.Logf("✅ U7b 9 列宽全部 == truncate.go 常量")
+	t.Logf("✅ U7b 9 列宽全部 == truncate.go 常量（live ColumnWidths 读取，G-58 闭环）")
 }
 
 // TestDBSmoke_SyncAllFailureOmitsKeys U8（§6 / §7 M5 红点收口 / G-56 警示）
