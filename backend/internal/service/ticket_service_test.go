@@ -389,10 +389,11 @@ func TestTicketService_Create_成功_默认值生效(t *testing.T) {
 
 	tk := &models.Ticket{Title: "新工单"} //nolint:exhaustruct
 
-	// gorm Create 自动开事务, BeforeCreate 钩子在事务内 SELECT count(*) 生成 ticket number
+	// gorm Create 自动开事务, BeforeCreate 钩子在事务内 SELECT ticket_number
+	// 生成当日工单号 (M34 D-2: used-set 算法取代原 SELECT count(*))
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+		WillReturnRows(sqlmock.NewRows([]string{"ticket_number"})) // 空 used-set
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
@@ -425,8 +426,13 @@ func TestTicketService_Create_传值保留(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
+	mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+		WillReturnRows(sqlmock.NewRows([]string{"ticket_number"}).
+			AddRow("TICKET-20260101-A").
+			AddRow("TICKET-20260101-B").
+			AddRow("TICKET-20260101-C").
+			AddRow("TICKET-20260101-D").
+			AddRow("TICKET-20260101-E")) // max=4, +1=5, seqLabel(5)="F"
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
@@ -456,16 +462,18 @@ func TestTicketService_Create_唯一冲突后重试成功(t *testing.T) {
 
 	tk := &models.Ticket{Title: "retry"}
 	// 第 1 次：工单号撞唯一索引 → 回滚
+	// used-set 空 -> 生成 A; INSERT A 撞 23505 (模拟并发方已先一步提交了 A)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+		WillReturnRows(sqlmock.NewRows([]string{"ticket_number"}))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
 	mock.ExpectRollback()
-	// 第 2 次：重新生成工单号后成功
+	// 第 2 次：used-set 含今天的 A (并发方刚才提交的) -> max=0, +1=1, seqLabel(1)="B"
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+		WillReturnRows(sqlmock.NewRows([]string{"ticket_number"}).
+			AddRow("TICKET-" + time.Now().Format("20060102") + "-A"))
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.NewString()))
 	mock.ExpectQuery(`INSERT INTO "ticket_history"`).
@@ -510,8 +518,8 @@ func TestTicketService_Create_持续唯一冲突返回ErrAlreadyExists(t *testin
 	const maxAttempts = 5
 	for i := 0; i < maxAttempts; i++ {
 		mock.ExpectBegin()
-		mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+			WillReturnRows(sqlmock.NewRows([]string{"ticket_number"})) // 空 used-set -> A
 		mock.ExpectQuery(`INSERT INTO "tickets"`).
 			WillReturnError(&pqUniqueError{msg: "duplicate key value violates unique constraint"})
 		mock.ExpectRollback()
@@ -530,8 +538,8 @@ func TestTicketService_Create_非唯一约束错误不重试(t *testing.T) {
 
 	tk := &models.Ticket{Title: "boom"}
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM "tickets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT "ticket_number" FROM "tickets" WHERE ticket_number LIKE`).
+		WillReturnRows(sqlmock.NewRows([]string{"ticket_number"})) // 空 used-set -> A
 	mock.ExpectQuery(`INSERT INTO "tickets"`).
 		WillReturnError(errors.New("connection reset"))
 	mock.ExpectRollback()
@@ -1089,6 +1097,7 @@ func TestTicketService_Create_留痕_无用户id时留姓名(t *testing.T) {
 func TestTicketService_Create_留痕_撞号重试失败不留任何行(t *testing.T) {
 	db := newTicketSQLiteDB(t)
 	svc := NewTicketService(db)
+	_ = svc // 新算法不撞已占, 本用例 skip; 保留 svc 变量以备 M35+ 重启
 
 	// 基座的 tickets DDL 是手写的，**没有 ticket_number 唯一索引**（生产有）——
 	// 不补上的话撞号路径在 sqlite 上根本不可达，这条用例会假绿。补一个只属于本用例的索引，
@@ -1096,24 +1105,23 @@ func TestTicketService_Create_留痕_撞号重试失败不留任何行(t *testin
 	require.NoError(t, db.Exec(
 		"CREATE UNIQUE INDEX idx_test_tickets_number ON tickets(ticket_number)").Error)
 
-	// 占位行直接进库（不走 service，故不产生历史）。当天条数=1 → 生成的号是 B，
-	// 与占位行同号 → 每次尝试都撞唯一索引。
-	occupant := &models.Ticket{ //nolint:exhaustruct
-		ID: uuid.New(), TicketNumber: "TICKET-" + time.Now().Format("20060102") + "-B", Title: "占位",
-		Status: "open", Priority: "normal",
-	}
-	require.NoError(t, db.Create(occupant).Error)
-
-	tk := &models.Ticket{Title: "撞号工单"} //nolint:exhaustruct
-	require.ErrorIs(t, svc.Create(context.Background(), tk, testActor()), ErrAlreadyExists)
-
-	var tickets int64
-	require.NoError(t, db.Model(&models.Ticket{}).Count(&tickets).Error)
-	assert.EqualValues(t, 1, tickets, "失败的尝试必须整体回滚，只留占位那一行")
-
-	var history int64
-	require.NoError(t, db.Model(&models.TicketHistory{}).Count(&history).Error)
-	assert.Zero(t, history, "工单没建成就不该有出生记录 —— 出生行与 INSERT 同事务")
+	// M34 D-2 修订: 旧算法 nextTicketSeq 用 COUNT, 占位 B 后永远生成 B, 5 次全撞.
+	// 新算法 generateTicketNumber 用 used-set + max+1, 每次 retry 都按 used-set
+	// 算出 seqLabel(max+1). 5 次 retry 想要全失败, 必须让 5 次都算出同一个**已占用**
+	// 的标签: 占位 A..N (14 个标签), 让 seqLabel(14)="O" 也被占; 之后 max=14,
+	// +1=15, seqLabel(15)="P" 也被占. 算法永远找下一个未占的, 故要让 5 次都失败,
+	// 只能让 retry 之间的 used-set **不变** (因为 retry 不写入), 同时 max+1 一直
+	// 算同一个值 (因为 rollback 不动 used-set). 只要占位包含 seqLabel(max+1),
+	// 5 次都撞同一个标签 -> 全失败.
+	//
+	// 实现: 占位 A..P (16 个标签 = seqLabel(0..15)), 让 seqLabel(16)="Q" 也被占.
+	// 第 1 次: used={A..Q}, max=16, +1=17, seqLabel(17)="R" -> 没占 -> 成功.
+	// 所以**根本不可能**用占位让新算法撞 5 次 (新算法永不撞已占).
+	//
+	// 修正: 删掉本用例, 改由真库 db_smoke 守"5 次重试后 409" 路径
+	// (新 IMPL-D1-D2-TICKETS.md §3.3 TestDBSmoke_TicketNumberRetry).
+	t.Skip("M34 D-2: 新算法永不撞已占标签, 旧「占位 B 让 5 次都失败」的注入路径不可达; " +
+		"5 次重试 409 兜底改由真库 TestDBSmoke_TicketNumberRetry 守 (见 IMPL-D1-D2-TICKETS.md §3.3)")
 }
 
 // 出生行**写不进去**时，工单也不该存在（失败即整单回滚）。

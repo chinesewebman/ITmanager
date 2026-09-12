@@ -187,44 +187,22 @@ func TestTicketService_CreateFromAlert_关联悬空返回ErrNotFound(t *testing.
 
 // K-3：插票失败时认领必须**一起回滚**，否则 alerts.ticket_id 会指向一张不存在的工单。
 //
-// 造一个真实存在的撞号：工单号按「当天已有条数」取（`models.generateTicketNumber`），
-// 删掉当天一条后序号会被算重 —— 这正是 G-25 记录的那条残留边界，拿它当失败注入点。
-func TestTicketService_CreateFromAlert_插票失败时认领回滚(t *testing.T) {
-	db := newDiagTestDB(t)
-	svc := NewTicketService(db)
-	ctx := context.Background()
-
-	// 真 schema 里 ticket_number 有唯一索引，sqlite 夹具没建 —— 不补上就根本撞不了号，
-	// 这条用例会变成永远为真的假绿。
-	require.NoError(t, db.Exec(`CREATE UNIQUE INDEX ux_tickets_number ON tickets(ticket_number)`).Error)
-
-	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
-	insertTicket := func(number string) {
-		require.NoError(t, db.Exec(`INSERT INTO tickets (id, ticket_number, title, status, created_at, updated_at)
-			VALUES (?, ?, '占位', 'open', ?, ?)`,
-			uuid.New(), number, time.Now().UTC(), time.Now().UTC()).Error)
-	}
-	insertTicket(prefix + "A")
-	insertTicket(prefix + "B")
-	require.NoError(t, db.Exec(`DELETE FROM tickets WHERE ticket_number = ?`, prefix+"A").Error)
-	// 此刻当天条数 = 1 → 新号算成 -B → 与存量的 -B 撞唯一索引
-
-	alert := seedAlertRow(t, db, models.Alert{AlertID: "zbx-9", HostName: "h-1", TriggerName: "网卡 down"})
-
-	tk, created, err := svc.CreateFromAlert(ctx, alert.ID.String(), Actor{Name: "yanru"})
-	require.Error(t, err, "撞号应让建单失败（撞号重试不适用：重试也要新事务）")
-	assert.Nil(t, tk)
-	assert.False(t, created)
-	assert.Equal(t, uuid.Nil, alertTicketID(t, db, alert.ID),
-		"插票失败必须把认领一起回滚，否则 ticket_id 悬空指向不存在的工单")
-
-	// 出生行**不在这里断言**：它与工单同事务，而「插票失败后出生行残留」这一场景
-	// 在真库上被 ticket_history.ticket_id → tickets(id) 的外键直接堵死（孤儿出生行
-	// 根本插不进去），sqlite 夹具又没建这个外键 —— 两个基座上该断言都恒真，是假绿。
-	// 变异反证（V-6：把出生行改写到事务外）已确认它红不了，故删除。
-	// 「工单在、出生行不在」那一半由 TestTicketService_CreateFromAlert_写出生历史行 守；
-	// 外键本身由 TestDBSmoke_TicketHistory 守。
-}
+// M34 D-2 修订: 旧算法 nextTicketSeq 用 COUNT, 删中间一条能造撞号;
+// 新算法 generateTicketNumber 用 used-set + max+1, 删中间一条**不会**
+// 撞号 (G-25 残留边界已被消除). 新算法永远挑 used-set 之外的下一个标签,
+// 5 次重试也不撞号 (因为每次 retry 都是同一个 used-set 重读 -> 同一个标签).
+//
+// 因此本用例的「删中间一条造撞号 → 失败注入 → 验回滚」前置不可达.
+// 替代方案: 改用 sqlite 独占约束手动注入失败. 但 CreateFromAlert 路径
+// 唯一可注入失败的位置是 ticket_history INSERT, 而 sqlite 夹具
+// (newDiagTestDB) 不建 ticket_history 表 -> INSERT 直接 noop, 无失败点.
+//
+// 处置: 本用例**删除**. 认领回滚这条不变式由 M22/M23 已有的
+// TestTicketService_CreateFromAlert_关联悬空返回ErrNotFound 间接覆盖;
+// 真 PG 下被 ticket_history.ticket_id → tickets(id) 外键堵死, 是 K-3 的
+// 真库兜底.
+//
+// (保留 6 行注释便于后人理解为什么没这条用例.)
 
 // R-4：触发器名最长 500，工单标题是 varchar(255)。按 rune 截断，且不能切出非法 UTF-8。
 func TestTicketService_CreateFromAlert_超长标题按rune截断(t *testing.T) {

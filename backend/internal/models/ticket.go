@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,15 +117,57 @@ func usedTicketLabels(db *gorm.DB, prefix string) map[string]struct{} {
 
 // generateTicketNumber 生成工单号 TICKET-YYYYMMDD-<序号>，只用于**逐条** Create。
 //
-// 序号 = 当天已建工单数，转成 A…Z / AA / AB… 的进位标签（原实现用全表 Count()%26，
-// 同一天第 27 张会与第 1 张同号，撞 ticket_number 唯一索引，见缺陷 D-2）。
-// 并发下仍可能算出同一个号 —— 由唯一索引兜底 + TicketService.Create 的冲突重试处理。
+// 算法 (M34 D-2):
+//  1. 拉当日已占用的所有 ticket_number (used-set, 见 usedTicketLabels)
+//  2. 抽末段 seqLabel 反解成数值 (parseSeqSuffix, A=0, Z=25, AA=26, …)
+//  3. 找最大编号 max, 返回 prefix + seqLabel(max+1)
 //
-// ⚠️ 批量插入（CreateInBatches）**不能**走这里，必须先用 AssignTicketNumbers 预分配，
-// 否则整批同号（见该函数注释）。
+// 为什么不用 "条数" 而是 "最大编号":
+//
+//	旧实现 nextTicketSeq = COUNT(*), 假设编号连续无空洞. 但跨日切换、
+//	手工 SQL 硬删除中间一条、或 M26 引入的 ON CONFLICT DoNothing 预分配
+//	跳号都会形成空洞;COUNT 法会回绕撞已占用的号. "最大编号 + 1" 法对
+//	空洞免疫,与 AssignTicketNumbers (批量路径) 的 used-set 算法同型.
+//
+// 并发安全: 不在 generateTicketNumber 里 FOR UPDATE (单条 INSERT 前没有目标行
+// 可锁). 由 TicketService.Create 的 5 次重试 + ticket_number 唯一索引兜底
+// (见 ticket_service.go:222-252). 重试时外层事务回滚 -> used-set 重读 ->
+// 自然算出新号.
+//
+// ⚠️ 批量插入仍必须走 AssignTicketNumbers, 见其注释.
 func generateTicketNumber(db *gorm.DB) string {
 	prefix := ticketNumberPrefix()
-	return prefix + seqLabel(nextTicketSeq(db, prefix))
+	used := usedTicketLabels(db, prefix)
+	max := int64(-1)
+	for n := range used {
+		if v, ok := parseSeqSuffix(n, prefix); ok && v > max {
+			max = v
+		}
+	}
+	return prefix + seqLabel(max+1)
+}
+
+// parseSeqSuffix 从 "TICKET-20260912-A" 抽出末段字母标签对应的数值 (A=0, Z=25, AA=26, …).
+// 非法 / 旧格式 / 非 seqLabel 末段 返回 false; 非法不参与 max 比较, 当作空洞处理.
+// 这意味着: 手工 SQL 写入的异常号 (如 "TICKET-...A1" 或前缀外) 不会阻塞当日新号生成,
+// 只损失极小序号空间 (那一天后续号从 max+1 开始, 不复用异常号).
+func parseSeqSuffix(s, prefix string) (int64, bool) {
+	if !strings.HasPrefix(s, prefix) {
+		return 0, false
+	}
+	label := s[len(prefix):]
+	if label == "" {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if c < 'A' || c > 'Z' {
+			return 0, false
+		}
+		n = n*26 + int64(c-'A'+1)
+	}
+	return n - 1, true // A=0, Z=25, AA=26
 }
 
 // ticketNumberPrefix 当天的工单号前缀：TICKET-YYYYMMDD-。

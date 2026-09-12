@@ -12,7 +12,7 @@
 --
 -- 原则 (见 docs/FIX-PLAN-D1-D2-TICKETS.md §2.1):
 --   1. 非破坏 (不 DROP 任何已有列)
---   2. 幂等 (所有 DDL 都用 IF NOT EXISTS / DO $$ 守卫)
+--   2. 幂等 (所有 DDL 都用 IF NOT EXISTS / DO <dollar-dollar> 守卫)
 --   3. 不动 ticket_number 唯一索引 (000013 的 idx_tickets_ticket_number 已生效)
 
 -- A. 列存在性确认 (ADD COLUMN IF NOT EXISTS = noop)
