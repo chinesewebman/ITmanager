@@ -40,6 +40,9 @@ DB_NAME="${SMOKE_DB_NAME:-itmanager_smoke}"
 DB_USER="${SMOKE_DB_USER:-postgres}"
 DB_PASS="${SMOKE_DB_PASS:-smoke_pw}"
 CONTAINER="itmanager-dbsmoke-$$"
+# DOCKER override: 在 docker group 缺权限的环境(NAS 上 webman 默认)里,
+# 设 DOCKER="sudo -n docker" 走 sudoer 的 NOPASSWD:ALL;否则留空走系统 PATH 的 docker。
+DOCKER="${DOCKER:-}"
 
 log()  { printf '[db_smoke] %s\n' "$*"; }
 fail() { printf '[db_smoke][FAIL] %s\n' "$*" >&2; }
@@ -71,7 +74,7 @@ fi
 # ---- 退出清理 ----
 cleanup() {
   if [[ -n "${CONTAINER:-}" ]]; then
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    ${DOCKER:-docker} rm -f "$CONTAINER" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -84,22 +87,22 @@ if [[ "$EXTERNAL" -eq 1 ]]; then
   createdb_q() { PGPASSWORD="$DB_PASS" createdb -h "$SMOKE_PG_HOST" -p "$HOST_PORT" -U "$DB_USER" "$@"; }
 else
   log "镜像: $IMAGE | 容器: $CONTAINER | 库: $DB_NAME"
-  docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+  ${DOCKER:-docker} image inspect "$IMAGE" >/dev/null 2>&1 || {
     fail "本地没有镜像 $IMAGE (本脚本不做 pull; 可设 SMOKE_PG_IMAGE 指定已有镜像)"
     exit 1
   }
   log "启动临时 Postgres 容器..."
-  docker run -d --name "$CONTAINER" \
+  ${DOCKER:-docker} run -d --name "$CONTAINER" \
     -e POSTGRES_PASSWORD="$DB_PASS" \
     -e POSTGRES_DB="$DB_NAME" \
     -p 127.0.0.1::5432 \
     "$IMAGE" >/dev/null
 
-  HOST_PORT="$(docker port "$CONTAINER" 5432/tcp | head -n1 | sed 's/.*://')"
+  HOST_PORT="$(${DOCKER:-docker} port "$CONTAINER" 5432/tcp | head -n1 | sed 's/.*://')"
   [[ -n "$HOST_PORT" ]] || { fail "无法获取容器映射端口"; exit 1; }
   log "容器已起, 宿主端口: $HOST_PORT"
-  psql_q()     { docker exec -i "$CONTAINER" psql     -v ON_ERROR_STOP=1 -q -U "$DB_USER" "$@"; }
-  createdb_q() { docker exec    "$CONTAINER" createdb -U "$DB_USER" "$@"; }
+  psql_q()     { ${DOCKER:-docker} exec -i "$CONTAINER" psql     -v ON_ERROR_STOP=1 -q -U "$DB_USER" "$@"; }
+  createdb_q() { ${DOCKER:-docker} exec    "$CONTAINER" createdb -U "$DB_USER" "$@"; }
 fi
 
 # ---- 2. 等库 ready ----
@@ -114,7 +117,7 @@ done
 if [[ "$ready" -ne 1 ]]; then
   fail "Postgres 60s 内未就绪"
   if [[ "$EXTERNAL" -eq 0 ]]; then
-    docker logs --tail 40 "$CONTAINER" >&2 || true
+    ${DOCKER:-docker} logs --tail 40 "$CONTAINER" >&2 || true
   fi
   exit 1
 fi
