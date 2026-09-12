@@ -201,3 +201,26 @@ func StripControl(s string) string {
 		return r
 	}, s)
 }
+
+// TruncateRunes 按**字符**截断到 max，并报告是否真的截断了。
+//
+// 为什么按 rune 不按 byte：PostgreSQL 的 varchar(n) 数的是**字符**（实测 255 个
+// 汉字 = 765 字节可入库、256 个被拒；255 个 emoji char_length=255 / octet_length=1020），
+// 而按 byte 切会把多字节字符拦腰切断，得到非法 UTF-8 → PG 报 22021，等于把「超长」
+// 换成了「编码非法」，故障照旧。见 docs/FIX-PLAN-TRUNCATION.md F4/R1。
+//
+// max <= 0 原样返回：列宽常量写错时宁可让 DB 报错，也不静默把字段抹成空串。
+//
+// 快路：字节数 ≤ max ⇒ 字符数必 ≤ max（UTF-8 每个 rune 至少 1 字节），省一次 []rune
+// 分配。注意该快路对**非法 UTF-8** 也走「原样返回」——本函数不做归一化，调用方要么
+// 先经 StripControl（真实管线如此），要么自行保证输入合法。
+func TruncateRunes(s string, max int) (string, bool) {
+	if max <= 0 || len(s) <= max {
+		return s, false
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s, false
+	}
+	return string(r[:max]), true
+}

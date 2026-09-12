@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -502,4 +503,63 @@ func TestStripControl_必须先Strip再Text(t *testing.T) {
 			assert.NotEqual(t, right, wrong, "两种顺序结果不同即证明顺序是语义的一部分")
 		})
 	}
+}
+
+// ==================== TruncateRunes ====================
+
+// 注意断言对象是**管线形态** TruncateRunes(StripControl(src), max)，不是裸 TruncateRunes：
+// 裸函数对非法 UTF-8 会走快路原样返回（见 TestTruncateRunes_非法UTF8原样返回不做归一化），
+// 此时「输出必须合法 UTF-8」并不成立。
+func TestTruncateRunes_按字符截断且输出合法UTF8(t *testing.T) {
+	zh255 := strings.Repeat("中", 255)
+	zh256 := strings.Repeat("中", 256)
+	emoji255 := strings.Repeat("😀", 255)
+	emoji256 := strings.Repeat("😀", 256)
+
+	cases := []struct {
+		name    string
+		in      string
+		max     int
+		want    string
+		wantHit bool
+	}{
+		{"空串", "", 10, "", false},
+		{"短于上限", "abc", 10, "abc", false},
+		{"正好等于上限", "abc", 3, "abc", false},
+		{"超一个字符", "abcd", 3, "abc", true},
+		{"大幅超长", "abcdefg", 3, "abc", true},
+		{"中文 255 正好等于上限", zh255, 255, zh255, false},
+		{"中文 256 超一个字符", zh256, 255, zh255, true},
+		{"emoji 255 正好等于上限", emoji255, 255, emoji255, false},
+		{"emoji 256 超一个字符", emoji256, 255, emoji255, true},
+		{"max 为 0 原样返回", "abcdef", 0, "abcdef", false},
+		{"max 为负原样返回", "abcdef", -1, "abcdef", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, hit := TruncateRunes(StripControl(c.in), c.max)
+			assert.Equal(t, c.wantHit, hit)
+
+			// 输出必须合法 UTF-8 —— 按 byte 切会在 emoji 夹具上切出半个字符。
+			assert.True(t, utf8.ValidString(got), "输出必须是合法 UTF-8")
+
+			// 这条是抓「按 byte 截断」的主力：中文 256 → s[:255] 恰好是 85 个完整汉字，
+			// 字节切法在这里**仍是合法 UTF-8**，只有 rune 计数能戳穿它。
+			wantRunes := utf8.RuneCountInString(c.in)
+			if c.max > 0 && wantRunes > c.max {
+				wantRunes = c.max
+			}
+			assert.Equal(t, wantRunes, utf8.RuneCountInString(got), "字符数必须精确")
+		})
+	}
+}
+
+// 钉住快路的契约：本函数**不做归一化**，非法 UTF-8 在「字节数 ≤ max」时原样返回。
+// 若哪天这里变成 U+FFFD 替换，说明有人给快路加了归一化，需同步复核调用方是否仍先经
+// StripControl（那是真实管线里保证合法 UTF-8 的那一环）。
+func TestTruncateRunes_非法UTF8原样返回不做归一化(t *testing.T) {
+	got, hit := TruncateRunes("\xff\xfe", 10)
+	assert.False(t, hit)
+	assert.Equal(t, "\xff\xfe", got)
+	assert.False(t, utf8.ValidString(got), "快路不保证合法 UTF-8 —— 这正是调用方要先 StripControl 的原因")
 }
