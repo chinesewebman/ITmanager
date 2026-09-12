@@ -19,7 +19,7 @@ import (
 // 改列宽的迁移必须同步改另外两处，否则守卫红。G-55 就是「第三处常量（audit 的 100）
 // 大于真实列宽 50」漂了几轮没人发现 —— 所以这里的每个常量都必须有守卫。
 const (
-	colAssetName        = 255 // assets.asset_name
+	colAssetName        = 255 // assets.name
 	colAssetBrand       = 100 // assets.brand
 	colAssetModel       = 100 // assets.model
 	colAssetSN          = 100 // assets.sn
@@ -29,6 +29,28 @@ const (
 	colTicketTitle      = 255 // tickets.title
 	colMetricKey        = 100 // metric_snapshots.key
 )
+
+// ColumnWidths 把上面的 9 个常量打包成「table.column → 期望列宽」的映射，供跨包测试
+// （db_smoke_test.go 里的 U7b）实时读取。这是 G-58 的修：U7b 之前把字面量钉在断言里，
+// truncate.go 的常量若漂移（Go 常量漂、DDL 没漂）测试反而绿灯；现在走这张表，常量漂
+// 直接红。
+//
+// 表的列与顺序与上方 const 块一一对应（5 个 assets、2 个 alerts、tickets.title、
+// metric_snapshots.key）；这是 G-55 的教训 —— 字面量必须跟源常量绑死，而不能再
+// 复刻一份独立的「魔法数字」。
+func ColumnWidths() map[string]int {
+	return map[string]int{
+		"assets.name":          colAssetName,
+		"assets.brand":         colAssetBrand,
+		"assets.model":         colAssetModel,
+		"assets.sn":            colAssetSN,
+		"assets.site_name":     colAssetSiteName,
+		"alerts.trigger_name":  colAlertTriggerName,
+		"alerts.host_name":     colAlertHostName,
+		"tickets.title":        colTicketTitle,
+		"metric_snapshots.key": colMetricKey,
+	}
+}
 
 // sanitizeText 第三方字符串 → TEXT 列：只剥控制字符，**不截断**。
 //
