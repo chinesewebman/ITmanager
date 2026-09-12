@@ -20,17 +20,16 @@
 //     蔓延到 worker 的多个 goroutine。
 //
 // 同步语义要点（sync.Map 后端）：
-//   - LoadOrStore：原子地「load 已有值, 或写入 sentinel」—— 拿它做「是否首次见到 key」判定。
-//     该方法保证「第一次见 key 时 loaded=false, 后续都 loaded=true」。
-//   - Store：覆盖写；用于拿到首次窗口后写真正时间，原子性强；
-//     也用于「窗口外覆写」路径, 配合 Load 读取后判断。
-//   - CompareAndSwap：原子地「值 = expect 才替换」—— 用于并发覆盖的边界判断。
+//   - LoadOrStore(now)：原子地「load 已有值, 或写入 now」—— 拿到「是否首次见 key」
+//     的同时, 首次见直接写入 now, 不用二次 Store。这把 first-hit 的「load-then-store
+//     之间存在 TOCTOU」问题彻底消掉。
+//   - CompareAndSwap：原子地「actual = expect 才 swap 成 now」—— 用于窗口外的覆写,
+//     避免多个并发在窗口外互相覆盖时让两条 hit 都「first-time」。
 //   - Range：遍历所有 key (回收 expired key 用)。
 //
 // 安全边界：
 //   - key 由 trigger_id 拼 problem_start unix 字符串形成, 拼操作在这里集中, 不扩散；
 //   - Allow 顺手清 60s+ 的 key — 不会无限增长。
-//   - sync.Map 适合「键写一次后多次读」的负载, 完美契合 60s 内的读多写少场景。
 
 package notification
 
@@ -46,11 +45,10 @@ const dedupWindow = 60 * time.Second
 // Deduper 单实例轻量级去重器（sync.Map 后端）。
 //
 // 状态机语义：
-//   - 第一次见 key → LoadOrStore 返回 sentinel + loaded=false → 写真正的 now → return true
-//   - 60s 内再见同 key → loaded=true, actual 未过期 → return false (drop)
-//   - 60s 后再见同 key → loaded=true, actual 过期 → 用 LoadOrStore(now) 覆写 (并发下
-//     别人可能也写 newnow; 自己的「now」是 valid 的事实, 写一次就是 valid 的, 不需要 CAS)
-//     → return true
+//   - 第一次见 key → LoadOrStore(now) 返回 (now, loaded=false) → return true
+//   - 60s 内再见同 key → LoadOrStore(now) 返回 (oldTime, loaded=true), oldTime 未过期 → return false
+//   - 60s 后再见同 key → LoadOrStore(now) 返回 (oldTime, loaded=true), oldTime 过期 →
+//     CompareAndSwap(oldTime, now) 覆写 → return true；CAS 失败重试一次
 type Deduper struct {
 	m    sync.Map // key=string, value=time.Time
 	now  func() time.Time
@@ -80,39 +78,45 @@ func FireKey(triggerID string, problemStartUnix int64) string {
 }
 
 // Allow returns true if (trigger_id+problem_start) is the FIRST hit inside the
-// dedup window, false if dedup hit (drop).
+// dedup window, false if dedup hit (drop)。
 //
 // 行为细分：
 //   - 60s 内同 key：第二次起拒绝 → sender.Send 不发起
 //   - 60s 后同 key：视为新事件 → 允许 + 重置时间戳
-//   - 并发：sync.Map.LoadOrStore 原子地「load 已有值, 或写入 sentinel」, 在并发下同一
+//   - 并发：sync.Map.LoadOrStore 原子地「load 已有值, 或写入 now」, 在并发下同一
 //     key 也只让一个 goroutine 走「first-time」分支。
 //
-// 为什么 LoadOrStore 不是 Store + Load：两操作之间存在 TOCTOU——两个 goroutine 同时
-// Load 看到 "key 不存在" 都 Store 写自己的时间，结果两个都「first-time」。LoadOrStore
-// 把 "load 或 store" 合并为单步，第二次 LoadOrStore 一定看到第一次的写入 → 走
-// 「actual 已存在」分支 → 判断窗口期 → 拒绝。
+// 为什么不先 Load 再 Store：两操作之间存在 TOCTOU——两个 goroutine 同时 Load 看到
+// "key 不存在" 都 Store 写自己的时间，结果两个都「first-time」。LoadOrStore 把
+// "load 或 store" 合并为单步，第二次 LoadOrStore 一定看到第一次的写入 → 走
+// 「actual 已存在」分支 → 判断窗口期。
+//
+// 窗口外为什么不直接 Store：跟 first-time 同样的原因——窗口外两个并发同时
+// 判断 "actual 过期", 都 Store(now) 会让两个 hit 都算 first。改成 CompareAndSwap
+// 把「actual 还是旧值我才覆盖」原子化，第一个 CAS 成功 → 唯一 first。
 func (d *Deduper) Allow(key string) bool {
 	now := d.now()
-	sentinel := time.Time{} // 零值是 LoadOrStore 的"占位写入"
-	actualAny, loaded := d.m.LoadOrStore(key, sentinel)
+	// first-time 路径：LoadOrStore 直接写 now, 拿到 (now, false) 一定是首次
+	actualAny, loaded := d.m.LoadOrStore(key, now)
 	if !loaded {
-		// 第一个见这个 key 的 goroutine —— 写真正的 now
-		d.m.Store(key, now)
 		d.gcExpired(now)
 		return true
 	}
-	// key 已存在
+	// key 已存在 — actualAny 是当前 stored 值
 	actual := actualAny.(time.Time)
 	if now.Sub(actual) < d.life {
 		return false // 窗口内 → 去重
 	}
-	// 窗口外：覆写时间戳。我们刚做的判断「now - actual >= life」是 valid 的事实，
-	// 写一次 now 就是 valid 的新一次，去不去重由别人的「now - my_now」判断 ——
-	// 即使被别的并发抢先写 newnow，他们的 my_now 比 actual 新（窗口外），下一次仍
-	// 走「actual = my_now」再走窗口期判断, 不出现假绿。
-	d.m.Store(key, now)
-	return true
+	// 窗口外：CAS 覆写, 把"actual 还是旧值"作为原子条件
+	if d.m.CompareAndSwap(key, actual, now) {
+		// 我们这次是窗口外首次命中, 同时清一波过期键
+		d.gcExpired(now)
+		return true
+	}
+	// CAS 失败 — 别的 goroutine 已覆写 actual 到 newActual;
+	// 它的覆盖基于它的 now, 它的窗口期判断与本 goroutine 独立 (它的「actual - oldActual」
+	// 在它眼里也是「窗口外」), 所以我们这次不算 first, 应该 drop
+	return false
 }
 
 // gcExpired 回收 expired 键（与 Allow 同进程，用 now 注入测试用）
