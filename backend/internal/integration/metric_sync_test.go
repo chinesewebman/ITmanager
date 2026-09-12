@@ -354,3 +354,91 @@ func TestMetricSyncWorker_CtxCancel(t *testing.T) {
 	cancel()
 	w.Stop() // ctx cancel + Stop 双重保护，wg.Wait 应立即返
 }
+
+// ==================== M34-G59：tick 日志守卫（M11 mutation inverse） ====================
+//
+// 以下两个测试覆盖 metric_sync.go:112 (tick error) 和 :118 (tick ok) 的 log.Printf 调用。
+// 这是 M33 mutation-inversion 报告（ad47ef4）§M11 标记的"log.Printf → no-op" un-catchable gap。
+// 把 log.Printf 替换成 `_, _, _ = ...`（既不打印也不写 DB）会编译通过但跑出 NO log output，
+// 从而这两个测试变红——反向证明 M11 已被锁定。
+//
+// 注意：worker run() 仅在 ft>0 时打 "tick ok" 行；为了在 sqlite 下稳定触发该路径，
+// 测试用超长 key (≥101 字符) 触发 colMetricKey 截断。
+
+// TestMetricSyncWorker_TickOkLogWritten — stub Zabbix 返 N writes + 长 key 触发 ft>0，
+// captureLog 收集 worker tick 输出，断言 "tick ok: written=N, field_truncations=" 出现。
+func TestMetricSyncWorker_TickOkLogWritten(t *testing.T) {
+	db := initSchema(t)
+	a1 := models.Asset{ID: uuid.New(), Name: "host-01"}
+	if err := db.Create(&a1).Error; err != nil {
+		t.Fatalf("create a1: %v", err)
+	}
+
+	// 长 key 故意超过 colMetricKey=100，确保 fc.count() >= 1 → worker 打 "tick ok" 日志
+	longKey := "cpu.user." + strings.Repeat("x", 120)
+	fz := newFakeZabbix([]Item{
+		{ItemID: "i1", Key: longKey, LastValue: "45.2",
+			Hosts: []Host{{HostID: "h1", Host: "host-01"}}},
+		{ItemID: "i2", Key: "mem.used", LastValue: "1024",
+			Hosts: []Host{{HostID: "h1", Host: "host-01"}}},
+	})
+	z, cleanup := newZabbixWithFake(t, fz)
+	defer cleanup()
+
+	svc := NewIntegrationService(&config.Config{}, nil)
+	svc.zabbix = z
+
+	w := NewMetricSyncWorker(svc, db, MetricSyncConfig{Tick: 50 * time.Millisecond})
+
+	out := captureLog(t, func() {
+		w.Start(context.Background())
+		// 等 ≥1 个 tick；250ms 留足 50ms tick + goroutine 调度余量
+		time.Sleep(250 * time.Millisecond)
+		w.Stop()
+	})
+
+	if !strings.Contains(out, "[zabbix metric sync] tick ok: written=") {
+		t.Fatalf("expected tick ok line in log; got: %q", out)
+	}
+	if !strings.Contains(out, "field_truncations=") {
+		t.Fatalf("expected field_truncations= key in log; got: %q", out)
+	}
+}
+
+// TestMetricSyncWorker_TickErrorLogWritten — httptest server 立即关闭，URL 指向 closed port，
+// 下次 tick 必 connect refused。断言 "tick error: " + 错误子串出现。
+func TestMetricSyncWorker_TickErrorLogWritten(t *testing.T) {
+	db := initSchema(t)
+	a1 := models.Asset{ID: uuid.New(), Name: "host-01"}
+	if err := db.Create(&a1).Error; err != nil {
+		t.Fatalf("create a1: %v", err)
+	}
+
+	// 起 server 立刻关 → URL 仍然指向一个 closed port，sync 时 connect refused
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close() // 立即关，制造 "connection refused"
+
+	cfg := &config.ZabbixConfig{URL: deadURL, User: "Admin", Password: "zabbix"}
+	z := NewZabbixClient(cfg, nil)
+
+	svc := NewIntegrationService(&config.Config{}, nil)
+	svc.zabbix = z
+
+	w := NewMetricSyncWorker(svc, db, MetricSyncConfig{Tick: 50 * time.Millisecond})
+
+	out := captureLog(t, func() {
+		w.Start(context.Background())
+		time.Sleep(250 * time.Millisecond)
+		w.Stop()
+	})
+
+	if !strings.Contains(out, "[zabbix metric sync] tick error:") {
+		t.Fatalf("expected tick error line in log; got: %q", out)
+	}
+	// Zabbix HTTP 客户端对 closed port 报的可能是 "connection refused" 或类似 EOF/connect 错误
+	low := strings.ToLower(out)
+	if !strings.Contains(low, "refused") && !strings.Contains(low, "connect") && !strings.Contains(low, "eof") {
+		t.Fatalf("expected connect/refused/eof substring in log; got: %q", out)
+	}
+}
