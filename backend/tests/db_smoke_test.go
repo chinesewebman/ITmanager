@@ -2766,3 +2766,158 @@ func TestDBSmoke_SyncAllFailureOmitsKeys(t *testing.T) {
 
 	t.Logf("✅ U8 SyncAll 失败分支结果集干净：results=%v err=%v", results, err)
 }
+
+// ============================================================
+// M34 D-1 + D-2: tickets 表 schema 对齐 + 工单号生成器回归
+// ============================================================
+
+// TestDBSmoke_TicketsSchemaRoundTrip 用 24 个模型字段全开 insert 一张 ticket,
+// 验证 000028 后迁移 DDL 与 GORM 模型无漂移 (M34 D-1 工单子集二次审查)。
+//
+// 与 TestDBSmoke_TicketInsert 的区别: 后者只插 4 列 (Title/TicketType/Priority/Status),
+// 漂移可能藏在其余 20 列里; 本用例把全部 24 列写满, 任何一列 NULL/NOT NULL/类型
+// 错位都会被 PG 当场拒绝, 暴露漂移。
+//
+// 前置: 路径 ① 全新库, 迁移 1..28 已应用, ticket_number 唯一索引在位。
+func TestDBSmoke_TicketsSchemaRoundTrip(t *testing.T) {
+	db := openSmokeDB(t)
+
+	now := time.Now().UTC()
+	resolved := now.Add(-time.Hour)
+	closed := now.Add(-30 * time.Minute)
+	due := now.Add(24 * time.Hour)
+	tk := models.Ticket{
+		ID:             uuid.New(),
+		TicketNumber:   "TICKET-M34-RT-001", // 显式给号, 跳过 BeforeCreate 自动生成
+		Title:          "schema round-trip smoke (M34 D-1)",
+		Description:    "covers all 24 model fields",
+		TicketType:     "incident",
+		Priority:       "normal",
+		Status:         "resolved",
+		RequesterID:    nil, // 可空
+		RequesterName:  "smoke-requester",
+		RequesterEmail: "smoke@example.com",
+		AssigneeID:     nil,
+		AssigneeName:   "ops",
+		Category:       "smoke",
+		Tags:           `["smoke","roundtrip","m34"]`,
+		AssetID:        nil,
+		AssetName:      "asset-smoke",
+		ExternalID:     "M34-EXT-001",
+		Source:         "manual",
+		Resolution:     "fixed",
+		ResolvedAt:     &resolved,
+		ClosedAt:       &closed,
+		DueDate:        &due,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, db.Create(&tk).Error, "24 字段 insert 漂移 (D-1 tickets 子集)")
+
+	var got models.Ticket
+	require.NoError(t, db.First(&got, "id = ?", tk.ID).Error)
+	assert.Equal(t, "TICKET-M34-RT-001", got.TicketNumber, "ticket_number 写回不一致")
+	assert.Equal(t, "resolved", got.Status, "status 写回不一致")
+	// tags 是 jsonb 列, PG 写入时重排空白 (["a","b"] -> ["a", "b"]);
+	// 比较时按 JSON 值等价 (反序列化后比较), 不按字面字符串。
+	var wantTags, gotTags []string
+	require.NoError(t, json.Unmarshal([]byte(`["smoke","roundtrip","m34"]`), &wantTags))
+	require.NoError(t, json.Unmarshal([]byte(got.Tags), &gotTags))
+	assert.Equal(t, wantTags, gotTags, "tags jsonb 写回不一致")
+	assert.NotNil(t, got.ResolvedAt, "resolved_at NULL 漂移 (000013 应已加列)")
+	assert.NotNil(t, got.ClosedAt, "closed_at NULL 漂移 (000013 应已加列)")
+	assert.NotNil(t, got.DueDate, "due_date NULL 漂移 (000013 应已加列)")
+	t.Logf("✅ tickets 24 字段全开 insert 通过: id=%s ticket_number=%s",
+		got.ID, got.TicketNumber)
+}
+
+// TestDBSmoke_GenerateTicketNumberDayScoped 同一天连插 25 张 ticket,
+// ticket_number 互不相同且都在 "TICKET-<今日>-%" 范围内 (不会跑到昨日或撞号)。
+// 守 M34 D-2 generateTicketNumber 单条路径在真 PG 下的当日 used-set 算法。
+//
+// 反证: 把 generateTicketNumber 退回 nextTicketSeq (count 法) → 第 26 张后
+// 仍能正确递增 (旧缺陷不是这个, 而是「中间被硬删后回绕撞号」), 但本用例
+// 的核心断言 (25 张全 distinct) 在两种算法下都成立, 故本用例主要是 day-scope 守门。
+//
+// 前置: 路径 ① 全新库, 当日 0 张 ticket。
+func TestDBSmoke_GenerateTicketNumberDayScoped(t *testing.T) {
+	db := openSmokeDB(t)
+
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	seen := make(map[string]struct{}, 30)
+
+	for i := 0; i < 25; i++ {
+		tk := models.Ticket{
+			Title:      fmt.Sprintf("smoke day-scoped #%d", i),
+			TicketType: "incident",
+			Priority:   "normal",
+			Status:     "open",
+		}
+		require.NoError(t, db.Create(&tk).Error, "iter %d insert failed", i)
+
+		assert.True(t, strings.HasPrefix(tk.TicketNumber, prefix),
+			"iter %d ticket_number=%q 不在今日 prefix %q 下 (跨日了?)",
+			i, tk.TicketNumber, prefix)
+		if _, dup := seen[tk.TicketNumber]; dup {
+			t.Fatalf("iter %d ticket_number=%q 撞号", i, tk.TicketNumber)
+		}
+		seen[tk.TicketNumber] = struct{}{}
+	}
+	t.Logf("✅ 25 张当日工单号全 distinct: %v", seen)
+}
+
+// TestDBSmoke_TicketNumberRetry 验证 ticket_number 唯一索引在真 PG 下能拒绝
+// 同号 INSERT, 以及 db.Create 路径触发 23505 的行为。
+//
+// 前置: 路径 ① 全新库, ticket_number 唯一索引在位 (000013 idx_tickets_ticket_number)。
+//
+// 注: 完整 5 次重试 → ErrAlreadyExists 的兜底由 TicketService.Create 在
+// ticket_service.go:222-252 实现, 本用例只验证真 PG 下唯一索引兜底的事实,
+// 不展开 service 层重试流程 (service 层逻辑由 M26/D-9 单测覆盖, sqlite 夹具够用)。
+//
+// 注 2: 本库由前面 TestDBSmoke_GenerateTicketNumberDayScoped (顺序在 whitelist
+// 中先于本用例) 已写入 A..Z + AA 26+ 张当日工单; 占位标签必须**唯一**于
+// 今日 prefix, 故选 BA (= seqLabel(52), 已远超出当日 26+ 张的范围)。
+func TestDBSmoke_TicketNumberRetry(t *testing.T) {
+	db := openSmokeDB(t)
+
+	prefix := "TICKET-" + time.Now().Format("20060102") + "-"
+	const seedLabel = "BA" // seqLabel(52), 远超出当日已占用范围
+
+	// 1. 占住 "BA" — 当日 used-set 起点 (前面的 DayScoped 用例只到 AA)
+	seed := models.Ticket{
+		ID:           uuid.New(),
+		TicketNumber: prefix + seedLabel,
+		Title:        "M34 占 BA",
+		TicketType:   "incident",
+		Priority:     "normal",
+		Status:       "open",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	require.NoError(t, db.Create(&seed).Error, "占 BA 失败")
+
+	// 2. 让 BeforeCreate 跑 used-set 算法 —— used 含 BA, max=52, +1=53, seqLabel(53)="BB"
+	//    -> INSERT BB 应当成功 (不撞 BA)。
+	tkOK := models.Ticket{
+		Title:      "M34 retry OK path",
+		TicketType: "incident",
+		Priority:   "normal",
+		Status:     "open",
+	}
+	require.NoError(t, db.Create(&tkOK).Error, "first new ticket should be BB (max+1)")
+	assert.Equal(t, prefix+"BB", tkOK.TicketNumber,
+		"used-set max+1 算法在真 PG 下应输出 BB (max=52 + 1 = seqLabel(53)=BB)")
+
+	// 3. 用 raw SQL 直插同号, 验证唯一索引确实在位 (23505 unique_violation)。
+	dupID := uuid.New()
+	err := db.Exec(`INSERT INTO tickets (id, ticket_number, title, ticket_type, priority, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		dupID, prefix+"BB", "dup attempt", "incident", "normal", "open", time.Now(), time.Now(),
+	).Error
+	require.Error(t, err, "INSERT 同号 ticket_number 应被唯一索引拒绝")
+	assert.Contains(t, err.Error(), "23505",
+		"期望 PG 23505 unique_violation, 实际: %v", err)
+
+	t.Logf("✅ ticket_number 唯一索引在位: 23505 拒绝 dup INSERT")
+}
