@@ -1682,39 +1682,62 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 		t.Skip("非升级路径库（无预置存量资产），跳过回滚用例")
 	}
 
-	// 前置 3（M16/M20/M25/M26/M27）：最新几个迁移必须已应用，且 000027 必须是**下一次** Down 的对象。
-	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
-	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-	var has27, has26, has25, has24, has23 int64
-	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
-		Scan(&has27).Error)
-	if has27 == 0 {
-		t.Fatalf("库未应用到 000027 —— 头一次 Down 会滚掉 000026，整条断言链静默后移")
-	}
-	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
-		Scan(&has26).Error)
-	if has26 == 0 {
-		t.Fatalf("库未应用到 000026 —— 下一个 Down 会滚掉 000025，整条断言链静默后移")
-	}
-	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
-		Scan(&has25).Error)
-	if has25 == 0 {
-		t.Fatalf("库未应用到 000025 —— 下一个 Down 会滚掉 000024，整条断言链静默后移")
-	}
-	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
-		Scan(&has24).Error)
-	if has24 == 0 {
-		t.Fatalf("库未应用到 000024 —— 下一个 Down 会滚掉 000023，整条断言链静默后移")
-	}
-	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
-		Scan(&has23).Error)
-	if has23 == 0 {
-		t.Fatalf("库未应用到 000023 —— 下一个 Down 会滚掉 000021，整条断言链静默后移")
-	}
+	// 前置 3（M16/M20/M25/M26/M27/M28/M38）：最新几个迁移必须已应用，且 000028 必须是**下一次** Down 的对象。
+		// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
+		// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
+		// M38-B：加了 000038 alert_rule_trigger_map 后，先 Down 38，再 Down 28，否则整条链静默后移一位。
+		var has38, has28, has27, has26, has25, has24, has23 int64
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
+			Scan(&has38).Error)
+		if has38 == 0 {
+			t.Fatalf("库未应用到 000038 — 头一次 Down 会滚掉 000028，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 28`).
+			Scan(&has28).Error)
+		if has28 == 0 {
+			t.Fatalf("库未应用到 000028 — 头一次 Down（滚 000038 之后）会滚掉 000027，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+			Scan(&has27).Error)
+		if has27 == 0 {
+			t.Fatalf("库未应用到 000027 — 头一次 Down 会滚掉 000026，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+			Scan(&has26).Error)
+		if has26 == 0 {
+			t.Fatalf("库未应用到 000026 — 下一个 Down 会滚掉 000025，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
+			Scan(&has25).Error)
+		if has25 == 0 {
+			t.Fatalf("库未应用到 000025 — 下一个 Down 会滚掉 000024，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
+			Scan(&has24).Error)
+		if has24 == 0 {
+			t.Fatalf("库未应用到 000024 — 下一个 Down 会滚掉 000023，整条断言链静默后移")
+		}
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
+			Scan(&has23).Error)
+		if has23 == 0 {
+			t.Fatalf("库未应用到 000023 — 下一个 Down 会滚掉 000021，整条断言链静默后移")
+		}
 
-	migrate.FS = network_monitor_platform.MigrationsFS
+		migrate.FS = network_monitor_platform.MigrationsFS
 
-	// Down = 回滚 000028（M34 D-1 工单子集幂等迁移）：down 是 SELECT 1 noop，
+		// Down = 回滚 000038（M38-B alert_rule_trigger_map）：down 是 DROP TABLE + DROP INDEX
+		require.NoError(t, migrate.Down(db), "回滚 000038 失败")
+		var v38 int64
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
+			Scan(&v38).Error)
+		assert.Zero(t, v38, "首次 Down 必须滚掉 000038 — 否则后面每一次 Down 都在滚错的那一层")
+		var triggerMapExists bool
+		require.NoError(t, db.Raw(
+			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'alert_rule_trigger_map')`).
+			Scan(&triggerMapExists).Error)
+		assert.False(t, triggerMapExists, "down 000038 应 DROP alert_rule_trigger_map")
+
+		// Down = 回滚 000028（M34 D-1 工单子集幂等迁移）：down 是 SELECT 1 noop，
 	// 不动 ticket_type 的 NULL-ability, 也不删任何列;只销版本号。 多这一步
 	// 是因为 migrate.Down 只滚**最新已应用版本**, 加了 28 之后, 整条链
 	// 起点必须从 28 开始, 否则下面所有 "第 N 次 Down 滚掉 0000NN" 的断言
