@@ -237,6 +237,18 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）
 
+### M35-R1 — HolmesGPT toolset 集成 spec（2026-09-12）
+
+R1 是 v3 改造点一：把 ITmanager 从「自建 LLM 问答」重定位为「HolmesGPT 数据源」。本轮为 docs-only 阶段 0（5 commits），不写 endpoint 代码（5 端点已存在 routes.go）。
+
+- **intent-M35-R1.md** (`5cb05ab`) — `intent-spec-author` 产出：5 outcomes / 5 AC / 3 edges / 5 not_goals / 5 evidence。
+- **FIX-PLAN-R1-HOLMESGPT.md** (`2bafb76`) — 需求/计划/验收 9 段；§2.2 端点契约 5 端点入参出参必填字段；§3 A-6.1~A-6.6 六条验收。
+- **ADR-0007** (`e7c900c`) — R1 toolset 边界与认证 5 条硬约束（端点列表固定 / 单独 token / 写操作不暴露 / audit_logs / 失败语义），**不可逆**，扩展需显式修订本 ADR。
+- **IMPL-R1-HOLMESGPT.md** (`c59f729`) — 实施细节 + 阶段 1~3 设计（中间件埋点 / HolmesGPT 部署 / 端到端联调），留作未来 round。
+- **门禁** — `git log --oneline -10` 5 commits + `git push` 全部成功；docs 互链完整；无代码改动不影响 `go test` / `db_smoke` / `go vet`。
+
+v3 §7 A-1 / A-2 / A-6 三条验收从「TODO」转「DONE」。后续阶段 1~3 实施见 IMPL §3。
+
 - **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
 
 - **D-1 tickets 表 schema 收尾** (`4496087`) — `migrations/000028_tickets_schema_align.up.sql`：`DROP NOT NULL ticket_type`（让模型 `gorm:\"size:20\"` 可落库空串）；12 条 `ADD COLUMN IF NOT EXISTS` 显式零增量（与 `000013` 重复声明是为幂等保留、非新缺陷）。
