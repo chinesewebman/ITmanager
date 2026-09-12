@@ -262,6 +262,38 @@ R3 决策 ITmanager 不直连 vCenter，从 NetBox 读 VM（单一 SoT = NetBox�
 
 v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落，运维前置依赖运维就绪后再启 Round M35-R2-R2 落 Stage 2/3）。
 
+### M36 — G-55 + D-6 残余收口（2026-09-12）
+
+`TODO.md` 两条已识别但未修的缺陷本轮全部闭环，**不依赖任何运维前置**，6 commits + 全部 push：
+
+**G-55（`audit_logs.resource` 三处副本漂移，潜在 22001 整行丢弃）：**
+
+- **`models/user.go:106`** (`901d7ce`) — `AuditLog.Resource` gorm tag `size:100` → `size:50`，对齐 `migrations/000001_init.up.sql:1097` VARCHAR(50)（DB 真相）。
+- **`middleware/audit.go:158`** (`306cbb4`) — `resourceFromPath` 截断常量 `sanitizeField(p, 100)` → `sanitizeField(p, 50)`。注释说明 G-55 漂移危害（22001 → 审计链静默丢行）。
+- **`internal/integration/truncate.go`** (`7b2520f`) — 新增 `colAuditResource = 50` 常量 + `ColumnWidths()` 返回 map 增加 `audit_logs.resource` 键；`truncate_test.go` U7a 反射断言的 9 个常量清单扩到 10（含 `models.AuditLog.Resource` ↔ `colAuditResource` 比对）；`tests/db_smoke_test.go` U7b 真库侧列宽校验清单扩到 10。
+- **`tests/db_smoke_test.go:2654` + `scripts/db_smoke.sh` 白名单** (`d9eabbc`) — 新增 `TestDBSmoke_AuditResourceOver50Char`：构造 75 字符 resource（超 50）验证「50 截断落库 + == 50 rune + UTF-8 合法」及「75 原值 PG 拒 22001」反证。db_smoke 全 41 case 真 PG 跑通。
+
+**D-6 残余（M33 加了 4 个 `*_field_truncations` 计数键但前端不显示，本轮闭环）：**
+
+- **`frontend/src/pages/Settings.tsx`** (`b5793d9`) — `handleSyncNetBox` / `handleSyncGLPI` / `handleSyncZabbix` 各加 1 个 `*_field_truncations` 读取分支：字段级截断处数 `> 0` 时在 message 中追加「另有 N 个字段被截断」。与既有 `zabbix_truncated`（源侧 0/1 标志）/ `glpi_skipped`（档位越界条数）**语义不同**——这是字段级处数（**不是条数、不是 0/1**），单独一句避免与既有标志混淆。
+- **`Settings.test.tsx`** 4 个新用例（28 → 28 测试 pass）：NetBox/GLPI 单字段截断、GLPI skipped + truncations 双后缀同句、GLPI 全 0 仅基文案、Zabbix truncated + field_truncations 同时露出且标志不当条数插值。
+
+**门禁：**
+- `go vet ./...` 干净（sqlite3 C warning 系既有）
+- `gofmt -l` 干净
+- `tsc --noEmit` 干净
+- `eslint src/pages/Settings.tsx` 干净
+- `go test -count=1 ./...` 26 包绿
+- `go test -tags dbsmoke` 真 PG：41 case 全绿（含新增 `AuditResourceOver50Char`）
+- `npm run vitest run` 全 334 测试绿
+
+**残余（另立任务，非本 round）：**
+- G-39 `AlertRule.NotifyChannels` 写不读，需「告警匹配规则」语义，**架构决策**。
+- G-40 通知渠道凭据静态明文落库（`notification_channels.config` 明文 JSON），需需求文档 + 评估。
+- G-50 导出 CSV 列集拍板（只有 4 列，全字段 35 个），需产品口径。
+
+
+
 
 
 - **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
