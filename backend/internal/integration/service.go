@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,8 +14,10 @@ import (
 
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/httpx"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/notification"
 )
 
 // IntegrationMetricsRecorder 把 httpx 事件桥接到 metrics registry。
@@ -41,6 +44,16 @@ type IntegrationService struct {
 	netbox *NetBoxClient
 	zabbix *ZabbixClient
 	glpi   *GLPIClient
+	// bus M38-B Round 5: 可选, 主流程非依赖——保留接口让现有测试不破。
+	// SyncFromZabbix 末尾发 TopicAlertCreated 走 s.bus.Publish; bus=nil 时跳过
+	// (现存的 main.go / db_smoke_test / route test 都不需要发, 走 nil 分支即可)。
+	bus eventbus.Bus
+}
+
+// WithBus 注入事件总线 (M38-B)。
+// bus=nil 时 SyncFromZabbix 不 publish (兼容老调用, 包括 db_smoke 旧测试)
+func (s *IntegrationService) WithBus(bus eventbus.Bus) {
+	s.bus = bus
 }
 
 // NewIntegrationService 创建集成服务（C-P7：注入 metrics 记录器）。
@@ -305,10 +318,132 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 		return 0, truncated, 0, fmt.Errorf("Zabbix 批量插入失败: %w", err)
 	}
 
+	// M38-B Round 5: 真插完后再查 triggerid → rule_id 映射表并写 alerts.alert_rule_id，
+	// 然后 publish TopicAlertCreated (worker 端按 rule 过滤推送)。
+	//
+	// 为什么不和 INSERT 同一事务: alert_rule_id 的写入不是 alerts 表的初始空字段就
+	// 能算的——必须先 INSERT 拿到 alert.ID, 再用 IN 子句批量 UPDATE。M27 守护的 TOCTOU
+	// 关心的是 alerts(trigger_id, problem_start) 这把唯一键; alert_rule_id 的更新走
+	// 的是 alert.id (PK), 与唯一键正交, 不需要 ON CONFLICT。
+	if synced > 0 {
+		s.publishFireEvents(ctx, triggerIDs)
+	}
+
 	log.Printf("从 Zabbix 同步了 %d 个告警（截断标志 %d）", synced, truncated)
 	// 与上面那行**各自表述**：截断标志是源侧条数上限，字段截断是列宽保真，语义不同不合并。
 	logFieldSanitization("zabbix", &fc)
 	return synced, truncated, fc.count(), nil
+}
+
+// publishFireEvents M38-B Round 5:
+//
+//  1. 对 triggerIDs 批量 UPDATE alert_rule_id (走 alert_rule_trigger_map JOIN)。
+//     决定必须保留 alert.AlertRuleID 已被显式写入的形态（接口上 etc 三方写作按 Y 保留）——
+//     故 update 用 COALESCE 防护：alert.alert_rule_id IS NULL 才被覆盖。
+//  2. 重新 SELECT (source='zabbix' AND trigger_id IN ...) 拿最近 100 条 alert，
+//     构造 AlertEventPayload publish 给 event bus。
+//
+// 失败语义：publish 失败 log warn, 不回滚 INSERT (commit 已落库, 重复推送比漏推好)。
+func (s *IntegrationService) publishFireEvents(ctx context.Context, triggerIDs []string) {
+	if len(triggerIDs) == 0 {
+		return
+	}
+	// 1. 批量 UPDATE alerts.alert_rule_id = m.rule_id WHERE NOT m.rule_id IS NULL
+	//    与 IS NULL (即 alert.alert_rule_id 尚未显式配)
+	if err := database.DB.WithContext(ctx).Exec(`
+		UPDATE alerts SET alert_rule_id = m.rule_id
+		FROM alert_rule_trigger_map m
+		WHERE alerts.source = 'zabbix'
+		  AND alerts.trigger_id = m.triggerid
+		  AND alerts.alert_rule_id IS NULL
+		  AND alerts.trigger_id IN ?
+	`, triggerIDs).Error; err != nil {
+		log.Printf("[M38-B publishFireEvents] bulk update alert_rule_id failed: %v (继续 publish, 走 fallback)", err)
+	}
+	// 2. 重读 alerts.id / alert_rule_id / triggerid / severity / trigger_name / host_name / status / problem_start
+	type row struct {
+		ID           string
+		AlertRuleID  *string
+		TriggerID    string
+		Severity     int
+		TriggerName  string
+		HostName     string
+		Status       string
+		ProblemStart time.Time
+	}
+	var rows []row
+	if err := database.DB.WithContext(ctx).Table("alerts").
+		Select("id, alert_rule_id, trigger_id, severity, trigger_name, host_name, status, problem_start").
+		Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).
+		Order("created_at DESC").
+		Limit(1000).
+		Scan(&rows).Error; err != nil {
+		log.Printf("[M38-B publishFireEvents] reload alerts failed: %v (skip publish)", err)
+		return
+	}
+	if s.bus == nil {
+		// 兼容老调用：bus 未注入时不 publish (db_smoke / route test 不依赖 publish)
+		return
+	}
+	published := 0
+	for i := range rows {
+		r := &rows[i]
+		// publish 主题 — 仅 fire 路径（"problem" 状态）才符合 G-39 范围；
+		// 已经 ack / resolved 的 alert 仍走 ResolveAlert 事件路径（M37-A）
+		if r.Status != "problem" {
+			continue
+		}
+		payload := notification.AlertEventPayload{
+			AlertID:   r.ID,
+			HostName:  r.HostName,
+			Severity:  r.Severity,
+			Trigger:   r.TriggerName,
+			Status:    "problem",
+			EventType: "created",
+		}
+		if r.AlertRuleID != nil {
+			payload.RuleID = *r.AlertRuleID
+			// snapshot NotifyChannelIDs + NotifyUserIDs，worker 直接复用避免二次 DB 读
+			payload.NotifyChannelIDs, payload.NotifyUserIDs = loadRuleNotifySnapshot(ctx, *r.AlertRuleID)
+		}
+		if err := s.bus.Publish(eventbus.TopicAlertCreated, payload); err != nil {
+			log.Printf("[M38-B publishFireEvents] publish failed alert=%s err=%v", r.ID, err)
+			continue
+		}
+		published++
+	}
+	if published > 0 {
+		log.Printf("[M38-B publishFireEvents] TopicAlertCreated 已发 %d 条", published)
+	}
+}
+
+// loadRuleNotifySnapshot M38-B Round 5: 加挂到 publishFireEvents 的 helper,
+// 调一次 SELECT 拿 rule.NotifyChannels + NotifyUsers (双 JSON)，返 (channel UUID 列表, user UUID 列表)。
+// 解析失败 / rule 不在 → nil (worker 走 fallback, 不漏告警)。
+func loadRuleNotifySnapshot(ctx context.Context, ruleID string) ([]string, []string) {
+	var rule models.AlertRule
+	if err := database.DB.WithContext(ctx).
+		Select("notify_channels", "notify_users").
+		Where("id = ?", ruleID).
+		First(&rule).Error; err != nil {
+		log.Printf("[M38-B loadRuleNotifySnapshot] rule %s: %v → fallback (worker 推全启用, 不带 NotifyUsers)", ruleID, err)
+		return nil, nil
+	}
+	var chIDs []string
+	if rule.NotifyChannels != "" {
+		if err := json.Unmarshal([]byte(rule.NotifyChannels), &chIDs); err != nil {
+			log.Printf("[M38-B loadRuleNotifySnapshot] rule %s notify_channels parse: %v → fallback", ruleID, err)
+			chIDs = nil
+		}
+	}
+	var userIDs []string
+	if rule.NotifyUsers != "" {
+		if err := json.Unmarshal([]byte(rule.NotifyUsers), &userIDs); err != nil {
+			log.Printf("[M38-B loadRuleNotifySnapshot] rule %s notify_users parse: %v → skip NotifyUsers (不漏 channel 通知)", ruleID, err)
+			userIDs = nil
+		}
+	}
+	return chIDs, userIDs
 }
 
 // alertIdentityKey 是 M27/A 的去重身份：同一 trigger 的**同一次故障发生**。

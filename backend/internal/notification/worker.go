@@ -114,6 +114,10 @@ type AlertEventPayload struct {
 	// RuleID 空 → worker fallback 推全启用 channels（与改动前一致）
 	RuleID           string   `json:"rule_id,omitempty"`
 	NotifyChannelIDs []string `json:"notify_channel_ids,omitempty"` // 解析后的 UUID 字符串数组；空 = "推全启用"
+
+	// M38-B Round 6：worker 增加按 NotifyUsers 推送（与 NotifyChannels 平级）。
+	// 空 = "不带 NotifyUsers" (与改动前一致——不漏 channel 通知, 仅 user 通知跳过)。
+	NotifyUserIDs []string `json:"notify_user_ids,omitempty"`
 }
 
 // handleAlertEvent 处理 alert 事件, 真发通知
@@ -358,7 +362,6 @@ func filterChannelsByIDs(channels []models.NotificationChannel, wantIDs []string
 	}
 	return out
 }
-
 
 // M37-A：测试专用 exported wrapper, 让外部包 (db_smoke) 能驱动 handleAlertEvent
 // 不动方法语义, 仅做导出 (设计理由: 真 PG 集成测试需要"喂事件→观察推送"链路, 单测 sqlmock 已覆盖单元边界)
