@@ -104,6 +104,32 @@ func (r *AlertRule) TableName() string {
 	return "alert_rules"
 }
 
+// AlertRuleTriggerMap M38-B: triggerid (e.g. Zabbix trigger.triggerid) → rule_id 映射
+//
+// 设计要点（intent-M38-B.md）：
+//
+//   - triggerid 唯一 → 同一 trigger 只允许一个 rule；last-write-wins 由应用层按
+//     created_at DESC 取最新；
+//   - ON DELETE CASCADE rule_id（迁移 000038 已建），rule 被删映射也跟着没意义；
+//   - 反向（rule_id 改值）由应用层通过 ListMappings + DeleteMapping + CreateMapping
+//     走业务流，不在该表的语义内。
+//
+// 关联：
+//   - AlertRule.TriggerMappings（Has Many）：给运维 UI 用，本次 round 不暴露，但模型
+//     完整可读；
+//   - 该模型本身用 DAOs（service 层 alert_rule_mapper.go）做 CRUD —— 不在 Round 5 范围。
+type AlertRuleTriggerMap struct {
+	TriggerID string    `json:"triggerid" gorm:"type:varchar(100);primary_key;column:triggerid"`
+	RuleID    uuid.UUID `json:"rule_id" gorm:"type:uuid;not null;index;column:rule_id"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// 关联 (Preload 用) —— 业务 CRUD 不靠它, 仅给运维 UI 在列表里展示 rule.name 用
+	AlertRule *AlertRule `json:"alert_rule,omitempty" gorm:"foreignKey:RuleID;references:ID"`
+}
+
+// TableName GORM 自动迁移靠它寻表
+func (a *AlertRuleTriggerMap) TableName() string { return "alert_rule_trigger_map" }
+
 // NotificationChannel 通知渠道
 type NotificationChannel struct {
 	ID   uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
