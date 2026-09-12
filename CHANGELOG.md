@@ -323,6 +323,43 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M40 — G-5 JWT 用户禁用即时生效（2026-09-13）
+
+**修复内容：**
+- **bug**：admin 禁用用户后，JWT 旧会话最坏 24h 仍可用（仅 API Key 路径 `handleAPIKeyAuth` 查 DB），旧 `AuthMiddleware` JWT 分支仅 `VerifyToken` 签名，从不查 DB。G-5（TODO.md L63）已挂 2 round。
+- **修复 `backend/internal/middleware/auth_status_cache.go` (新建, 105 lines)** — `authStatusCache` struct (sync.RWMutex + map[string]authStatusCacheEntry + ttl 30s) + 包级 singleton `defaultAuthStatusCache` + `lookupUserStatus(db, userID)` 函数：cache miss/expired → DB 读 + 写 cache；DB 错误 → 返回 ("active", err) 让调用方走 401（fail-closed，不放行）；nil DB guard（生产代码 DB 总存在，仅给旧测试兜底）；`resetAuthStatusCache` + `InvalidateAuthStatusCacheForUser` 测试导出函数（db_smoke 不能 sleep 31s 模拟 cache 过期，必须手动 invalidate）。
+- **修复 `backend/internal/middleware/auth.go` AuthMiddleware JWT 分支** — `VerifyToken` 成功后调 `lookupUserStatus(database.DB, claims.UserID)`；status=="inactive" → `apierr.Forbidden(c, "账号已禁用")` + `c.Abort()`；DB 错误 → 401 而非 200（fail-closed）。API Key 分支已有 user.Status 检查无回归。
+
+**单测 11 条 + mutation inversion：**
+- **cache 单元 3 条**：`TestAuthStatusCache_GetSet_Basic / Expired / ConcurrentSet200Goroutines_NoRace` 验 sync.RWMutex 在并发下不出 race（`-race` 通过）。
+- **lookupUserStatus 单元 4 条**：`_ActiveUser / InactiveUser / DBError_ReturnsActive / NilDB_ReturnsActive` 走 sqlmock，验 cache 写入/读取/错误传播路径。
+- **AuthMiddleware 端到端 3 条** (`sqlmock`)：
+  - `_JWT_UserInactive_Returns401` (AC-M40-1)：disable 后 cache invalidate → 401
+  - `_JWT_ActiveUser_CacheHitsAvoidDB` (AC-M40-2)：200 req 同 user 只 1 次 SELECT（守门网基线）
+  - `_JWT_StatusFlipWithinTTL_StillAllows` (AC-M40-3)：cache 命中时 status 翻转 30s 内不感知（trade-off 钉死）
+  - `_JWT_DBError_Returns401`：DB 错误 fail-closed 不放行（AC-M40-4 钉死）
+- **mutation inversion PASS-FAIL-PASS**：注释 `defaultAuthStatusCache.get` → `TestAuthMiddleware_JWT_ActiveUser_CacheHitsAvoidDB` FAIL（200 req → 199 次 SELECT 失败）→ revert → PASS（200 req → 1 SELECT）。
+- **真 PG 端到端 `TestDBSmoke_M40_JWTDisableTakesEffect`** (新文件 207 lines in `db_smoke_test.go`) — 5 场景真 PG：active+旧 JWT → 200 / UPDATE status=inactive+cache invalidate → 401 / UPDATE status=active+cache invalidate → 200 / cache TTL 内不感知 → 200 / 物理删用户 → cache miss → DB 无结果 → 401。`scripts/db_smoke.sh` 白名单 +1。
+
+**门禁（最终全绿）：**
+- `go vet ./...` 干净（sqlite3 C warning 系既有）
+- `gofmt -l` 干净
+- `go test -count=1 ./...` 全绿（27 packages）
+- `DOCKER='sudo -n docker' bash scripts/db_smoke.sh` 真 PG：**44 cases 全绿**（43 baseline + M40 +1）
+- mutation inversion 验证 cache 守门网有效（PASS → FAIL → PASS）
+
+**残余（后续 round）：**
+- **多副本部署 cache 是 per-process**：水平扩展时每副本各持一份 cache，禁用生效最坏窗口 = TTL 30s × 副本数 N。本 round 范围外（FIX-PLAN-M40 §edges 留有 Todo，待需要时用 Redis 收口）。
+- **Trade-off 显式文档化**：cache 命中时 status 翻转 30s 内不感知，运维禁用需明确「最长 30s 内生效」。前端禁用确认对话框已用 M35-R1 的 toaster 提示。
+- **`InvalidateAuthStatusCacheForUser` 测试导出**：将来如果需要「主动失效 cache」场景（如即时禁用），可升级为生产 API（admin 禁用时调一次）。本 round 留作测试专用。
+
+**Round 5 commit 序列：**
+- `186dad3` — `intent-M40.md` + G-5 spec
+- `4af497b` — `feat(M40): JWT 路径用户状态查 DB + 30s cache` (auth_status_cache.go + auth.go patch)
+- `9a8b78c` — `test(M40): authStatusCache 单元测试 (3 cache + 4 lookup + 3 e2e + mutation inversion)`（本次之前已 push）
+- `0621b50` — `feat(M40): JWT 用户禁用即时生效 - 真 PG e2e + DB 查表出口 + DB 错误降级拒绝`
+- (本次) CHANGELOG + completion report
+
 ### M38-B — G-39 fire 路径整链路（triggerid→rule 映射 + dedup + NotifyUsers）（2026-09-13）
 
 **修复内容：**
