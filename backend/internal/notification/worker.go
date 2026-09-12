@@ -130,6 +130,19 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 	if len(channels) == 0 {
 		return nil // 没 channel 配, 不算错
 	}
+	// M37-A：AlertRule.NotifyChannels 写不读修复
+	// NotifyChannelIDs != nil → 调用方明确给出要推的 channel ID 列表（解析自 AlertRule.NotifyChannels）
+	//   - 非空 → 过滤 channels，只推被勾的
+	//   - 空数组 → 运维明确清空 → 推 0 次
+	// NotifyChannelIDs == nil → 旧路径，向后兼容（payload 没 RuleID，走全启用 fallback）
+	if p.NotifyChannelIDs != nil {
+		channels = filterChannelsByIDs(channels, p.NotifyChannelIDs)
+		if len(channels) == 0 {
+			log.Printf("[notification subscriber] rule %s: no enabled channels after NotifyChannels filter (configured=%d), skip",
+				stripControlChars(p.RuleID), len(p.NotifyChannelIDs))
+			return nil
+		}
+	}
 	// 构造消息内容
 	verb := "告警"
 	if p.EventType == "resolved" {
@@ -323,4 +336,25 @@ func (w *Worker) markSkipped(ctx context.Context, id uuid.UUID) {
 			"status":    "success",
 			"error_msg": "channel disabled, skipped",
 		})
+}
+
+// M37-A：filterChannelsByIDs 保留在 wantIDs 列表里的 channel (UUID 字符串比对)
+// 用 map 避免 O(N*M) 双层循环；wantIDs 是 payload 里 snapshot 的 AlertRule.NotifyChannels 解析结果
+// 顺序保留输入顺序 (运维 UI 通常按勾选顺序展示, 用户期望推送顺序稳定)
+func filterChannelsByIDs(channels []models.NotificationChannel, wantIDs []string) []models.NotificationChannel {
+	if len(wantIDs) == 0 {
+		return nil
+	}
+	wantSet := make(map[string]struct{}, len(wantIDs))
+	for _, id := range wantIDs {
+		wantSet[id] = struct{}{}
+	}
+	out := make([]models.NotificationChannel, 0, len(wantIDs))
+	for i := range channels {
+		ch := &channels[i]
+		if _, ok := wantSet[ch.ID.String()]; ok {
+			out = append(out, *ch)
+		}
+	}
+	return out
 }
