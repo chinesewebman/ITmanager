@@ -117,6 +117,28 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// G-5/M40: 用户被禁用后 JWT 必须立即失效 —— API Key 路径已在
+		// handleAPIKeyAuth 里查 DB 守这道；JWT 路径原先只 VerifyToken，
+		// 禁用最长 24h 才生效（FIX-PLAN-M40 §Context）。
+		//
+		// 性能：30s TTL 进程内 cache（lookupUserStatus），每用户每 30s ≤ 1 次
+		// SELECT；多副本部署下 ≤ 30s 全副本生效（cache per-process，
+		// FIX-PLAN-M40 §edges 已记 trade-off）。
+		//
+		// 失败模式：DB 错误 → 拒绝（避免放行不可验证身份的请求）。这是
+		// fail-closed；DB 短暂不可用 = 全部认证失败，与既有 apierr 体系对齐。
+		status, lookupErr := lookupUserStatus(database.DB, claims.UserID)
+		if lookupErr != nil {
+			apierr.Internal(c, "用户状态查询失败", lookupErr)
+			c.Abort()
+			return
+		}
+		if status == "inactive" {
+			apierr.Unauthorized(c, "用户已被禁用")
+			c.Abort()
+			return
+		}
+
 		// 将用户信息存入上下文
 		c.Set("user_id", claims.UserID)
 		c.Set("username", claims.Username)
