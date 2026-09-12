@@ -25,6 +25,9 @@ type Worker struct {
 	resolver func(*models.NotificationChannel) (Sender, error)
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	// M38-B Round 7: fire 路径 in-memory 60s dedup
+	// nil 时跳过（与历史语义兼容 —— 即同一个 alert 60s 内多 publish 全部推）
+	deduper *Deduper
 }
 
 // WorkerConfig 配置
@@ -59,6 +62,12 @@ func NewWorker(db *gorm.DB, cfg WorkerConfig) *Worker {
 
 // Start 启动后台 goroutine, Start 多次调用是 no-op
 func (w *Worker) Start(ctx context.Context) {
+	// M38-B Round 7: 默认启动期注入 deduper (60s 窗口)
+	// 注入点放在这里而不是 NewWorker: 让通知单元测试可不构造 deduper 直接驱动 worker,
+	// 而生产 (main.go 调用 Start 后) 一定走 dedup。
+	if w.deduper == nil {
+		w.deduper = NewDeduper()
+	}
 	w.wg.Add(1)
 	go w.run(ctx)
 }
@@ -118,6 +127,11 @@ type AlertEventPayload struct {
 	// M38-B Round 6：worker 增加按 NotifyUsers 推送（与 NotifyChannels 平级）。
 	// 空 = "不带 NotifyUsers" (与改动前一致——不漏 channel 通知, 仅 user 通知跳过)。
 	NotifyUserIDs []string `json:"notify_user_ids,omitempty"`
+
+	// M38-B Round 7: fire-path dedup key (trigger + problem_start unix)
+	// 老事件 payload 没这两个字段 → 空字符串 / 0, FireKey 仍生成唯一 key
+	TriggerID        string `json:"trigger_id,omitempty"`
+	ProblemStartUnix int64  `json:"problem_start_unix,omitempty"`
 }
 
 // handleAlertEvent 处理 alert 事件, 真发通知
@@ -125,6 +139,16 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 	var p AlertEventPayload
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
 		return err // 返 err → bus 自动重试 → DLQ
+	}
+	// M38-B Round 7: fire 路径 60s 内同 (trigger + problem_start) 不重复推送
+	// TriggerID 来自 payload (alert.source_trigger_id / zabbix 的 trigger_id);
+	// 老事件 payload 没这个字段 → 空字符串, 退化到 key="|<unix>" 仍能 dedup 同事件
+	// 注意: bus 接收方是单 goroutine 处理 (handleAlertEvent 同步执行),
+	// dedup 的并发安全只在「同一进程多实例」或「多 topic 同时 publish」场景里生效
+	if w.deduper != nil && !w.deduper.Allow(FireKey(p.TriggerID, p.ProblemStartUnix)) {
+		log.Printf("[notification subscriber] dedup 60s 命中: trigger=%s problem_start=%d skip",
+			stripControlChars(p.TriggerID), p.ProblemStartUnix)
+		return nil
 	}
 	// 加载所有启用的 channel
 	var channels []models.NotificationChannel
