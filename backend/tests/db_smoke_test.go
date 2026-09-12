@@ -38,11 +38,11 @@ import (
 	network_monitor_platform "network-monitor-platform"
 	"network-monitor-platform/internal/config"
 	"network-monitor-platform/internal/database"
+	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/integration"
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/migrate"
 	"network-monitor-platform/internal/models"
-	"network-monitor-platform/internal/eventbus"
 	"network-monitor-platform/internal/notification"
 	"network-monitor-platform/internal/service"
 
@@ -1683,61 +1683,61 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	}
 
 	// 前置 3（M16/M20/M25/M26/M27/M28/M38）：最新几个迁移必须已应用，且 000028 必须是**下一次** Down 的对象。
-		// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
-		// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
-		// M38-B：加了 000038 alert_rule_trigger_map 后，先 Down 38，再 Down 28，否则整条链静默后移一位。
-		var has38, has28, has27, has26, has25, has24, has23 int64
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
-			Scan(&has38).Error)
-		if has38 == 0 {
-			t.Fatalf("库未应用到 000038 — 头一次 Down 会滚掉 000028，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 28`).
-			Scan(&has28).Error)
-		if has28 == 0 {
-			t.Fatalf("库未应用到 000028 — 头一次 Down（滚 000038 之后）会滚掉 000027，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
-			Scan(&has27).Error)
-		if has27 == 0 {
-			t.Fatalf("库未应用到 000027 — 头一次 Down 会滚掉 000026，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
-			Scan(&has26).Error)
-		if has26 == 0 {
-			t.Fatalf("库未应用到 000026 — 下一个 Down 会滚掉 000025，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
-			Scan(&has25).Error)
-		if has25 == 0 {
-			t.Fatalf("库未应用到 000025 — 下一个 Down 会滚掉 000024，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
-			Scan(&has24).Error)
-		if has24 == 0 {
-			t.Fatalf("库未应用到 000024 — 下一个 Down 会滚掉 000023，整条断言链静默后移")
-		}
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
-			Scan(&has23).Error)
-		if has23 == 0 {
-			t.Fatalf("库未应用到 000023 — 下一个 Down 会滚掉 000021，整条断言链静默后移")
-		}
+	// 少了这条，第一次 Down 滚掉的会是更早的版本，整条断言链静默后移一位 ——
+	// 而末尾断言查的是 000001 建的列，多滚一层照样全绿。
+	// M38-B：加了 000038 alert_rule_trigger_map 后，先 Down 38，再 Down 28，否则整条链静默后移一位。
+	var has38, has28, has27, has26, has25, has24, has23 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
+		Scan(&has38).Error)
+	if has38 == 0 {
+		t.Fatalf("库未应用到 000038 — 头一次 Down 会滚掉 000028，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 28`).
+		Scan(&has28).Error)
+	if has28 == 0 {
+		t.Fatalf("库未应用到 000028 — 头一次 Down（滚 000038 之后）会滚掉 000027，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&has27).Error)
+	if has27 == 0 {
+		t.Fatalf("库未应用到 000027 — 头一次 Down 会滚掉 000026，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 26`).
+		Scan(&has26).Error)
+	if has26 == 0 {
+		t.Fatalf("库未应用到 000026 — 下一个 Down 会滚掉 000025，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 25`).
+		Scan(&has25).Error)
+	if has25 == 0 {
+		t.Fatalf("库未应用到 000025 — 下一个 Down 会滚掉 000024，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 24`).
+		Scan(&has24).Error)
+	if has24 == 0 {
+		t.Fatalf("库未应用到 000024 — 下一个 Down 会滚掉 000023，整条断言链静默后移")
+	}
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 23`).
+		Scan(&has23).Error)
+	if has23 == 0 {
+		t.Fatalf("库未应用到 000023 — 下一个 Down 会滚掉 000021，整条断言链静默后移")
+	}
 
-		migrate.FS = network_monitor_platform.MigrationsFS
+	migrate.FS = network_monitor_platform.MigrationsFS
 
-		// Down = 回滚 000038（M38-B alert_rule_trigger_map）：down 是 DROP TABLE + DROP INDEX
-		require.NoError(t, migrate.Down(db), "回滚 000038 失败")
-		var v38 int64
-		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
-			Scan(&v38).Error)
-		assert.Zero(t, v38, "首次 Down 必须滚掉 000038 — 否则后面每一次 Down 都在滚错的那一层")
-		var triggerMapExists bool
-		require.NoError(t, db.Raw(
-			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'alert_rule_trigger_map')`).
-			Scan(&triggerMapExists).Error)
-		assert.False(t, triggerMapExists, "down 000038 应 DROP alert_rule_trigger_map")
+	// Down = 回滚 000038（M38-B alert_rule_trigger_map）：down 是 DROP TABLE + DROP INDEX
+	require.NoError(t, migrate.Down(db), "回滚 000038 失败")
+	var v38 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 38`).
+		Scan(&v38).Error)
+	assert.Zero(t, v38, "首次 Down 必须滚掉 000038 — 否则后面每一次 Down 都在滚错的那一层")
+	var triggerMapExists bool
+	require.NoError(t, db.Raw(
+		`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'alert_rule_trigger_map')`).
+		Scan(&triggerMapExists).Error)
+	assert.False(t, triggerMapExists, "down 000038 应 DROP alert_rule_trigger_map")
 
-		// Down = 回滚 000028（M34 D-1 工单子集幂等迁移）：down 是 SELECT 1 noop，
+	// Down = 回滚 000028（M34 D-1 工单子集幂等迁移）：down 是 SELECT 1 noop，
 	// 不动 ticket_type 的 NULL-ability, 也不删任何列;只销版本号。 多这一步
 	// 是因为 migrate.Down 只滚**最新已应用版本**, 加了 28 之后, 整条链
 	// 起点必须从 28 开始, 否则下面所有 "第 N 次 Down 滚掉 0000NN" 的断言
@@ -3016,7 +3016,6 @@ func TestDBSmoke_TicketNumberRetry(t *testing.T) {
 	t.Logf("✅ ticket_number 唯一索引在位: 23505 拒绝 dup INSERT")
 }
 
-
 // ==================== M37-A: 真 PG AlertRule.NotifyChannels worker 过滤测试 ====================
 // AC-M37-A-1/2/3/4 真 PG 闭环 (参考 intent-M37-A.md)
 // 为什么必须上真 PG: worker.handleAlertEvent 走 GORM Where + Find, 模型↔DB 漂移只在真 PG
@@ -3134,6 +3133,28 @@ func (m *m37aCapturingSender) Send(_ context.Context, _, _ string) error {
 	return nil
 }
 
+// filterByNamePrefix 从 sentIDs 筛出 name LIKE prefix% 的 channel.id
+// 通用版 filterM37AIDs: prefix 参数化, 让 M38-B 测试也能复用
+func filterByNamePrefix(t *testing.T, db *gorm.DB, sentIDs []uuid.UUID, prefix string) []uuid.UUID {
+	if len(sentIDs) == 0 {
+		return nil
+	}
+	t.Helper()
+	var prefixChs []models.NotificationChannel
+	require.NoError(t, db.Where("name LIKE ?", prefix+"%").Find(&prefixChs).Error)
+	prefixSet := make(map[uuid.UUID]bool, len(prefixChs))
+	for _, ch := range prefixChs {
+		prefixSet[ch.ID] = true
+	}
+	var out []uuid.UUID
+	for _, id := range sentIDs {
+		if prefixSet[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // filterM37AIDs 从 sentIDs 列表中筛出 m37a 命名前缀的 channel.id
 // 为什么需要: db_smoke 升级路径库可能残留其他测试的 channel (非 m37a 命名), worker fallback 推全启用会带它们走
 // 但本测试只关心自己造的 3 个 m37a channel 的行为
@@ -3155,4 +3176,120 @@ func filterM37AIDs(t *testing.T, db *gorm.DB, sentIDs []uuid.UUID) []uuid.UUID {
 		}
 	}
 	return out
+}
+
+// ==================== M38-B: 真 PG fire 路径端到端测试 ====================
+// 测试覆盖:
+//   - AC-M38-B-1: alert_rule_trigger_map 表存在 + UNIQUE(triggerid, source) 索引在位
+//   - AC-M38-B-2: Worker.HandleAlertEventForTest + 触发映射, 走完 channels 路径
+//   - AC-M38-B-3: 第二次同 (trigger_id, problem_start_unix) 在 60s 窗口内 → dedup drop, 不进 channels
+//
+// 为什么必须上真 PG: alert_rule_trigger_map 是新表, FK ON DELETE CASCADE 行为 + UUID 列 +
+// JSON 字段 → sqlite 与 PG 行为差异在这块容易暴露, 且生产迁移路径已应用 000038。
+
+func TestDBSmoke_M38B_FirePathEnd2End(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// AC-M38-B-1: 验证 alert_rule_trigger_map 表存在 (migration 000038 应用了)
+	var tableExists int
+	require.NoError(t, db.Raw(`SELECT count(*) FROM information_schema.tables
+		WHERE table_name='alert_rule_trigger_map'`).Scan(&tableExists).Error)
+	require.Equal(t, 1, tableExists, "alert_rule_trigger_map 表必须存在 (migration 000038 已应用)")
+
+	// 验证 triggerid 是 PK (即 unique)
+	var pkCol string
+	require.NoError(t, db.Raw(`SELECT a.attname FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = 'alert_rule_trigger_map'::regclass AND i.indisprimary`).Scan(&pkCol).Error)
+	require.Equal(t, "triggerid", pkCol, "alert_rule_trigger_map.triggerid 必须是 PK (即天然 unique)")
+
+	// 验证 idx_alert_rule_trigger_map_rule_id 索引在位 (反向 rule_id 查询用)
+	var idxExists int
+	require.NoError(t, db.Raw(`SELECT count(*) FROM pg_indexes
+		WHERE tablename='alert_rule_trigger_map'
+		AND indexname='idx_alert_rule_trigger_map_rule_id'`).Scan(&idxExists).Error)
+	require.Equal(t, 1, idxExists, "idx_alert_rule_trigger_map_rule_id 索引必须在位")
+
+	// Cleanup
+	t.Cleanup(func() {
+		db.Where("triggerid LIKE ?", "m38b-%").Delete(&models.AlertRuleTriggerMap{})
+		db.Where("name LIKE ?", "m38b-%").Delete(&models.AlertRule{})
+		db.Where("name LIKE ?", "m38b-%").Delete(&models.NotificationChannel{})
+		db.Where("alert_id LIKE ?", "m38b-%").Delete(&models.Alert{})
+	})
+
+	// 构造 2 个 enabled channel
+	chA := &models.NotificationChannel{Name: "m38b-A", Type: "dingtalk",
+		Config: `{"webhook_url":"https://a.example/r"}`, IsEnabled: true}
+	chB := &models.NotificationChannel{Name: "m38b-B", Type: "dingtalk",
+		Config: `{"webhook_url":"https://b.example/r"}`, IsEnabled: true}
+	require.NoError(t, db.Create(chA).Error)
+	require.NoError(t, db.Create(chB).Error)
+
+	// 构造 rule + 映射
+	ruleA := &models.AlertRule{
+		Name: "m38b-rule-A", Metric: "cpu", Operator: ">", Threshold: 90,
+		NotifyChannels: fmt.Sprintf(`["%s"]`, chA.ID), NotifyUsers: "[]", IsEnabled: true,
+	}
+	require.NoError(t, db.Create(ruleA).Error)
+
+	// 模拟 SyncFromZabbix 把 triggerid-1 映射到 ruleA
+	triggerID := "m38b-trigger-001"
+	problemStart := time.Now().Unix()
+	mapping := &models.AlertRuleTriggerMap{
+		TriggerID: triggerID,
+		RuleID:    ruleA.ID,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, db.Create(mapping).Error)
+
+	// captures sent channel ids
+	var sentIDs []uuid.UUID
+	var mu sync.Mutex
+
+	w := notification.NewWorker(db, notification.WorkerConfig{
+		Tick: time.Hour, MaxBatch: 10,
+		Resolver: func(ch *models.NotificationChannel) (notification.Sender, error) {
+			return &m37aCapturingSender{channelID: ch.ID, sink: &sentIDs, mu: &mu}, nil
+		},
+	})
+	// 注入 deduper (Round 7): 生产 Start() 时会自动注入, 这里直接 Set 用于测试驱动
+	w.SetDeduperForTest(notification.NewDeduper())
+
+	// AC-M38-B-2: fire path - payload 带 trigger_id + rule_id + notify_channel_ids, 模拟
+	// SyncFromZabbix 查 mapping 后 publish 的事件
+	sentIDs = nil
+	payloadFire := []byte(fmt.Sprintf(
+		`{"event_type":"created","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":["%s"],"trigger_id":"%s","problem_start_unix":%d}`,
+		ruleA.ID, chA.ID, triggerID, problemStart,
+	))
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payloadFire}))
+
+	m38bIDs := filterByNamePrefix(t, db, sentIDs, "m38b-")
+	require.Len(t, m38bIDs, 1, "AC-M38-B-2: fire path 应发送 1 次 (chA only)")
+	require.Contains(t, m38bIDs, chA.ID, "AC-M38-B-2: chA 必中")
+	require.NotContains(t, m38bIDs, chB.ID, "AC-M38-B-2: chB 未被勾, 必不中")
+
+	// AC-M38-B-3: 60s 窗口内同 (trigger_id, problem_start_unix) 第二次事件 → dedup drop
+	sentIDs = nil
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payloadFire}))
+	m38bIDs = filterByNamePrefix(t, db, sentIDs, "m38b-")
+	require.Empty(t, m38bIDs, "AC-M38-B-3: dedup 60s 窗口内同 key 第二次事件必须 drop, 不进 channels")
+
+	// AC-M38-B-4: 不同 problem_start_unix → 新事件 → 应发送
+	sentIDs = nil
+	payloadFire2 := []byte(fmt.Sprintf(
+		`{"event_type":"created","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":["%s"],"trigger_id":"%s","problem_start_unix":%d}`,
+		ruleA.ID, chA.ID, triggerID, problemStart+1,
+	))
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payloadFire2}))
+	m38bIDs = filterByNamePrefix(t, db, sentIDs, "m38b-")
+	require.Len(t, m38bIDs, 1, "AC-M38-B-4: 不同 problem_start_unix 不算重复, 应发送 1 次")
+
+	// AC-M38-B-5: AlertRuleTriggerMap.GORM 模型↔DB 漂移修复 - 回读 triggerid 字段
+	var gotMap models.AlertRuleTriggerMap
+	require.NoError(t, db.Where("triggerid = ?", triggerID).First(&gotMap).Error)
+	require.Equal(t, ruleA.ID, gotMap.RuleID, "AC-M38-B-5: 回读 RuleID 必须匹配")
+
+	t.Logf("✅ M38-B 真 PG 五场景全过: 表存在 / UNIQUE 索引 / fire path 1 发 / 60s 内 dedup / 不同 start_unix 2 发 / GORM 回读")
 }

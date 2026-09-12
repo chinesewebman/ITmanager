@@ -155,9 +155,9 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 	if err := w.db.WithContext(ctx).Where("is_enabled = ?", true).Find(&channels).Error; err != nil {
 		return err
 	}
-	if len(channels) == 0 {
-		return nil // 没 channel 配, 不算错
-	}
+	// M38-B Round 10 修复: 即使 channels 全表为空, 也要走 NotifyUsers 路径 (NotifyUsers 与 channels 平级)
+	// 旧逻辑: len(channels) == 0 → return nil → 不发 user 通知, 把 NotifyUsers 也吞掉了
+	// 新逻辑: 0 条时 for 循环天然空, NotifyUsers 在 channel 路径后独立走
 	// M37-A：AlertRule.NotifyChannels 写不读修复
 	// NotifyChannelIDs != nil → 调用方明确给出要推的 channel ID 列表（解析自 AlertRule.NotifyChannels）
 	//   - 非空 → 过滤 channels，只推被勾的
@@ -509,4 +509,10 @@ func filterChannelsByIDs(channels []models.NotificationChannel, wantIDs []string
 // 不动方法语义, 仅做导出 (设计理由: 真 PG 集成测试需要"喂事件→观察推送"链路, 单测 sqlmock 已覆盖单元边界)
 func (w *Worker) HandleAlertEventForTest(ctx context.Context, e eventbus.Event) error {
 	return w.handleAlertEvent(ctx, e)
+}
+
+// M38-B：测试专用 exported wrapper, 让外部包 (db_smoke) 能注入 deduper
+// 生产路径靠 Start() 自动注入；测试需要直接 Set (Start 起 goroutine 不便)
+func (w *Worker) SetDeduperForTest(d *Deduper) {
+	w.deduper = d
 }
