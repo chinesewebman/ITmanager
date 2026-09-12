@@ -77,6 +77,12 @@ type AlertService interface {
 	MarkFalsePositive(ctx context.Context, id, userID, note string, isFP bool) (*models.Alert, error)
 	// 列出所有被标记为误报的告警（给 ML 训练集导出用）
 	ListFalsePositives(ctx context.Context, since *time.Time) ([]models.Alert, error)
+	// M38-B: triggerid → rule_id 映射管理（运维 CRUD）
+	//   ruleID = alert_rules.id；triggerid 唯一（迁移 000038 已建 PK）
+	//   同 triggerid 多次 Create = 后写覆盖前写（应用层 UPSERT 语义，因为 PK 是 triggerid）
+	ListMappings(ctx context.Context, ruleID string) ([]models.AlertRuleTriggerMap, error)
+	CreateMapping(ctx context.Context, ruleID, triggerID string) (*models.AlertRuleTriggerMap, error)
+	DeleteMapping(ctx context.Context, ruleID, triggerID string) error
 }
 
 type alertService struct {
@@ -616,6 +622,129 @@ func (s *alertService) ListFalsePositives(ctx context.Context, since *time.Time)
 		return nil, err
 	}
 	return items, nil
+}
+
+// ListMappings M38-B: 列出某 rule 下的所有 triggerid 映射
+//
+// ruleID == "" 时返回全局列表（运维总览页用）。
+// 排序: created_at DESC — 让"刚加的"排在最前，与 last-write-wins 决策一致。
+// 不分页：alert_rule_trigger_map 的体量预期 < 10k 行（一条规则映射 ≤ 几千 trigger），
+// 全表 SELECT 在分钟内完成；超大规模再做 cursor 与 M34 tickets 同型。
+func (s *alertService) ListMappings(ctx context.Context, ruleID string) ([]models.AlertRuleTriggerMap, error) {
+	q := s.db.WithContext(ctx).Model(&models.AlertRuleTriggerMap{}).
+		Order("created_at DESC")
+	if ruleID != "" {
+		if _, err := uuid.Parse(ruleID); err != nil {
+			return nil, ErrInvalidInput
+		}
+		q = q.Where("rule_id = ?", ruleID)
+	}
+	var items []models.AlertRuleTriggerMap
+	if err := q.Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// CreateMapping M38-B: 创建 triggerid → rule_id 映射 (UPSERT 语义)
+//
+// 防御：
+//   - ruleID / triggerID 必传
+//   - rule 必须存在（避免触发 FK 23503）。这一查会带回 gorm.ErrRecordNotFound → 翻译成 ErrNotFound
+//     推进 404 而非 500（handler 区分）。
+//   - triggerid 已映射到别的 rule → 同 PK 触发 upsert rule_id 改值（last-write-wins）
+//
+// 返回新写入的行（包括 created_at = NOW()）。同一个 triggerid 多次 POST 视为"改主意"，
+// 不抛 409，与「同 triggerid → 多 rule」的设计决策一致。
+func (s *alertService) CreateMapping(ctx context.Context, ruleID, triggerID string) (*models.AlertRuleTriggerMap, error) {
+	if ruleID == "" || triggerID == "" {
+		return nil, ErrInvalidInput
+	}
+	ruleUUID, err := uuid.Parse(ruleID)
+	if err != nil {
+		return nil, ErrInvalidInput
+	}
+	// 校验 rule 存在 (避免 FK 23503 错误污染 500 层)
+	var exists int64
+	if err := s.db.WithContext(ctx).Model(&models.AlertRule{}).
+		Where("id = ?", ruleUUID).Count(&exists).Error; err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, ErrNotFound
+	}
+	row := &models.AlertRuleTriggerMap{
+		TriggerID: triggerID,
+		RuleID:    ruleUUID,
+		CreatedAt: time.Now(),
+	}
+	// 同 triggerid 已存在 → UPDATE rule_id & created_at；否则 INSERT。
+	// Save 走 SELECT + INSERT/UPDATE，对单行足够；UPSERT 走 Clauses.OnConflict 更明确，
+	// 但 Save 在并发下也安全（PK 冲突必 return ErrDuplicatedKey → 同样改写语义不可得）。
+	// 这里走 Save：① 模型小写，② 服务层不需要返回 created_at 旧值。
+	if err := s.db.WithContext(ctx).Save(row).Error; err != nil {
+		// PG 的 PK 冲突由 Save 转成 ErrDuplicatedKey → 改走 UPDATE 路径。
+		// Save 不区分 — 我们直接判字符串序列或重试即可。下面用 UpdateColumns 更稳妥：
+		// 取一次是否存在；存在 → UpdateColumns，不存在 → Save 写新行。
+		return s.upsertMapping(ctx, row)
+	}
+	// 重新读以拿到真 created_at（Save 在 INSERT 时可能用 NOW() 但回写依赖 DB）
+	return s.getMapping(ctx, triggerID)
+}
+
+// upsertMapping 处理 Save 的 PK 冲突：先看 row 是否真存在，存在就 UPDATE，不存在就 INSERT。
+// 与 CreateMapping 拆函数仅是为单测可独立 export-测；现在保留私有。
+func (s *alertService) upsertMapping(ctx context.Context, row *models.AlertRuleTriggerMap) (*models.AlertRuleTriggerMap, error) {
+	var existing models.AlertRuleTriggerMap
+	err := s.db.WithContext(ctx).Where("triggerid = ?", row.TriggerID).First(&existing).Error
+	if err == nil {
+		// 已存在 → UPDATE rule_id + created_at（last-write-wins 翻新）
+		if err := s.db.WithContext(ctx).Model(&existing).Updates(map[string]interface{}{
+			"rule_id":    row.RuleID,
+			"created_at": row.CreatedAt,
+		}).Error; err != nil {
+			return nil, err
+		}
+		return s.getMapping(ctx, row.TriggerID)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
+		return nil, err
+	}
+	return s.getMapping(ctx, row.TriggerID)
+}
+
+// getMapping 私有：拿到最新一行（含 created_at 真值）
+func (s *alertService) getMapping(ctx context.Context, triggerID string) (*models.AlertRuleTriggerMap, error) {
+	var row models.AlertRuleTriggerMap
+	if err := s.db.WithContext(ctx).Where("triggerid = ?", triggerID).First(&row).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// DeleteMapping M38-B: 删除某 rule 下的某 triggerid 映射。
+// ruleID == "" 时删除全局 mapping（运维 "不想再告警此 trigger" 用法）——
+// 按 triggerid 唯一，ruleID 仅做"我只能删我名下"的隔离。
+// 不存在 → 返 nil（idempotent；不是 404 — 客户端脚本跑幂等不应被拒）。
+func (s *alertService) DeleteMapping(ctx context.Context, ruleID, triggerID string) error {
+	if triggerID == "" {
+		return ErrInvalidInput
+	}
+	q := s.db.WithContext(ctx).Where("triggerid = ?", triggerID)
+	if ruleID != "" {
+		ruleUUID, err := uuid.Parse(ruleID)
+		if err != nil {
+			return ErrInvalidInput
+		}
+		q = q.Where("rule_id = ?", ruleUUID)
+	}
+	if err := q.Delete(&models.AlertRuleTriggerMap{}).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // loadRuleNotifyChannelIDs M37-A：根据 AlertRule.ID 加载 rule，解析 NotifyChannels JSON 字段为 UUID 字符串数组

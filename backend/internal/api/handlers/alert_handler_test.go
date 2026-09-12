@@ -39,6 +39,10 @@ type mockAlertService struct {
 	bulkDeleteFunc  func(ctx context.Context, ids []string) (int64, error)
 	markFPFunc      func(ctx context.Context, id, userID, note string, isFP bool) (*models.Alert, error)
 	listFPFunc      func(ctx context.Context, since *time.Time) ([]models.Alert, error)
+	// M38-B: triggerid → rule_id 映射 (Round 3 占位, handler 测试暂不调用)
+	listMappingsFunc  func(ctx context.Context, ruleID string) ([]models.AlertRuleTriggerMap, error)
+	createMappingFunc func(ctx context.Context, ruleID, triggerID string) (*models.AlertRuleTriggerMap, error)
+	deleteMappingFunc func(ctx context.Context, ruleID, triggerID string) error
 }
 
 func (m *mockAlertService) List(ctx context.Context, f service.AlertFilter) ([]models.Alert, service.AlertStats, int64, error) {
@@ -124,6 +128,26 @@ func (m *mockAlertService) ListFalsePositives(ctx context.Context, since *time.T
 		return m.listFPFunc(ctx, since)
 	}
 	return nil, nil
+}
+
+// M38-B Round 3: 占位 mock 实现, 让接口实现完整; Round 6 的端点测试再覆盖调用。
+func (m *mockAlertService) ListMappings(ctx context.Context, ruleID string) ([]models.AlertRuleTriggerMap, error) {
+	if m.listMappingsFunc != nil {
+		return m.listMappingsFunc(ctx, ruleID)
+	}
+	return nil, nil
+}
+func (m *mockAlertService) CreateMapping(ctx context.Context, ruleID, triggerID string) (*models.AlertRuleTriggerMap, error) {
+	if m.createMappingFunc != nil {
+		return m.createMappingFunc(ctx, ruleID, triggerID)
+	}
+	return nil, service.ErrInvalidInput
+}
+func (m *mockAlertService) DeleteMapping(ctx context.Context, ruleID, triggerID string) error {
+	if m.deleteMappingFunc != nil {
+		return m.deleteMappingFunc(ctx, ruleID, triggerID)
+	}
+	return nil
 }
 
 // newAlertTestRouter 挂 /alerts 路由
