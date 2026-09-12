@@ -3293,3 +3293,130 @@ func TestDBSmoke_M38B_FirePathEnd2End(t *testing.T) {
 
 	t.Logf("✅ M38-B 真 PG 五场景全过: 表存在 / UNIQUE 索引 / fire path 1 发 / 60s 内 dedup / 不同 start_unix 2 发 / GORM 回读")
 }
+
+
+// ==================== M40 — JWT 用户禁用即时生效 (G-5) 真 PG 测试 ====================
+
+// TestDBSmoke_M40_JWTDisableTakesEffect 端到端验证：运维把 users.status 改成
+// inactive 后，该用户的旧 JWT 在下次请求时立即失效（cache 失效后必读 fresh DB）。
+//
+// 5 个场景：
+//  1. status=active + 旧 JWT → 200
+//  2. status=inactive（cache 已 invalidate）+ 旧 JWT → 401
+//  3. status 翻回 active → 200（cache 已 invalidate，重读 fresh）
+//  4. cache 内 status 翻转 → 仍 200（trade-off：30s TTL 内不感知）
+//  5. 物理删除用户（cache miss 时 DB 无结果 → 视为 inactive）→ 401
+//
+// 为什么必须走真 PG：
+//  - lookupUserStatus 用 `db.Raw("SELECT status FROM users WHERE id = ?", userID)`，
+//    必须验证这条 SQL 在真 PG 上能用（uuid 类型 / schema 对齐）。
+//  - 改 status 后需要真 UPDATE 触发 cache 重读；sqlmock 测不到 GORM 渲染细节。
+func TestDBSmoke_M40_JWTDisableTakesEffect(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 装一份最小 config（VerifyToken 内部 config.Get() 用）
+	smokeSetupMinConfig(t)
+
+	// 创建 m40 用户（status=active 默认）
+	userID := uuid.NewString()
+	user := &models.User{
+		ID:       uuid.MustParse(userID),
+		Username: "m40-user",
+		Role:     "admin",
+		Status:   "active",
+	}
+	require.NoError(t, db.Create(user).Error)
+
+	// cleanup
+	t.Cleanup(func() {
+		db.Where("id = ?", userID).Delete(&models.User{})
+	})
+
+	// 装上全局 DB（AuthMiddleware 内部 lookupUserStatus(db, userID) 用）
+	smokeSetDB(t, db)
+
+	// 装上仅 AuthMiddleware 的 router
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(middleware.AuthMiddleware())
+	r.GET("/m40/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok|"+c.GetString("username"))
+	})
+
+	// 签一个 JWT（用 middleware.GenerateToken 走同一密钥）
+	tok, err := middleware.GenerateToken(userID, user.Username, user.Role)
+	require.NoError(t, err)
+
+	// 场景 1: status=active + 旧 JWT → 200
+	middleware.InvalidateAuthStatusCacheForUser(userID) // 第一次必 cache miss → DB 读
+	w1 := smokeDoRequest(r, "Bearer "+tok)
+	require.Equal(t, http.StatusOK, w1.Code, "AC-M40-1 场景 1: active 用户 JWT 必须 200")
+
+	// 场景 2: status=inactive + 旧 JWT（清 cache 模拟「运维改 DB 后 TTL 到期」）→ 401
+	require.NoError(t, db.Model(user).Update("status", "inactive").Error)
+	middleware.InvalidateAuthStatusCacheForUser(userID)
+	w2 := smokeDoRequest(r, "Bearer "+tok)
+	require.Equal(t, http.StatusUnauthorized, w2.Code, "AC-M40-1 场景 2: inactive 用户旧 JWT 必须 401")
+
+	// 场景 3: status 翻回 active → 200
+	require.NoError(t, db.Model(user).Update("status", "active").Error)
+	middleware.InvalidateAuthStatusCacheForUser(userID)
+	w3 := smokeDoRequest(r, "Bearer "+tok)
+	require.Equal(t, http.StatusOK, w3.Code, "AC-M40-1 场景 3: 翻回 active 必须 200")
+
+	// 场景 4: cache TTL 内 status 翻转 → 仍 200（trade-off 钉死）
+	require.NoError(t, db.Model(user).Update("status", "inactive").Error)
+	// 不清 cache：上次场景 3 写的 cache 仍是 active
+	w4 := smokeDoRequest(r, "Bearer "+tok)
+	require.Equal(t, http.StatusOK, w4.Code, "AC-M40-3 场景 4: cache TTL 内 status 翻转不感知（trade-off）")
+
+	// 场景 5: 物理删除用户 → cache miss → DB 无结果 → 视为 inactive → 401
+	require.NoError(t, db.Where("id = ?", userID).Delete(&models.User{}).Error)
+	middleware.InvalidateAuthStatusCacheForUser(userID)
+	w5 := smokeDoRequest(r, "Bearer "+tok)
+	require.Equal(t, http.StatusUnauthorized, w5.Code, "AC-M40-4 场景 5: 物理删除用户 → cache miss → DB 无结果 → inactive → 401")
+
+	t.Logf("✅ M40 真 PG 五场景全过: active 200 / inactive 401 / 翻回 active 200 / cache TTL 内不感知 / 删除用户 401")
+}
+
+// smokeSetupMinConfig 装一份最小 config（VerifyToken 内部 config.Get() 用）。
+func smokeSetupMinConfig(t *testing.T) {
+	t.Helper()
+	old := smokeCurrentConfig()
+	config.SetForTest(&config.Config{Auth: config.AuthConfig{
+		JWT:          config.JWTConfig{Secret: "smoke-secret-32-bytes-for-hmac-sha256!", Expire: 3600},
+		APIKeyPepper: "smoke-pepper",
+	}})
+	t.Cleanup(func() { config.SetForTest(old) })
+}
+
+// smokeCurrentConfig 返回当前全局 config（不加载则 nil）。
+func smokeCurrentConfig() *config.Config {
+	var c *config.Config
+	func() {
+		defer func() { _ = recover() }()
+		c = config.Get()
+	}()
+	return c
+}
+
+// smokeSetDB 把 db 装上全局 database.DB 并恢复。
+func smokeSetDB(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	old := database.GetDB()
+	database.SetDBForTest(db)
+	t.Cleanup(func() { database.SetDBForTest(old) })
+	// 同时清空 cache（每轮 fresh）
+	middleware.InvalidateAuthStatusCacheForUser("") // 全部清掉
+}
+
+// smokeDoRequest 发 GET /m40/x 带 Bearer token。
+func smokeDoRequest(r *gin.Engine, authHeader string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/m40/x", nil)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	r.ServeHTTP(w, req)
+	return w
+}

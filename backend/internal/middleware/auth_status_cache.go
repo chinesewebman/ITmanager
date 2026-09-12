@@ -79,6 +79,15 @@ func resetAuthStatusCache() {
 	defaultAuthStatusCache.data = make(map[string]authStatusCacheEntry)
 }
 
+// InvalidateAuthStatusCacheForUser 测试用：清掉指定 user_id 的 cache 条目，
+// 用于「模拟 cache 自然过期」的测试场景（真 PG db_smoke 不能 sleep 31s）。
+//
+// 生产代码不应调用此函数；运维封禁场景的 cache 滞后 30s 是设计取舍
+//（FIX-PLAN-M40 §edges「多副本部署下 cache 是 per-process」）。
+func InvalidateAuthStatusCacheForUser(userID string) {
+	defaultAuthStatusCache.invalidate(userID)
+}
+
 // lookupUserStatus 查 DB 拿当前 users.status 并写 cache。
 //
 // 调用点：AuthMiddleware JWT 路径 cache miss 时。返回 ("", err) 表示 DB 错误
