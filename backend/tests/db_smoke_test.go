@@ -1645,26 +1645,27 @@ func TestDBSmoke_Migration027BlockedByDuplicates(t *testing.T) {
 // 注意两点：
 //  1. migrate.Down 只回滚**最新已应用版本**（internal/migrate/migrate.go:245）——
 //     每新增一个迁移就要多回滚一次，否则本用例会静默变成「回滚上一层」的空转。
-//     当前最高版本是 000027（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地），
-//     故十四次 Down = 27 → 26 → 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
+//     当前最高版本是 000028（000022 空缺，被 plan 里 P20 的 pg_trgm 预占、尚未落地；
+//     000028 = M34 D-1 工单子集幂等迁移，down 是 SELECT 1 noop），
+//     故十五次 Down = 28 → 27 → 26 → 25 → 24 → 23 → 21 → 20 → 19 → 18 → 17 → 16 → 15 → 14 → 13。
 //     **多滚 / 少滚都不会被链上断言发现**：下面全是「索引没了」的 assert.False，晚一步仍为真。
-//     故本用例在**首尾各加一条正向断言**：开头钉「头一次 Down 滚的确实是 000027」，
+//     故本用例在**首尾各加一条正向断言**：开头钉「头一次 Down 滚的确实是 000028」，
 //     结尾钉「000012 必须还在（多滚一层的唯一暴露点）」。
 //     下面每一步只写「回滚 0000NN」不写序数：序数本身会随新增迁移整体后移，是这行
 //     注释里最容易变成假话的部分（历史上就写重过两个「第三次」，M27 加 000027 时
-//     又整体后移一位），版本号才是不变量。
+//     又整体后移一位，M34 加 000028 再后移一位），版本号才是不变量。
 //  2. 本用例会回滚 000013，必须放在依赖 000013 的用例之后运行。
 func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	db := openSmokeDB(t)
 
-	// 前置 1：必须已应用到 000021（本用例回滚 21→20→19→18→17→16→15→14→13）。缺失要**红**不是跳过 —— 审计 F-A。
+	// 前置 1：必须已应用到 000028（M34 D-1 顶层）。缺失要**红**不是跳过 —— 审计 F-A。
 	var applied int64
-	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 21`).
+	if err := db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 28`).
 		Scan(&applied).Error; err != nil {
 		t.Fatalf("读取 schema_migrations 失败:\n%v", err)
 	}
 	if applied == 0 {
-		t.Fatalf("库未应用到 000021 —— 本用例要回滚 21→20→19→18→17→16→15→14→13，前置不满足")
+		t.Fatalf("库未应用到 000028 —— 本用例要回滚 28→27→...→13，前置不满足")
 	}
 
 	// 前置 2：必须是**升级路径**库。回滚链里要断言 000014 的回填值仍在（assertJSONB），
@@ -1710,6 +1711,18 @@ func TestDBSmoke_DownPreservesLegacyColumns(t *testing.T) {
 	}
 
 	migrate.FS = network_monitor_platform.MigrationsFS
+
+	// Down = 回滚 000028（M34 D-1 工单子集幂等迁移）：down 是 SELECT 1 noop，
+	// 不动 ticket_type 的 NULL-ability, 也不删任何列;只销版本号。 多这一步
+	// 是因为 migrate.Down 只滚**最新已应用版本**, 加了 28 之后, 整条链
+	// 起点必须从 28 开始, 否则下面所有 "第 N 次 Down 滚掉 0000NN" 的断言
+	// 都会静默错位 (M27 加 000027 时的同一类教训).
+	require.NoError(t, migrate.Down(db), "回滚 000028 失败")
+	var v28 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 28`).
+		Scan(&v28).Error)
+	assert.Zero(t, v28, "首次 Down 必须滚掉 000028 —— 否则后面每一次 Down 都在滚错的那一层")
+	// down 000028 是 noop, ticket_type 仍允许 NULL, 但模型预期也是允许 NULL, 不需断言
 
 	// Down = 回滚 000027：只删部分唯一索引，数据不动
 	require.NoError(t, migrate.Down(db), "回滚 000027 失败")
