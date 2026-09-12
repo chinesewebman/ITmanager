@@ -81,7 +81,7 @@ CREATE TABLE alerts (
     status TEXT, ack_time DATETIME, ack_user TEXT, resolve_time DATETIME, resolve_user TEXT,
     is_false_positive BOOLEAN DEFAULT false, marked_by TEXT, marked_at DATETIME,
     false_positive_note TEXT, ticket_id TEXT, asset_id TEXT, source TEXT,
-    repeat_count INTEGER, created_at DATETIME, updated_at DATETIME
+    alert_rule_id TEXT, repeat_count INTEGER, created_at DATETIME, updated_at DATETIME
 );
 -- 000027 的部分唯一索引，谓词与迁移逐字相同（sqlite 支持部分索引）。
 -- 少了它，SyncFromZabbix 的 ON CONFLICT (trigger_id, problem_start) WHERE ... 会直接报

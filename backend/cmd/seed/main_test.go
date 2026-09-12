@@ -190,6 +190,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 			ticket_id TEXT,
 			asset_id TEXT,
 			source TEXT,
+			alert_rule_id TEXT,
 			repeat_count INTEGER DEFAULT 0,
 			created_at DATETIME,
 			updated_at DATETIME

@@ -42,7 +42,7 @@ func newTopologyTestDB(t *testing.T) *gorm.DB {
 			problem TEXT, problem_start DATETIME, problem_end DATETIME, duration INTEGER,
 			status TEXT DEFAULT 'problem', ack_time DATETIME, ack_user TEXT,
 			resolve_time DATETIME, resolve_user TEXT, ticket_id TEXT, asset_id TEXT,
-			source TEXT, repeat_count INTEGER, created_at DATETIME, updated_at DATETIME
+			source TEXT, alert_rule_id TEXT, repeat_count INTEGER, created_at DATETIME, updated_at DATETIME
 		)`,
 	} {
 		require.NoError(t, db.Exec(s).Error)
