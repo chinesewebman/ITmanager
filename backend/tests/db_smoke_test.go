@@ -17,6 +17,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2126,4 +2127,629 @@ func TestDBSmoke_AuditFieldTruncation(t *testing.T) {
 	require.True(t, strings.HasPrefix(got.RequestID, marker), "截断不得丢掉前缀（证明是本次这行）")
 
 	t.Logf("✅ 审计字段截断落库: path=%d runes, request_id=%q", utf8.RuneCountInString(got.Path), got.RequestID)
+
+	// G-55：models.AuditLog.Resource 标了 gorm:"size:100"，但迁移 DDL 是 VARCHAR(50) —— 这就是
+	// 漂了几轮的 G-55 的真源。middleware 的 sanitizeField 把 resource 截到 100，所以走 HTTP 时
+	// 永远不会超 50，因此「直接 INSERT 51 字符」是唯一能抓住这条漂移的姿势。命中 SQLSTATE 22001
+	// 才算守住了这条不变量；不命中说明中间有谁把列宽偷偷改回 100（或更大），用例就应改。
+	// 判据走 err.Error() 文本（同本文件 TestDBSmoke_NetBoxUpsert :707 的 23505 风格），不引 pgconn
+	// 直连的类型断言：gorm 这层没开 TranslateError，错误文本里**没有**SQLSTATE 之外的
+	// 「detailed key value」之类的明文，运维拿这条去定位漂移足够。
+	overlong := strings.Repeat("r", 51)
+	err := db.Exec(
+		`INSERT INTO audit_logs (action, resource) VALUES (?, ?)`,
+		"g55-probe", overlong,
+	).Error
+	require.Error(t, err,
+		"G-55：51 字符的 resource 落进 VARCHAR(50) 必须被拒 —— 若不报错说明 DDL 漂移（列被偷偷加宽到 ≥51）")
+	assert.Contains(t, err.Error(), "22001",
+		"G-55：必须是 SQLSTATE 22001（string_data_right_truncation）—— 别的错误码意味着 DDL 与契约又漂了: %v", err)
+}
+
+// =============================================================================
+// M33 步骤 6：真 PG 端的字段截断守门（§6 U3/U4/U6/U7b/U8 + §7 M1..M11 红点收口）
+// =============================================================================
+//
+// 沿用 gold-template（TestDBSmoke_NetBoxUpsert :622-667）：httptest 假上游 + 真 SyncFrom* +
+// 真 PG。Handler 的路由在 protected 组后面挂了 auth/ratelimit/audit，走 SetupRouter 起
+// HTTP 面要再造一遍会话，恒等于替 mock 单独写测试；此处的「HTTP 200 / data.synced」语义由
+// svc.SyncFromXxx 的返回 (n, ft, nil) 一一对应（见 integration_handler.go :60-70），故走
+// 直调。U8 的「data.synced 不含 *_field_truncations 键」亦走 svc.SyncAll 的 results map 直查。
+//
+// 与 §6 U/U-spec 对照：
+//
+//	U3 / U4 —— 真 PG 上的截断落库（spec 主身 = HTTP 200，gold = 直调；两者返回等价）
+//	U6      —— 9 有界 + 2 TEXT 全字段 == 断言（IMPL-TRUNCATION.md §6 :553-561 硬规约）
+//	U7b     —— 常量 == information_schema（§7 M7b 的「常量偏小」红点收口）
+//	U8      —— SyncAll 失败分支不写计数键（§7 M5 红点收口 / G-56 警示）
+//
+// fixtures 都用唯一前缀（m33-* / m33trunc-*），t.Cleanup 收尾；不留脏数据给后续用例。
+// =============================================================================
+
+// TestDBSmoke_NetBoxFieldTruncation U3（§6 / §7 M3? M4/M6/M8b 红点收口）
+//
+// httptest 假 NetBox 喂一条 device，name=300 汉字（>255）+ brand/model/sn/site_name 都
+// 各超长；调 svc.SyncFromNetBox 走真 PG，断言：
+//   - 200 等价（err == nil）；
+//   - assets 落库 +1；
+//   - fieldsTruncated > 0（覆盖 §7 M4「truncate 没 ++」的红点）；
+//   - 落库的 name 长度 == 255 字符（不是字节 —— utf8.RuneCountInString），brand/model/sn/
+//     site_name 都 == 100。覆盖 §7 M1「按 byte 截」的字节/字符红点。
+//
+// 走「走 HTTP 面的 red → 改后 green」思路，但用直调代替（gold-template 见 :622-667）：
+// handler 把 svc.SyncFromNetBox(ctx) 的 (count, ft, err) 一一透到 {netbox: count,
+// netbox_field_truncations: ft}（integration_handler.go :60-63），等价。
+func TestDBSmoke_NetBoxFieldTruncation(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 前置：000013 之后的 schema（assets.name 列从 asset_name 改名来）+ 000015 唯一索引。
+	var applied15 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 15`).
+		Scan(&applied15).Error)
+	if applied15 == 0 {
+		t.Fatalf("库未应用到 000015 —— SyncFromNetBox 的 ON CONFLICT 缺仲裁者，本用例前置不满足")
+	}
+
+	// 一个 300 汉字的 name —— utf8.RuneCountInString 比对，长度单位是字符而不是字节；
+	// ASCII 的 brand/model/sn/site_name 与汉字混跑，确保 M1「按 byte 截」的字节/字符红点都覆盖。
+	const nbID = 880033
+	overName := strings.Repeat("中", 300)
+	overBrand := strings.Repeat("A", 200) // device_type.slug → assets.brand
+	overModel := strings.Repeat("B", 200) // device_type.model → assets.model
+	overSN := strings.Repeat("C", 200)    // serial_number → assets.sn
+	overSite := strings.Repeat("S", 200)  // site.name → assets.site_name
+	payload := mustJSON(t, map[string]any{
+		"count": 1,
+		"results": []map[string]any{
+			map[string]any{
+				"id":            nbID,
+				"name":          overName,
+				"device_type":   map[string]any{"id": 1, "slug": overBrand, "model": overModel},
+				"device_role":   map[string]any{"id": 1, "slug": "switch", "name": "switch"},
+				"site":          map[string]any{"id": 1, "slug": "dc", "name": overSite},
+				"serial_number": overSN,
+			},
+		},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM assets WHERE name LIKE '中%' AND source = 'netbox'`).Error
+	})
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Netbox: config.NetboxConfig{URL: srv.URL, Token: "t"},
+		},
+	}, nil)
+
+	// 用前缀查前后行数：测试用前缀（"中" 开头）+ source='netbox' 应该只多出 1 条。
+	var before, after int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM assets WHERE source = 'netbox' AND net_box_id = ?`, nbID,
+	).Scan(&before).Error)
+
+	n, ft, err := svc.SyncFromNetBox(context.Background())
+	require.NoError(t, err, "真 PG 上 SyncFromNetBox 失败 —— 截断代码或 ON CONFLICT 出问题")
+	require.Equal(t, 1, n, "应新增 1 条")
+	assert.Greater(t, ft, 0, "fieldsTruncated 必须 > 0 —— §7 M4 的红点")
+
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM assets WHERE source = 'netbox' AND net_box_id = ?`, nbID,
+	).Scan(&after).Error)
+	assert.Equal(t, before+1, after, "assets 表对 net_box_id=%d 的行数应 +1", nbID)
+
+	// 逐字段断言：精确 == 列宽（字符数），不是 ≤。
+	// 列宽必须 == truncate.go 里的 9 个常量（asset_name 255 / brand 100 / model 100 /
+	// sn 100 / site_name 100）。这里用字面量是因为 db_smoke_test.go 与 integration
+	// 跨包，truncate.go 的常量是 unexported；U7b 用同样的字面量 + 信息架构 cross-check 把
+	// 字面量钉死。两边任一漂移，U7b 必先红。
+	var got models.Asset
+	require.NoError(t, db.First(&got, "net_box_id = ?", nbID).Error)
+	require.Equal(t, 255, utf8.RuneCountInString(got.Name), "name 应截到 255 字符")
+	assert.True(t, utf8.ValidString(got.Name), "name 必须是合法 UTF-8（按字节截断会切坏）")
+	require.Equal(t, 100, utf8.RuneCountInString(got.Brand), "brand 应截到 100 字符")
+	require.Equal(t, 100, utf8.RuneCountInString(got.Model), "model 应截到 100 字符")
+	require.Equal(t, 100, utf8.RuneCountInString(got.SN), "sn 应截到 100 字符")
+	require.Equal(t, 100, utf8.RuneCountInString(got.SiteName), "site_name 应截到 100 字符")
+
+	t.Logf("✅ U3 NetBox 截断落库: name=%d brand=%d model=%d sn=%d site_name=%d",
+		utf8.RuneCountInString(got.Name), utf8.RuneCountInString(got.Brand),
+		utf8.RuneCountInString(got.Model), utf8.RuneCountInString(got.SN),
+		utf8.RuneCountInString(got.SiteName))
+}
+
+// TestDBSmoke_ZabbixFieldTruncation U4（§6 / §7 M4/M8b 红点收口）
+//
+// httptest 假 Zabbix 喂一条 trigger，trigger_name=600 字符（>500）；调 svc.SyncFromZabbix，
+// 断言 alerts 表行 +1、fieldsTruncated > 0、trigger_name 落库 == 500 字符。
+func TestDBSmoke_ZabbixFieldTruncation(t *testing.T) {
+	db := openSmokeDB(t)
+
+	var applied27 int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = 27`).
+		Scan(&applied27).Error)
+	if applied27 == 0 {
+		t.Fatalf("库未应用到 000027（alerts zabbix 身份部分唯一索引）—— 本用例前置不满足")
+	}
+
+	// trigger_id 必须稳定可回查 —— 用 u4-trig- 前缀 + 唯一段，t.Cleanup 也用这个前缀。
+	marker := "u4-trig-" + uuid.NewString()[:8]
+	overDesc := strings.Repeat("Z", 600)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case bytes.Contains(raw, []byte(`"user.login"`)):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":"smoke-tok","id":1}`))
+		case bytes.Contains(raw, []byte(`"trigger.get"`)):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":[` +
+				`{"triggerid":"` + marker + `","description":"` + overDesc +
+				`","priority":5,"hosts":[{"hostid":"1","host":"u4host-01"}],` +
+				`"value":"1","lastchange":"1756728000"}` +
+				`],"id":2}`))
+		default:
+			t.Errorf("未预期的 Zabbix 请求: %s", raw)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM alerts WHERE trigger_id = ?`, marker).Error
+	})
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Zabbix: config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"},
+		},
+	}, nil)
+
+	var before int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM alerts WHERE source = 'zabbix'`).Scan(&before).Error)
+
+	n, _, ft, err := svc.SyncFromZabbix(context.Background())
+	require.NoError(t, err, "真 PG 上 SyncFromZabbix 失败")
+	require.Equal(t, 1, n, "应新增 1 条告警")
+	assert.Greater(t, ft, 0, "fieldsTruncated 必须 > 0 —— §7 M4 的红点")
+
+	var after int64
+	require.NoError(t, db.Raw(`SELECT count(*) FROM alerts WHERE source = 'zabbix'`).Scan(&after).Error)
+	assert.Equal(t, before+1, after, "alerts 表行数应 +1")
+
+	var got models.Alert
+	require.NoError(t, db.Where("trigger_id = ?", marker).First(&got).Error)
+	require.Equal(t, 500, utf8.RuneCountInString(got.TriggerName),
+		"trigger_name 应截到 500 字符（常量 = integration.colAlertTriggerName）")
+	assert.True(t, utf8.ValidString(got.TriggerName), "trigger_name 必须是合法 UTF-8")
+
+	t.Logf("✅ U4 Zabbix 截断落库: trigger_name=%d runes", utf8.RuneCountInString(got.TriggerName))
+}
+
+// TestDBSmoke_ThirdPartyFieldTruncation U6（§6 :553-561 硬规约 / §7 M6/M7/M7b/M10 红点收口）
+//
+// 11 字段全数覆盖：9 有界 + 2 TEXT。fixture 用 EXACT列宽+1 runes（汉字），2 个 TEXT 各
+// 含一个 NUL（\x00）—— 真 PG 真要走 StripControl 才能落库（旧代码这里整批 22021）。
+//
+// 真实列宽**从 information_schema 现查**（不硬编码），得到 limit[col]：
+//   - 落库值断言用 == 精确值（不是 ≤）：M7b「常量偏小」是 ≤ 抓不到的，必须 == 精确；
+//   - synced > 0 与 *_field_truncations > 0 必须同时为真；
+//   - 含 NUL 的 TEXT 字段必须**真落库成功**（旧代码这里是 22021 → 整批 0 行）。
+//
+// 不依赖 zabbix_metrics（M10 的靶心在 description 长度）。fixture 用真 httptest + 真
+// SyncFrom{*}，每个收尾 t.Cleanup 自清（不留脏数据）。
+func TestDBSmoke_ThirdPartyFieldTruncation(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 前置：000013 + 000015 + 000027 + 000026（SyncFrom* 各自的 ON CONFLICT 仲裁者都得到位）
+	for _, v := range []int{13, 15, 26, 27} {
+		var n int64
+		require.NoError(t, db.Raw(`SELECT count(*) FROM schema_migrations WHERE version = ?`, v).
+			Scan(&n).Error)
+		if n == 0 {
+			t.Fatalf("库未应用到 0000%02d —— 本用例前置不满足", v)
+		}
+	}
+
+	// ① 现查真实列宽。一次性查 11 列，limit[col] 全部走 information_schema（spec 硬规约）。
+	// 对 TEXT 列（alerts.problem / tickets.description），character_maximum_length IS NULL
+	// —— 我们的 fixture 不超长（pre\x00mid\x00post = 11 字符），断言按"剥 NUL 后 == 原长 - NUL 数"。
+	type colInfo struct {
+		Table  string
+		Column string
+		IsText bool // true = TEXT（character_maximum_length IS NULL）
+	}
+	colSpecs := []colInfo{
+		{Table: "assets", Column: "name"},
+		{Table: "assets", Column: "brand"},
+		{Table: "assets", Column: "model"},
+		{Table: "assets", Column: "sn"},
+		{Table: "assets", Column: "site_name"},
+		{Table: "alerts", Column: "trigger_name"},
+		{Table: "alerts", Column: "host_name"},
+		{Table: "tickets", Column: "title"},
+		{Table: "metric_snapshots", Column: "key"},
+		{Table: "alerts", Column: "problem", IsText: true},
+		{Table: "tickets", Column: "description", IsText: true},
+	}
+	limits := make(map[string]int, len(colSpecs))
+	for i := range colSpecs {
+		var lim sql.NullInt64
+		require.NoError(t, db.Raw(
+			`SELECT character_maximum_length FROM information_schema.columns
+			  WHERE table_name = ? AND column_name = ?`,
+			colSpecs[i].Table, colSpecs[i].Column,
+		).Scan(&lim).Error, "查 %s.%s 的 character_maximum_length 失败", colSpecs[i].Table, colSpecs[i].Column)
+		if colSpecs[i].IsText {
+			// TEXT 列就该是 NULL —— 整行没截断上限。spec §6 :557 真实列宽从
+			// information_schema 现查就是这个语义：查出来 NULL = TEXT（不截）。
+			require.False(t, lim.Valid,
+				"%s.%s 是 TEXT —— character_maximum_length 应是 NULL，却查到 %d",
+				colSpecs[i].Table, colSpecs[i].Column, lim.Int64)
+		} else {
+			require.True(t, lim.Valid,
+				"%s.%s 应有 character_maximum_length（限定类型）—— 实际是 TEXT/未限",
+				colSpecs[i].Table, colSpecs[i].Column)
+			limits[colSpecs[i].Table+"."+colSpecs[i].Column] = int(lim.Int64)
+		}
+	}
+
+	// ② 准备 fixture：每个有界字段 EXACT列宽+1 个字符，TEXT 字段含 \x00。
+	// 收尾靠的是 SyncFromGLPI 用 external_id，SyncFromZabbix 用 trigger_id，SyncFromNetBox
+	// 用 net_box_id，metric_sync 用 host.name==asset.name 的关联。
+	//
+	// 触发器需要 2 条：description 字段同时落到 trigger_name 与 problem（ConvertToAlert :300-301），
+	// 所以要一条「超长 + 干净」覆盖 trigger_name 长度断言、另一条「含 NUL」覆盖 problem
+	// StripControl 断言。两条 trigger_id 都稳定可回查。
+	const nbID = 880036
+	trigIDLong := "u6-trig-long-" + uuid.NewString()[:6]
+	trigIDNUL := "u6-trig-nul-" + uuid.NewString()[:6]
+	const ticketID = 8800360
+	metricHost := "u6metric-" + uuid.NewString()[:6]
+
+	nbName := strings.Repeat("中", limits["assets.name"]+1)
+	nbBrand := strings.Repeat("B", limits["assets.brand"]+1)
+	nbModel := strings.Repeat("M", limits["assets.model"]+1)
+	nbSN := strings.Repeat("S", limits["assets.sn"]+1)
+	nbSite := strings.Repeat("D", limits["assets.site_name"]+1)
+
+	// 第 1 条：trigger_name/host_name 超长（走 fc.truncate，problem 短无害）。
+	zabbixDescLong := strings.Repeat("Z", limits["alerts.trigger_name"]+1)
+	zabbixHostLong := strings.Repeat("H", limits["alerts.host_name"]+1)
+	// 第 2 条：description 含 NUL。JSON 不允许裸 NUL，必须按 JSON 规范写成 \u0000 序列；
+	// 解码后才落到 Go 字符串的 0x00，再过 StripControl。fixture 的服务端只发「合法 JSON」，
+	// 客户端（Go 的 json.Unmarshal）把 \u0000 解到 0x00 —— 模拟源侧真发 NUL。
+	zabbixProblemNULJSON := `pre\u0000mid\u0000post`
+
+	glpiTitle := strings.Repeat("T", limits["tickets.title"]+1)
+	// glpiDesc 的 NUL 在 httptest handler 里直接写 mustJSON 参数（Go 的 json.Marshal 会把
+	// 0x00 转义成 \u0000 序列，对端解码后才是真 NUL；fixture 编码侧的 \u0000 不在 Go 源里
+	// 出现，避免裸 NUL 把 httptest handler 的 JSON 字面量污染）。
+
+	metricKey := strings.Repeat("k", limits["metric_snapshots.key"]+1)
+
+	// 上游 fixture：3 个 httptest 服务各自只回答自己的 path。
+	nbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(mustJSON(t, map[string]any{
+			"count": 1,
+			"results": []map[string]any{
+				map[string]any{
+					"id":            nbID,
+					"name":          nbName,
+					"device_type":   map[string]any{"id": 1, "slug": nbBrand, "model": nbModel},
+					"device_role":   map[string]any{"id": 1, "slug": "switch", "name": "switch"},
+					"site":          map[string]any{"id": 1, "slug": "dc", "name": nbSite},
+					"serial_number": nbSN,
+				},
+			},
+		})))
+	}))
+	defer nbSrv.Close()
+
+	zbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case bytes.Contains(raw, []byte(`"user.login"`)):
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":"smoke-tok","id":1}`))
+		case bytes.Contains(raw, []byte(`"trigger.get"`)):
+			// 两条 trigger：第 1 条覆盖 trigger_name/host_name 截断，第 2 条覆盖 problem NUL 剥离。
+			// NUL 用 JSON 的 \u0000 转义序列 —— 客户端解码后才是真 0x00，过 StripControl 才能剥。
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":[` +
+				`{"triggerid":"` + trigIDLong + `","description":"` + zabbixDescLong +
+				`","priority":5,"hosts":[{"hostid":"1","host":"` + zabbixHostLong +
+				`"}],"value":"1","lastchange":"1756728000"},` +
+				`{"triggerid":"` + trigIDNUL + `","description":"` + zabbixProblemNULJSON +
+				`","priority":5,"hosts":[{"hostid":"2","host":"u6host-nul"}],` +
+				`"value":"1","lastchange":"1756728060"}` +
+				`],"id":2}`))
+		case bytes.Contains(raw, []byte(`"item.get"`)):
+			// metric 同步：必须用 metricHost 作 host.name 让 SyncMetricsFromZabbix 把它
+			// 关联到下面预置的资产（同名）。
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":[` +
+				`{"itemid":"u6-item-1","name":"u6 item","key_":"` + metricKey +
+				`","lastvalue":"1.0","units":"","value_type":0,` +
+				`"hosts":[{"hostid":"99","host":"` + metricHost + `"}]}` +
+				`],"id":10}`))
+		default:
+			t.Errorf("未预期的 Zabbix 请求: %s", raw)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer zbSrv.Close()
+
+	glpiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/initSession"):
+			_, _ = w.Write([]byte(`{"session_token":"smoke-sess"}`))
+		case strings.Contains(r.URL.Path, "/Ticket"):
+			_, _ = w.Write([]byte(mustJSON(t, []map[string]any{{
+				"id": ticketID, "name": glpiTitle,
+				// 用 mustJSON 编码 Go 字符串（其中 description 字段含真 0x00）→
+				// json.Marshal 会把它写成 \u0000 序列；客户端解码回 0x00 走 StripControl。
+				"content": "lead\x00trail",
+				"status":  1, "priority": 3, "date": "2026-06-15 10:00",
+			}})))
+		default:
+			t.Errorf("未预期的 GLPI 请求: %s", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer glpiSrv.Close()
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Netbox: config.NetboxConfig{URL: nbSrv.URL, Token: "t"},
+			Zabbix: config.ZabbixConfig{URL: zbSrv.URL, User: "admin", Password: "p"},
+			GLPI:   config.GLPIConfig{URL: glpiSrv.URL, AppToken: "a", UserToken: "u"},
+		},
+	}, nil)
+
+	// ③ 自建自清：用 metricHost 提前插一条资产，让 SyncMetricsFromZabbix 能 host.name == asset.name 关联上。
+	require.NoError(t, db.Exec(
+		`INSERT INTO assets (asset_type, name) VALUES ('server', ?)`, metricHost,
+	).Error, "为 metric 同步预置资产失败")
+	// pgx 驱动把 UUID 列以 string 返回，Scan 到 uuid.UUID 报「value out of range」（实测，见
+	// newSmokeAsset :358-366 的「字符串中转」惯用法）。
+	var assetForMetricIDStr string
+	require.NoError(t, db.Raw(`SELECT id::text FROM assets WHERE name = ?`, metricHost).
+		Scan(&assetForMetricIDStr).Error, "查预置资产 id 失败")
+	assetForMetricID, err := uuid.Parse(assetForMetricIDStr)
+	require.NoError(t, err, "uuid.Parse 预置资产 id 失败")
+
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM assets WHERE net_box_id = ?`, nbID).Error
+		_ = db.Exec(`DELETE FROM assets WHERE name = ?`, metricHost).Error
+		_ = db.Exec(`DELETE FROM alerts WHERE trigger_id IN (?, ?)`, trigIDLong, trigIDNUL).Error
+		_ = db.Exec(`DELETE FROM tickets WHERE external_id = ?`, fmt.Sprintf("%d", ticketID)).Error
+		_ = db.Exec(`DELETE FROM metric_snapshots WHERE asset_id = ?`, assetForMetricID).Error
+	})
+
+	// ④ 跑 4 条同步路径，全发出去
+	nNB, ftNB, err := svc.SyncFromNetBox(context.Background())
+	require.NoError(t, err, "SyncFromNetBox 失败")
+	assert.Greater(t, ftNB, 0, "NetBox fieldsTruncated > 0")
+	assert.Greater(t, nNB, 0, "NetBox synced > 0")
+
+	nZb, _, ftZb, err := svc.SyncFromZabbix(context.Background())
+	require.NoError(t, err, "SyncFromZabbix 失败")
+	assert.Greater(t, ftZb, 0, "Zabbix fieldsTruncated > 0")
+	assert.Greater(t, nZb, 0, "Zabbix synced > 0")
+
+	nGlpi, _, ftGlpi, err := svc.SyncFromGLPI(context.Background())
+	require.NoError(t, err, "SyncFromGLPI 失败")
+	assert.Greater(t, ftGlpi, 0, "GLPI fieldsTruncated > 0")
+	assert.Greater(t, nGlpi, 0, "GLPI synced > 0")
+
+	nMet, ftMet, err := svc.SyncMetricsFromZabbix(context.Background())
+	require.NoError(t, err, "SyncMetricsFromZabbix 失败")
+	assert.Greater(t, ftMet, 0, "metric fieldsTruncated > 0")
+	assert.Greater(t, nMet, 0, "metric written > 0")
+
+	// ⑤ 逐字段断言：utf8.RuneCountInString(落库值) == min(RuneCountInString(原始值), limit)
+	//    必须是 == 精确，不是 ≤ —— M7b「常量偏小」必须 == 才抓得住。
+	//
+	// 9 个有界 + 2 个 TEXT：有界按列宽精确等；TEXT 含 NUL 必须**真落库成功**（即
+	// 落库长度 ≤ 原长，且 NUL 已被剥 —— 否则 PG 22021 整批回滚 → 整行不存在，
+	// 任何 db.Query 都会查不到这条记录）。
+	assertNetBoxU6 := func(col string, src string) {
+		t.Helper()
+		var got string
+		require.NoError(t, db.Raw(
+			`SELECT `+col+` FROM assets WHERE net_box_id = ?`, nbID,
+		).Scan(&got).Error, "查落库 assets.%s 失败 —— 整批被回滚了？", col)
+		srcRunes := utf8.RuneCountInString(src)
+		want := srcRunes
+		if want > limits["assets."+col] {
+			want = limits["assets."+col]
+		}
+		assert.Equal(t, want, utf8.RuneCountInString(got),
+			"assets.%s：落库值 rune 数应 == min(srcRunes, %d)；== 而非 ≤ 是 M7b 的红点收口",
+			col, limits["assets."+col])
+		assert.True(t, utf8.ValidString(got), "assets.%s 必须是合法 UTF-8", col)
+	}
+	assertNetBoxU6("name", nbName)
+	assertNetBoxU6("brand", nbBrand)
+	assertNetBoxU6("model", nbModel)
+	assertNetBoxU6("sn", nbSN)
+	assertNetBoxU6("site_name", nbSite)
+
+	// alerts.trigger_name / host_name 必须 == 列宽精确（看 trigIDLong 这条）。
+	var alertTriggerName, alertHostName string
+	require.NoError(t, db.Raw(
+		`SELECT trigger_name, host_name FROM alerts WHERE trigger_id = ?`, trigIDLong,
+	).Row().Scan(&alertTriggerName, &alertHostName),
+		"alerts 行查不到（trigIDLong）")
+	assert.Equal(t, limits["alerts.trigger_name"], utf8.RuneCountInString(alertTriggerName),
+		"alerts.trigger_name：必须 == %d", limits["alerts.trigger_name"])
+	assert.Equal(t, limits["alerts.host_name"], utf8.RuneCountInString(alertHostName),
+		"alerts.host_name：必须 == %d", limits["alerts.host_name"])
+
+	// alerts.problem 是 TEXT 且含 NUL（看 trigIDNUL 这条），必须能查得到
+	// （NUL 已被 StripControl 剥掉，**证明旧代码 22021 路径不在了**）。
+	var alertProblem string
+	require.NoError(t, db.Raw(
+		`SELECT problem FROM alerts WHERE trigger_id = ?`, trigIDNUL,
+	).Scan(&alertProblem).Error,
+		"alerts 行查不到 —— 含 NUL 的 problem 让整批回滚了？（旧代码 22021 路径）")
+	assert.Equal(t, "premidpost", alertProblem,
+		"alerts.problem 必须剥掉 NUL 后整段落库成功 —— 旧代码这里整批 22021；这里是 M2 的关键红点")
+
+	// tickets.title 必须 == 列宽精确；tickets.description 是 TEXT 且含 NUL，同上。
+	var tkTitle, tkDesc string
+	require.NoError(t, db.Raw(
+		`SELECT title, description FROM tickets WHERE external_id = ?`, fmt.Sprintf("%d", ticketID),
+	).Row().Scan(&tkTitle, &tkDesc),
+		"tickets 行查不到 —— 含 NUL 的 description 让整批回滚了？")
+	assert.Equal(t, limits["tickets.title"], utf8.RuneCountInString(tkTitle),
+		"tickets.title：必须 == %d", limits["tickets.title"])
+	assert.Equal(t, "leadtrail", tkDesc,
+		"tickets.description 必须剥掉 NUL 后整段落库成功 —— M2 红点")
+
+	// metric_snapshots.key 必须 == 列宽精确。
+	var snapKey string
+	require.NoError(t, db.Raw(
+		`SELECT key FROM metric_snapshots WHERE asset_id = ?`, assetForMetricID,
+	).Scan(&snapKey).Error, "metric_snapshots 行查不到")
+	assert.Equal(t, limits["metric_snapshots.key"], utf8.RuneCountInString(snapKey),
+		"metric_snapshots.key：必须 == %d", limits["metric_snapshots.key"])
+
+	t.Logf("✅ U6 全字段截断 + NUL 剥离落库: name=%d/%d brand=%d/%d trigger=%d/%d ticket=%d/%d metric=%d/%d",
+		utf8.RuneCountInString(nbName), limits["assets.name"],
+		utf8.RuneCountInString(nbBrand), limits["assets.brand"],
+		utf8.RuneCountInString(zabbixDescLong), limits["alerts.trigger_name"],
+		utf8.RuneCountInString(glpiTitle), limits["tickets.title"],
+		utf8.RuneCountInString(metricKey), limits["metric_snapshots.key"])
+}
+
+// TestDBSmoke_ColumnWidthMatchesConstant U7b（§6 / §7 M7a+M7b 红点收口）
+//
+// 真 PG 的 information_schema 是 DDL 的真源 —— 与 truncate.go 的 9 个常量做精确比对：
+//
+//	assets.name=255 / brand=100 / model=100 / sn=100 / site_name=100
+//	alerts.trigger_name=500 / host_name=255
+//	tickets.title=255
+//	metric_snapshots.key=100
+//
+// 失败判定：任一列宽与字面量不一致 → t.Errorf；U7a 已经有同义断言（gorm tag），U7b 是
+// 真库侧的二次确认。M7「常量偏大」、M7b「常量偏小」都能抓到。
+//
+// 字面量与 truncate.go 的 9 个常量一一对应；db_smoke_test.go 与 integration 跨包，
+// truncate.go 的常量是 unexported —— 把字面量钉死在断言里，每行都注明来源常量名，
+// 任一漂移此用例必先红。
+func TestDBSmoke_ColumnWidthMatchesConstant(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 列宽期望值（= truncate.go 的 9 个常量）。注释里写清对应常量名：常量漂移时此用例必红。
+	// 顺序与 §6 spec 一致：先 5 个 assets、再 2 个 alerts、再 tickets.title、最后 metric.key。
+	want := []struct {
+		Table  string
+		Column string
+		Expect int
+		Const  string
+	}{
+		{"assets", "name", 255, "colAssetName"},
+		{"assets", "brand", 100, "colAssetBrand"},
+		{"assets", "model", 100, "colAssetModel"},
+		{"assets", "sn", 100, "colAssetSN"},
+		{"assets", "site_name", 100, "colAssetSiteName"},
+		{"alerts", "trigger_name", 500, "colAlertTriggerName"},
+		{"alerts", "host_name", 255, "colAlertHostName"},
+		{"tickets", "title", 255, "colTicketTitle"},
+		{"metric_snapshots", "key", 100, "colMetricKey"},
+	}
+
+	for _, w := range want {
+		var got sql.NullInt64
+		require.NoError(t, db.Raw(
+			`SELECT character_maximum_length FROM information_schema.columns
+			  WHERE table_name = ? AND column_name = ?`, w.Table, w.Column,
+		).Scan(&got).Error, "查 %s.%s 列宽失败", w.Table, w.Column)
+		require.True(t, got.Valid,
+			"%s.%s 必须有 character_maximum_length —— 不应是 TEXT/未限", w.Table, w.Column)
+		assert.Equal(t, w.Expect, int(got.Int64),
+			"§7 M7/M7b 红点：%s.%s 的真实列宽(%d) ≠ truncate.go %s(%d) —— "+
+				"三者之一必漂：迁移 DDL、模型 tag、truncate.go 常量",
+			w.Table, w.Column, int(got.Int64), w.Const, w.Expect)
+	}
+
+	t.Logf("✅ U7b 9 列宽全部 == truncate.go 常量")
+}
+
+// TestDBSmoke_SyncAllFailureOmitsKeys U8（§6 / §7 M5 红点收口 / G-56 警示）
+//
+// 强制 SyncAll 失败 mid-way：把 NetBox URL 指向 127.0.0.1:1（必连失败），让 SyncFromNetBox
+// 在 SyncAll 最开头就抛错。结果：results map 应是空 map（无 netbox / zabbix / glpi / 任何
+// *_field_truncations 键）；M5 的红点（「失败分支也写 *_field_truncations」）会让
+// results 出现 *_field_truncations=0 的键。
+//
+// 关键设计：用空 URL 不会让 SyncFromNetBox 真的去连（NewIntegrationService 的 URL 为空时
+// zabbix 客户端一样初始化但 netbox 客户端会怎样？见 internal/integration/service.go :47）。
+// 用不可达的地址更安全 —— TCP 拨号立刻 ECONNREFUSED。同步超时 syncTimeout 是 5min，本用例
+// 不能挂 5min。httptest server.Close() 之后立即调：Close 之后 httptest URL 上的连接会被
+// 拒为 RST —— 同步代码的 doRequest 应当返回 error 而不是挂。
+func TestDBSmoke_SyncAllFailureOmitsKeys(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 起一个立刻关掉的 httptest server —— SyncAll 走 NetBox 的第一条请求就被 RST，
+	// 返回 error。这条 RST 是「NetBox 调不通」的最小成本复现，比指向 127.0.0.1:1 快得多。
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	deadURL := deadSrv.URL
+	deadSrv.Close() // 关掉之后所有请求都是 connection refused
+
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	// 用 context 限死 10s —— 真要同步会等到 5min，但死掉的 httptest 立刻 RST，10s 余量很够。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	svc := integration.NewIntegrationService(&config.Config{
+		Integrations: config.IntegrationsConfig{
+			Netbox: config.NetboxConfig{URL: deadURL, Token: "t"},
+			Zabbix: config.ZabbixConfig{URL: deadURL, User: "admin", Password: "p"},
+			GLPI:   config.GLPIConfig{URL: deadURL, AppToken: "a", UserToken: "u"},
+		},
+	}, nil)
+
+	results, err := svc.SyncAll(ctx)
+	require.Error(t, err, "死上游应让 SyncAll 失败 —— 否则是测试本身的假绿（service 把错误吞了）")
+
+	// §7 M5 红点收口：失败时 results 不应包含任何 *_field_truncations 键。
+	// 注意：成功的子同步写键、失败的子同步**不写**键。本用例三个子同步全部失败 →
+	// results 应该是空 map（连 netbox/zabbix/glpi 都不该出现）。
+	// 反证：若 service.go 在 err 分支也写 results["netbox_field_truncations"]=0 之类的，
+	// 这里会失败。
+	for k := range results {
+		assert.NotContains(t, k, "_field_truncations",
+			"§7 M5 红点：失败分支不应写 *_field_truncations 键 —— 发现 %q (=%d)", k, results[k])
+	}
+
+	// 同步守门：成功键（netbox/zabbix/glpi/netbox/zabbix_truncated/glpi_skipped）也不该出现
+	// —— 三个子同步都失败意味着一个都没真正同步成功，写这些键就是脏数据。
+	for _, k := range []string{"netbox", "zabbix", "glpi", "zabbix_truncated", "glpi_skipped"} {
+		assert.NotContains(t, results, k,
+			"子同步全失败时 %q 不该出现在 results —— 出现就是 §7 M5 的对称红点", k)
+	}
+
+	t.Logf("✅ U8 SyncAll 失败分支结果集干净：results=%v err=%v", results, err)
 }
