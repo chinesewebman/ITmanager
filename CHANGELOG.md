@@ -249,6 +249,21 @@ R1 是 v3 改造点一：把 ITmanager 从「自建 LLM 问答」重定位为「
 
 v3 §7 A-1 / A-2 / A-6 三条验收从「TODO」转「DONE」。后续阶段 1~3 实施见 IMPL §3。
 
+- **M35-R2 — vCenter VM 纳管 docs Stage 0（2026-09-12）**
+
+R3 决策 ITmanager 不直连 vCenter，从 NetBox 读 VM（单一 SoT = NetBox）；风险条款硬约束走 24h 人工确认窗口 + 30 天软退役缓冲。本轮 docs-only Stage 0，5 commits 加 1 IMPL：
+
+- **intent-M35-R2.md** (`0dffde0`) — `intent-spec-author` 产物：5 outcomes / 5 AC / 4 edges / 5 not_goals / 5 evidence。
+- **02-资产管理.md §2.8** (`1fa4c26`) — 字段对照表（NetBox VirtualMachine 12 字段 → ITmanager asset view）+ 渲染规则 4 条（kind=vm / vm_fields JSON / NetBox 失联徽章 / 不引入新表）+ 与 §2.7 R2 协调（同一 view、单一 SoT、不双写）。
+- **03-监控采集.md §3.7** (`be09f84`) — vCenter 孤儿 VM 处理 runbook 4 阶段（dry-run 启用 + ≥7 天周观察期 + cleanup-with-confirm 24h 窗口 + ≥30 天全面启用加速）+ 异常处理 4 条 + 与 ITmanager 资产视图的接口（cleanup_queue 不落地、NetBox 失联徽章、30 天软退役）。
+- **ADR-0008** (`83323aa`) — 5 决策（D1 不直连 vCenter / D2 单一 SoT = NetBox / D3 24h 人工确认窗口 / D4 VM 不引入新表 / D5 字段对照 vs 双写不暴露 BIOS UUID）+ 副作用 + Round 索引（R1 docs / R2 dry-run / R3 Go 代码 / R4 加速）。
+- **FIX-PLAN-R3-VCENTER-VIA-NETOBOX.md** (`cb6c682`) — 4 stage 计划 + 5 AC + 5 Not doing + 6 风险 + 7 Verification + 8 Round 索引。
+- **IMPL-R3-VCENTER-VIA-NETOBOX.md** (`8a30c59`) — 端点契约（`GET /api/assets?kind=vm` + `vm_fields` JSON + orphan 字段）+ 3 stage 实施细节（Go 5 文件 + frontend 4 文件 + 运维 Docker 部署 yaml）。
+
+v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落，运维前置依赖运维就绪后再启 Round M35-R2-R2 落 Stage 2/3）。
+
+
+
 - **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
 
 - **D-1 tickets 表 schema 收尾** (`4496087`) — `migrations/000028_tickets_schema_align.up.sql`：`DROP NOT NULL ticket_type`（让模型 `gorm:\"size:20\"` 可落库空串）；12 条 `ADD COLUMN IF NOT EXISTS` 显式零增量（与 `000013` 重复声明是为幂等保留、非新缺陷）。
