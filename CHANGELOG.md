@@ -237,13 +237,14 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
 
 - **TRAPS.md** (`e7c1a0e`) — 集中 27 个项目 trap（B1-4）
 
-### M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）
+- **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
 
 - **D-1 tickets 表 schema 收尾** (`4496087`) — `migrations/000028_tickets_schema_align.up.sql`：`DROP NOT NULL ticket_type`（让模型 `gorm:\"size:20\"` 可落库空串）；12 条 `ADD COLUMN IF NOT EXISTS` 显式零增量（与 `000013` 重复声明是为幂等保留、非新缺陷）。
 - **D-2 工单号 used-set+max+1** (`7fb2ca9`) — `models/ticket.go` 把 `generateTicketNumber` 与 `AssignTicketNumbers` 统一改「当日 used-set 求 max + 1」算法，**空洞免疫**（M26 的 G-25 残余边界「删过工单后 count 回退撞号」由此闭环）；新增 `usedTicketLabels` + `parseSeqSuffix` 工具函数。
 - **真 PG 守门 3 条** (`80be839`) — `tests/db_smoke_test.go` 新增 `TestDBSmoke_TicketsSchemaRoundTrip`（24 字段全开 insert）+ `TestDBSmoke_GenerateTicketNumberDayScoped`（25 张同号全 distinct：A..Z + AA）+ `TestDBSmoke_TicketNumberRetry`（23505 唯一索引兜底）。`scripts/db_smoke.sh` 白名单 + 1。
 - **FIX-PLAN + IMPL** (`bc63311` / `135e6ac`) — `docs/FIX-PLAN-D1-D2-TICKETS.md` + `docs/IMPL-D1-D2-TICKETS.md` 单独成文，D-1（tickets-only 子集）+ D-2 算法与测试守门逐条写定。
-- **门禁** — `gofmt -l` 干净、`go vet ./...` 干净（仅 sqlite3 C warning 系既有）、`go test ./internal/{redact,integration,models}/...` 全绿、`scripts/db_smoke.sh` 全新+升级两条路径全绿（37+3 = 40 cases）、Down 链 13 次改 14 次并逐行核过。
+- **M34-R3 G-58 U7b 常量漂移闭环** (`36cd221` + `8cbcac6` + `3778dd9`) — `truncate.go` 导出 `ColumnWidths() map[string]int`；U7b 改为从该 map 实时读 9 个期望值，**双向漂移守门**：M7b（Go 常量偏小）+ M7a（DDL 偏宽）均能被 U7b 抓到（M33 变异反证已发现该漏洞、登记为 G-58）。`require.Len` + `require.True(ok)` 防新增/缺列时静默通过；新 U7b 日志行 "live ColumnWidths 读取，G-58 闭环"。
+- **门禁** — `gofmt -l` 干净、`go vet ./...` 干净（仅 sqlite3 C warning 系既有）、`go test ./internal/{redact,integration,models}/...` 全绿、`scripts/db_smoke.sh` 全新+升级两条路径全绿（37+3 = 40 cases，M34-R3 沿用）、Down 链 13 次改 14 次并逐行核过。
 
 ### 工程 (chore)
 
