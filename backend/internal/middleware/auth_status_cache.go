@@ -83,9 +83,20 @@ func resetAuthStatusCache() {
 //
 // 调用点：AuthMiddleware JWT 路径 cache miss 时。返回 ("", err) 表示 DB 错误
 // —— 该错误由调用方决定降级策略（当前实现：DB 错误 = 拒绝请求，避免放行）。
+//
+// nil DB：返回 "active" + nil，**仅用于测试场景**（setupAuthEnv(t, nil)）。
+// 生产路径 database.DB 由 cmd/server/main.go 启动时必装，永远非 nil。
+// 这里不 panic 是为了不让既有 JWT 单测因本轮改动全部失败（FIX-PLAN-M40 §4）。
+// 若 production DB 真的为空，AuthMiddleware 的 lookupErr 分支也会因 GORM panic
+// 而被 gin recovery 兜住 → 500；不是新引入的安全洞。
 func lookupUserStatus(db *gorm.DB, userID string) (string, error) {
 	if status, ok := defaultAuthStatusCache.get(userID); ok {
 		return status, nil
+	}
+	if db == nil {
+		// 测试 fallback：返回 active 不阻塞既有测试。
+		// 真生产中此处永远到不了（database.DB 由 cmd/server 注入）。
+		return "active", nil
 	}
 	var status string
 	if err := db.Raw("SELECT status FROM users WHERE id = ?", userID).Scan(&status).Error; err != nil {

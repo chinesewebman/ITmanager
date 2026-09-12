@@ -18,10 +18,15 @@ func init() { gin.SetMode(gin.TestMode) }
 
 // TestMain 重置 rateLimiter 缓存保证测试隔离 (P2 引入 cache 后需要)
 // resetRateLimiterCache() 必须在每个测试运行前调用, 否则前一个测试的 bucket 状态污染下一个。
+//
+// M40 扩展：同时重置 authStatusCache（per-process in-memory，30s TTL）。
+// 两个 cache 都不需要 goroutine 清理。
 func TestMain(m *testing.M) {
 	resetRateLimiterCache()
+	resetAuthStatusCache()
 	code := m.Run()
 	resetRateLimiterCache()
+	resetAuthStatusCache()
 	os.Exit(code)
 }
 
