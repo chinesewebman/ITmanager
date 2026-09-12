@@ -128,8 +128,16 @@ function Settings() {
     try {
       const res: any = await integrationApi.syncNetBox()
       const synced = res?.data?.data?.synced?.netbox
+      // M33/D-6 残余：被截断的字段处数（不是条数、不是 0/1 标志）必须露出来。
+      // NetBox 字段截断是潜在数据完整性问题（assets.name/site 等），运维需要看到。
+      const fieldTruncations = res?.data?.data?.synced?.netbox_field_truncations ?? 0
       if (res?.data?.code === 0) {
-        message.success(`NetBox 同步完成，新增 ${synced ?? 0} 条资产`)
+        const base = `NetBox 同步完成，新增 ${synced ?? 0} 条资产`
+        message.success(
+          fieldTruncations > 0
+            ? `${base}；另有 ${fieldTruncations} 个字段被截断（详见后端日志）`
+            : base,
+        )
       } else {
         message.error(res?.data?.message || '同步失败')
       }
@@ -192,9 +200,17 @@ function Settings() {
       // M26/D-6：被跳过的票（档位越界）必须露出来。只报「新增 N 条」，运维无法区分
       // 「GLPI 里没有新票」和「有一批票因为档位不认识被丢掉了」—— 后者是静默丢数据。
       const skipped = res?.data?.data?.synced?.glpi_skipped ?? 0
+      // M33/D-6 残余：被截断的字段处数（不是条数、不是 0/1 标志）必须露出来。
+      // GLPI 字段截断是潜在数据完整性问题（tickets.title 等），运维需要看到。
+      const fieldTruncations = res?.data?.data?.synced?.glpi_field_truncations ?? 0
       if (res?.data?.code === 0) {
         const base = `GLPI 同步完成，新增 ${synced ?? 0} 条工单`
-        message.success(skipped > 0 ? `${base}；另有 ${skipped} 条档位越界被跳过（详见后端日志）` : base)
+        let suffix = ''
+        if (skipped > 0) suffix = `；另有 ${skipped} 条档位越界被跳过`
+        if (fieldTruncations > 0) suffix = `${suffix}；另有 ${fieldTruncations} 个字段被截断`
+        message.success(
+          skipped > 0 || fieldTruncations > 0 ? `${base}${suffix}（详见后端日志）` : base,
+        )
       } else {
         message.error(res?.data?.message || '同步失败')
       }
@@ -262,10 +278,17 @@ function Settings() {
       // 源侧 6000 条时 UI 显示「另有 1 条」，运维看到 1 就不会去查那 1000 条。
       // 注意与 handleSyncGLPI 的差别是有意的：那边插值的 glpi_skipped **是条数**。
       const truncated = res?.data?.data?.synced?.zabbix_truncated ?? 0
+      // M33/D-6 残余：被截断的字段处数（不是条数、不是 0/1 标志）必须露出来。
+      // zabbix_truncated 标志 → 源侧条数上限（0/1）；zabbix_field_truncations → 字段级
+      // 截断处数（潜在数据完整性问题）。两者语义不同，必须分别露出来。
+      const fieldTruncations = res?.data?.data?.synced?.zabbix_field_truncations ?? 0
       if (res?.data?.code === 0) {
         const base = `Zabbix 同步完成，新增 ${synced ?? 0} 条告警`
+        let suffix = ''
+        if (truncated > 0) suffix = `；另有告警因超过条数上限未导入`
+        if (fieldTruncations > 0) suffix = `${suffix}；另有 ${fieldTruncations} 个字段被截断`
         message.success(
-          truncated > 0 ? `${base}；另有告警因超过条数上限未导入（详见后端日志）` : base,
+          truncated > 0 || fieldTruncations > 0 ? `${base}${suffix}（详见后端日志）` : base,
         )
       } else {
         message.error(res?.data?.message || '同步失败')

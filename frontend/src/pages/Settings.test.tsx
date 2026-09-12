@@ -674,10 +674,17 @@ describe("Settings M27 Zabbix 同步截断透出", () => {
     vi.mocked(notificationApi.listChannels).mockResolvedValue({
       data: { code: 0, data: [] },
     } as any);
-    // 前置 1：按钮是 disabled={!integrationStatus?.zabbix?.enabled}，
-    // 不给 enabled=true 的话点击不触发 handler，断言会拿到 undefined（在错误方向变红）。
+    // 前置 1：按钮是 disabled={!integrationStatus?.{zabbix,netbox,glpi}?.enabled}，
+    // 不给对应 enabled=true 的话点击不触发 handler，断言会拿到 undefined（在错误方向变红）。
     vi.mocked(integrationApi.getStatus).mockResolvedValue({
-      data: { code: 0, data: { zabbix: { enabled: true } } },
+      data: {
+        code: 0,
+        data: {
+          zabbix: { enabled: true },
+          netbox: { enabled: true, has_token: true },
+          glpi: { enabled: true, has_app_token: true, has_user_token: true },
+        },
+      },
     } as any);
     vi.mocked(apiKeyApi.list).mockResolvedValue({
       data: { code: 0, data: [] },
@@ -741,5 +748,94 @@ describe("Settings M27 Zabbix 同步截断透出", () => {
       expect(vi.mocked(message.success)).toHaveBeenCalled();
     });
     expect(vi.mocked(message.success).mock.calls[0][0]).toBe("Zabbix 同步完成，新增 1 条告警");
+  });
+
+  // ======== M33/D-6 残余：字段级截断处数必须露出来（与源侧条数上限标志区分）========
+
+  it("NetBox 字段截断处数 > 0 → 提示「另有 N 个字段被截断」", async () => {
+    vi.mocked(integrationApi.syncNetBox).mockResolvedValue({
+      data: { code: 0, data: { synced: { netbox: 3, netbox_field_truncations: 7 } } },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    // NetBox 是第二个同步按钮
+    fireEvent.click(buttons[1]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toContain("NetBox 同步完成，新增 3 条资产");
+    expect(msg).toContain("另有 7 个字段被截断");
+    expect(msg).toContain("详见后端日志");
+  });
+
+  it("GLPI 字段截断处数 > 0 + skipped > 0 → 两个后缀同句（按字段/档位顺序）", async () => {
+    vi.mocked(integrationApi.syncGLPI).mockResolvedValue({
+      data: {
+        code: 0,
+        data: {
+          synced: {
+            glpi: 10,
+            glpi_skipped: 2,
+            glpi_field_truncations: 5,
+          },
+        },
+      },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    // GLPI 是第三个同步按钮
+    fireEvent.click(buttons[2]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toContain("新增 10 条工单");
+    expect(msg).toContain("另有 2 条档位越界被跳过");
+    expect(msg).toContain("另有 5 个字段被截断");
+  });
+
+  it("GLPI 字段截断处数 = 0 + skipped = 0 → 只出基文案，不出现「字段被截断」/「跳过」字样", async () => {
+    vi.mocked(integrationApi.syncGLPI).mockResolvedValue({
+      data: { code: 0, data: { synced: { glpi: 5 } } },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    fireEvent.click(buttons[2]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toBe("GLPI 同步完成，新增 5 条工单");
+  });
+
+  it("Zabbix truncated=1 + field_truncations=3 → 同时露出「上限」+「字段」两条信息", async () => {
+    vi.mocked(integrationApi.syncZabbix).mockResolvedValue({
+      data: {
+        code: 0,
+        data: {
+          synced: { zabbix: 0, zabbix_truncated: 1, zabbix_field_truncations: 3 },
+        },
+      },
+    } as any);
+
+    await renderIntegrationsTab();
+    const buttons = await screen.findAllByRole("button", { name: /立即同步/ });
+    fireEvent.click(buttons[0]);
+
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalled();
+    });
+    const msg = vi.mocked(message.success).mock.calls[0][0] as string;
+    expect(msg).toContain("超过条数上限");
+    expect(msg).toContain("另有 3 个字段被截断");
+    // 不能把 truncated 当条数写
+    expect(msg).not.toMatch(/另有\s*1\s*条/);
   });
 });
