@@ -920,6 +920,45 @@ require.NotEqual(t, http.StatusTooManyRequests, w.Code, "撞上限流桶 —— 
 
 ---
 
+### T-61. sqlite **不强制** `VARCHAR(n)` —— 长度类用例在 sqlite 基座上**修前就是绿的**(假绿)
+
+**状态**: ACTIVE | **类别**: 测试基座 / 方言差异
+
+**背景**: M33 要给「第三方超长字段 → `22001` → `CreateInBatches` 整批回滚」写回归用例。最自然的写法是拿 sqlite
+基座喂一条 `"中"×300`(列宽 `varchar(255)`)、断言「同步后落库值被截到 255」。细节审查(FIX-PLAN-TRUNCATION §9 A-2)
+报出: **这条用例在修复前的代码上也是绿的** —— sqlite 不报错、不截断、整批正常落库, 用例抓不到任何缺陷
+(变异「去掉截断」也不红)。
+
+**踩到的真相**: sqlite 的类型系统是**亲和性 (affinity)**, 不是约束 —— 列类型写成 `VARCHAR(255)` 也**不强制长度**;
+本仓库的 sqlite 基座干脆把列声明成 `TEXT`(`internal/integration/upsert_test.go:64` 起的手写 DDL:
+`name TEXT` / `trigger_name TEXT` / `title TEXT` / `description TEXT` …), **没有 `character_maximum_length`
+可言**。被测故障(`22001 value too long for type character varying(255)`; NUL 是 `22021`)**只在真 PG 上可达** ——
+于是「sqlite 全绿」不但不构成证据, 还是**最坏的那种绿**: 它让「修前必须红」这一步被静默跳过。
+
+**检测线索**:
+1. 用例断言的是「截断后的长度 / 列宽边界」, 却只在 sqlite 基座上跑(`go test ./internal/...`)。
+2. 「修前先跑一遍必须红」**没有独立证据**(没有旧代码上的失败记录) → 假绿无法被证伪。
+3. 变异「去掉截断 / 去掉剥离」后, 用例仍全绿。
+4. 断言写成 `≤ 列宽` 而不是 `== min(原始 rune 数, 列宽)`: 常量**偏小**(静默多丢字符)时同样绿。
+
+**解法**:
+- 长度/编码类用例**必须真 PG**(`backend/tests/db_smoke_test.go` + `scripts/db_smoke.sh` 的 `-run` 白名单;
+  **新用例不加白名单就是静默不跑 —— T-42**)。纯函数层的边界(rune 计数、n-1/n/n+1)可以留在单测里, 但
+  「这一列到底拒了多少字符」只能问真 PG。
+- 列宽从 `information_schema.columns.character_maximum_length` **现查**, 不要从 gorm `size:` tag 或迁移文本推
+  (同一事实的第二、三份副本, T-6 / G-53 都证明它会漂); 落库断言用 **`==` 精确值**。
+- 「真 PG 用例 + 白名单 + 修前红」三件套一起交, 缺一件就当作**没有回归网**。
+
+**同类**: T-48(sqlite 与 pgx 对 `time.Time` 处理相反 → 只有真 PG 测得出 `.UTC()`)、T-30(sqlite 列名解析大小写
+不敏感)、T-49(`RETURNING` 的 `RowsAffected` 虚报, sqlite 同样)、T-42(白名单静默不跑)、T-47(变异假信号)。
+
+**来源**: M29-C 先例(同一长度口径的守门用例最终落在真 PG 冒烟上 —— `TestDBSmoke_AuditFieldTruncation`, commit
+`2daae5a`; `TODO.md` G-44 条亦明记「sqlite 不复现，只能真 PG 测」)+ M33 复核(`docs/FIX-PLAN-TRUNCATION.md` §9 A-2;
+R1/R2 的变异 M7 常量偏大 / M7b 常量偏小 只能在真 PG 上分辩)。**M33 的 U3/U4/U6/U7b 因此必须真 PG —— 本轮尚未落地**
+(见 `TODO.md` G-45「未落地」段、G-53)。
+
+---
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -1001,6 +1040,7 @@ require.NotEqual(t, http.StatusTooManyRequests, w.Code, "撞上限流桶 —— 
 | — (M31 轮) | T-58 | ACTIVE |
 | — (M31 轮) | T-59 | ACTIVE |
 | — (M32 轮) | T-60 | ACTIVE |
+| — (M33 轮) | T-61 | ACTIVE |
 
 ---
 

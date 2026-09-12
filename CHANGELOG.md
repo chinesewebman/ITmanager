@@ -190,6 +190,41 @@ ITmanager 项目所有重要变更记录。版本遵循 [SemVer](https://semver.
   这是**修复**而非回归：原先的 500 行是静默截断，产物不完整且无提示。同时该端点**新增独立限流
   **10 次/分钟 per IP**（原只有组级 100/min）—— 高频轮询导出的脚本需要降低频率或改为按需触发。
   判定产物是否完整：比对响应头 `X-Total-Count` 与 CSV 数据行数（不含表头），或校验 `Content-Length`。
+- **M33 第三方文本截断保真 — G-45 结案：同步路径的第三方字段「剥控制字符 + 按字符截断」并透出计数**（`f20e5f0` 需求文档 rev2 →
+  `3a430ea` 步骤 2 细节文档 rev2 → `95e2803` 步骤 3a helper 层 → `e0a324b` 步骤 3b 四条同步路径接入 → `adeab55` 补漏
+  `db_smoke_test.go` 的 4 处签名连带；方案 `docs/FIX-PLAN-TRUNCATION.md` / `docs/IMPL-TRUNCATION.md`）
+  — **缺陷**：`internal/integration/` 对第三方字段**零截断**，任何一条超 `varchar(n)` 撞 `22001`（含 NUL 撞 `22021`），
+  而 GORM `CreateInBatches` 是「一次调用 = 一个事务」→ **整批 0 行**；三条手动路径（NetBox / Zabbix 告警 / GLPI）表现为
+  HTTP 500 且响应里不说是哪条哪个字段，指标 worker（`main.go:58`，`Tick: 5*time.Minute`）**无 HTTP 面、无前端入口** →
+  坏行从未落库 ⇒ 下一轮再被选中 ⇒ **永久卡死**。TEXT 列不是安全区：NUL 照样拒，而 `alerts.problem` /
+  `tickets.description` 与有界列同处一条事务。
+  **变更内容**：新增 `redact.TruncateRunes(s, max) (string, bool)`（按 **rune** 截断 —— PG `varchar(n)` 数的是**字符**，
+  按 byte 切会切出非法 UTF-8 → `22021`，等于没修）；新增 `internal/integration/truncate.go`：9 个列宽常量 + `sanitizeText`
+  （TEXT 列只剥不截，纯函数）+ `fieldCounter`（`truncate`/`text`/`count`/`String`，**截断与剥离分开记账**：截断进 API
+  计数、剥离只进日志明细）+ `logFieldSanitization`；四条路径接入 —— `SyncFromNetBox`（`name`/`brand`/`model`/`sn`/
+  `site_name`）、`SyncFromZabbix`（`trigger_name`/`host_name` 截断 + `problem` 只剥）、`SyncFromGLPI`（`title` 截断 +
+  `description` 只剥）、`SyncMetricsFromZabbix`（`key`）；`SyncFrom*` 返回值各加一个 `fieldsTruncated`，`SyncAll` 与
+  handler 按 `type` 透出新键，worker 接住原本被 `_` 丢弃的计数。`ConvertTo*` 签名、schema、`metric_sync` 的分批语义一字未动。
+  **受影响下游**：`POST /api/integrations/sync` 的 `data.synced` 新增 `netbox_field_truncations` / `zabbix_field_truncations` /
+  `glpi_field_truncations` / `zabbix_metrics_field_truncations`（**被截断的字段处数**，不是条数）；键**随 `type` 而变**
+  （`type=all` 不含指标键 → 四个键永不同时存在），**失败分支不写键** → 调用方一律 `?? 0` 兜底；既有 `zabbix_truncated`
+  （0/1 标志）语义与键名不变。**前端 `Settings.tsx` 本轮未补文案** → 新计数目前只在响应体与后端日志可见。
+  **自校验方法**：`cd backend && go test ./internal/redact/... ./internal/integration/...`（U1/U2/U5/U7a + 日志守卫四态；
+  实测 `ok`）+ `go test -race ./internal/integration/...`（D-10 的并发面）+ 真 PG `./scripts/db_smoke.sh`（白名单 **T-42**；
+  本轮**未加**新用例）。
+  **附带副作用**：`fieldCounter` 是本包**新引入**的聚合器（既有先例全是裸计数器），日志里出现
+  `[netbox] 字段截断 N 处，明细：name×3,sn×1` 与 `problem(stripped)×1` 句式（**只记字段名与次数，不记原值**）；
+  指标 worker 在 `ft>0` 时多一行 `tick ok: written=N, field_truncations=M`。
+  **未随本轮落地**（逐项有登记）：前端文案（D6）、`audit_logs.resource` 的常量/模型对齐（D7 → **G-55**）、
+  `openapi.yaml` 键清单 + `gen:api`（D8 → **G-57**）、真 PG 的 U3/U4/U6/U7b/U8 与冒烟白名单（→ **G-53** / **T-61**）。
+- ⚠️ **行为突变告知（M33，运维需知）**：① **同步导入的第三方字段开始被改写** —— 超列宽的字符串**截断尾部**（口径是
+  **字符**：多字节值整字符截，不会切出非法 UTF-8），含 NUL/控制字符的字符串**剥离后**才落库；在此之前这类行会让**整批**
+  同步失败（手动路径 500 / 指标路径每 5 分钟静默失败），所以「以前同步报错、现在成功但值短了」是**修复后的正常形态**。
+  ② **同一源字段可能被两处改写且口径不同**：Zabbix `trigger.description` → `trigger_name`（截 500）与 `problem`
+  （只剥不截）；与源端逐字比对会不同（`\t\n\r` 的剥离是与审计口径一致的有意取舍，见 `TODO.md` G-45 的「已知残留」段 —— 该项本轮未单独登记）。
+  ③ **响应体新增键**：按 key 取值的下游脚本加 `?? 0`；**枚举** `synced` 键的脚本会看到新键（键随 `type` 而变，见 G-56）。
+  ④ **日志**：真有截断/剥离时才多打一行（无事不刷）；指标 worker 多一行 tick 汇总。
+  判定「有没有被改短」：先看 `<path>_field_truncations` 是否 > 0，再看日志明细里的字段名。
 - ⚠️ **行为突变告知（M31，运维需知）**：**无运行时行为变更** —— 本轮零 Go 业务代码改动
   （只改 spec、生成物、测试与文档）。但**有一条部署侧的新要求**：见下条。
 - ⚠️ **部署侧新增要求（M31/§8.4.5）**：**不得把后端 8080 直接映射到 `0.0.0.0`**。

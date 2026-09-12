@@ -677,6 +677,43 @@ cd frontend && npx tsc --noEmit && npx eslint src --ext .ts,.tsx && npx vitest r
 
 ---
 
-## §11 实现记录
+## §11 实现记录（2026-09-12 回填）
 
-（待实现后回填）
+commit ↔ 步骤：`95e2803` = 步骤 3a（D1/D2）· `e0a324b` = 步骤 3b（D3/D4/D5）· `adeab55` = 补漏（`db_smoke_test.go` 的 4 处签名连带，`e0a324b` 用 `git add -A backend/internal` 漏掉了 `backend/tests/`）。
+**逐项偏差、未落地项与 M33 小结见 `docs/FIX-PLAN-TRUNCATION.md` §10**（本节只做 task 恢复简列，不重复证据）。
+
+| # | 内容 | 状态 |
+|---|---|---|
+| D1 | `redact.TruncateRunes` | ✅ `95e2803`（`max<=0` 原样返回 + 字节快路按 §1 落地） |
+| D2 | `internal/integration/truncate.go` | ✅ `95e2803`，**符号与 §2 不同**：没有 `sanitizeBounded`，「截断」是 `fieldCounter.truncate` 方法、「只剥」是纯函数 `sanitizeText` + `fieldCounter.text`（原因见 FIX-PLAN §10.1） |
+| D3 | `service.go` 三处字面量 + 三个 `SyncFrom*` 签名 + `SyncAll` 三键 | ✅ `e0a324b`（`var fc fieldCounter` 三处均在循环外） |
+| D4 | `metric_sync.go`：`Key` + 包级签名 7 个 return 点 + worker 接住计数 | ✅ `e0a324b` |
+| D5 | handler 4 个 case 透出 `<path>_field_truncations` | ✅ `e0a324b` |
+| D6 | `Settings.tsx` 3 处文案 + `Settings.test.tsx` 3 条断言 | ❌ **未落地**（§5.1 的 3 个 handler 差异表与 `:717` 正则硬约束都未用到） |
+| D7 | `audit.go` 100 → 50 + `models/user.go` `size:50` | ❌ **未落地** → `TODO.md` **G-55** |
+| D8 | `openapi.yaml` description 键清单 + `gen:api` | ❌ **未落地** → `TODO.md` **G-57**（生成物未变，故 CI 漂移门禁不红） |
+| D9 | 测试 8 个文件 + 冒烟白名单 | ⚠️ **部分**：`redact_test.go` / `truncate_test.go`（新增）/ `upsert_test` / `zabbix_truncate_test` / `zabbix_identity_test` / `metric_sync_test` ✅（6/8，多为签名连带）；`integration_handler_test.go` ❌、`db_smoke_test.go` 仅签名连带（新用例 ❌）、`Settings.test.tsx` ❌、`scripts/db_smoke.sh` 白名单 ❌（**T-42：没进白名单就是静默不跑**） |
+| D10 | 台账 5 个文件 | ✅ 本次提交（`TODO.md` / `CHANGELOG.md` / `docs/TRAPS.md` / `08-部署运维.md` / `docs/FIX-PLAN-TRUNCATION.md`） |
+
+| # | 用例 | 状态 |
+|---|---|---|
+| U1 | `TestTruncateRunes_按字符截断且输出合法UTF8` | ✅ 按 §1 的**管线形态**断言（`RuneCountInString == min(src, max)` 精确值 + 中文 255/256 + emoji 255/256 + `max<=0`），另加 `TestTruncateRunes_非法UTF8原样返回不做归一化` 钉住快路契约 |
+| U2 | `TestSanitizeText_剥控制字符保留可见内容` | ✅ 夹具含 `\x00`/`\x7f`/`\n`/`\r`/`\t` |
+| U3/U4 | Zabbix 超长真 PG、多字节组合 | ❌ 未落地（真 PG 白名单未加） |
+| U5 | 未超长不计数 + 值逐字未变 | ✅ `truncate_test.go`（含「正好等于上限」边界） |
+| U6 | 11 字段全超长 + NUL 样本 e2e | ❌ 未落地（§6 的 5 条断言规格无一实现） |
+| U7a | 常量 == 模型 `size:` tag | ✅ `Test列宽常量与模型size_tag一致`（反射 + 9 个常量全覆盖，无 `size` tag 即 `require` 失败） |
+| U7b | 常量 == `information_schema` | ❌ 未落地（真 PG） |
+| U8 | `SyncAll` 失败分支不写键 | ❌ 未落地（且**不能**走 HTTP，见 §3.4） |
+| U9 | 修前必须红 | ⚠️ 走 §8-1 的 HTTP 面做法以**接线探针**跑过一次（假 NetBox 喂 300 汉字 → 修前整批回滚 / 修后 `n=1`、`ft=1`、落库 255 字符前缀），**探针未保留**为用例 |
+
+| # | 变异 | 状态 |
+|---|---|---|
+| M1 | byte 切法 | ✅ 实测红在 U1 的 rune 计数（中文夹具 255 vs 85），已还原 |
+| M7b | `colAlertTriggerName = 400`（常量偏小） | ✅ 实测红在 U7a，已还原 |
+| M2/M3/M4/M5/M6/M7/M8a/M8b/M9/M10/M11 | 其余 11 条 | ⬜ 未逐条跑。**其中 M9（先截后剥）在纯 Go 面被间接覆盖**（**按代码推演，未实跑**）：`TestFieldCounter_同字段既剥又截` 喂 `"\x00" + 中×300` 并断言 `len([]rune(got)) == 255` —— 顺序反转会先截到 255 rune（含 NUL）再剥，得 254 → 红；M11 代码已接住计数但**无日志断言**，改回 `if _, _, err :=` 不会红 |
+
+**已知抓不到（沿用 §7 结论）**：`U+2028/2029/202E` 是否被剥（`StripControl` 本就不覆盖）；常量与**迁移**的漂移此前只能靠 U7b，纯 `go test` 结构上抓不到。
+
+**门禁记录**（**转自步骤 commit 的提交信息**，`95e2803`/`e0a324b` 两个 commit 各自记载一致）：`gofmt` 空 / `go vet` 空 / `go build ./...` OK / `go test ./...` 27 包全 ok / `go test -race ./internal/integration/...` ok / `./scripts/db_smoke.sh` ✅ / `tsc --noEmit` OK / `eslint` OK / `vitest Settings` 24 passed；`adeab55` 只补 `db_smoke_test.go` 的 4 处签名连带。
+本次台账提交（docs-only）另实测：`cd backend && go test ./internal/redact/... ./internal/integration/... -count=1` → 两包 `ok`（M33 的 U1/U2/U5/U7a 与日志守卫四态确在跑）。
