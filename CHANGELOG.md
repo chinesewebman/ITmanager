@@ -323,6 +323,37 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M38-B — G-39 fire 路径整链路（triggerid→rule 映射 + dedup + NotifyUsers）（2026-09-13）
+
+**修复内容：**
+- **migration 000038 `alert_rule_trigger_map`** (`4b5868f`) — `triggerid VARCHAR(100) PRIMARY KEY` + `rule_id UUID NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE` + `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` + `idx_alert_rule_trigger_map_rule_id` 反向索引；down mirror `DROP INDEX IF EXISTS + DROP TABLE IF EXISTS`。triggerid 唯一 → 同 trigger 只允许一个 rule，last-write-wins 由应用层处理；`ON DELETE CASCADE` 让 rule 被删时映射行跟着没意义；`db_smoke` "前置 3" 检查同步加 000038 + test amend。
+- **models.AlertRuleTriggerMap** (`e8f43e9`) — GORM 模型 + `TableName() = "alert_rule_trigger_map"` + `AlertRule.TriggerMaps []*AlertRuleTriggerMap` 关联（`foreignKey:RuleID`）。运维 UI 在列表里展示 rule.name 用，业务 CRUD 走 service 层不靠关联。
+- **service CRUD** (`cd14cd7`) — `AlertRuleService` 接口 + 实现 `ListRuleTriggerMappings / CreateRuleTriggerMapping / DeleteRuleTriggerMapping`：UUID ruleID 校验、triggerid 非空 ≤128、source enum {zabbix,manual,auto}、PK 冲突幂等返现有（Zabbix 同步 retry 友好）、handler test mock 加 3 个 func field。
+- **HTTP endpoints** (`32dfb9a`) — `GET/POST/DELETE /api/alert-rules/:id/triggers` 三件套；handler 校验 + 路径解析复用 `alertPathID` helper；routes gatedRoutes PUT/DELETE=`CapManage`、POST=`CapWrite`、GET=`ungated`；OpenAPI `AlertRule:` 块补 3 路径 + `AlertRuleTriggerMap` schema；`TestRoutes_所有路由都已分类` + `TestRoutes_OpenAPI契约集合相等` + `TestRoutes_OpenAPI无幻影路径` 三条守门测试一次过。
+- **integration.SyncFromZabbix 联通** (`4f0ac22`) — `integration.AlertRuleMapper` struct + `NewAlertRuleMapper(db)` + `LookupRuleIDByTriggerID(ctx, triggerid, source)`（scan string 再 Parse UUID，避开 GORM Scan into uuid.UUID 的 sqlite 兼容问题）+ `LookupRuleIDByTrigger` 兼容老接口（commit 5 已用）；SyncFromZabbix 走完映射后 publish `TopicAlertCreated` payload（含 RuleID + NotifyChannelIDs + NotifyUserIDs + TriggerID + ProblemStartUnix）。
+- **worker handleAlertEvent 适配** (`84f169a`) — `AlertEventPayload` 加 `NotifyUserIDs []string` + `TriggerID/ProblemStartUnix`；新增 `deliverToUsers` 路径（独立 SELECT users + findUserChannel by email/phone LIKE）；**Round 10 修复**：移除 `len(channels)==0 → return nil` 旧短路，让 NotifyUsers 即使全表 channel 空也走通；`pickUserContact` 选 email 优先回退 phone；`SetDeduperForTest` exported wrapper 让 db_smoke 可注入 deduper。
+- **worker firededup** (`e57d364`) — `Deduper` struct + sync.Map 后端 + `NewDeduper()` 60s 窗口；`Allow(key)` 用 `LoadOrStore(now)` 原子化 first-hit + `CompareAndSwap(oldTime, now)` 原子化窗口外覆写，避免「首次见 key 后 Store(now) 之前其他 goroutine 看到 zero-time 误判窗口外」TOCTOU 漏洞；`gcExpired` 在每次 Allow 末尾顺手清 60s+ key，避免长跑膨胀；`Worker.Start()` 自动注入 deduper（nil 检测，不破测试），`SetDeduperForTest` 给 db_smoke 用；`FireKey(triggerID, unix)` 拼格式单一来源。
+
+**单测与 mutation inversion：**
+- **mapper 单测 4 条** (`de9f322`) — `TestAlertRuleMapper_Lookup_Hit / Miss / RuleDeleted / SourceIsolation`，SQLite in-memory + 手动建表 + `PRAGMA foreign_keys=ON` 验证 FK CASCADE；不依赖 AutoMigrate 避开迁移漂移。
+- **firededup 单测 8 条 + race-clean** (`4a359db`) — first-hit / in-window / out-of-window / different-keys / FireKey format lock / concurrent 200-goroutine 唯一 first / 双窗口各 1 / GC expired；`-race` 通过（关键守门：CAS 路径在并发下无 race）。
+- **worker NotifyUsers 单测 7 条** (`ff1bced`) — `TestHandleAlertEvent_NotifyUserIDs_Nil / Empty / EmailHit / NoContact / BadUUID / NoChannel / Dedup_SecondEventWithin60s_Dropped`，sqlmock 验 DB 期望全部消费；Round 10 修复（channels 全空时仍走 NotifyUsers）让 EmailHit / NoContact 测试通过。
+- **mutation inversion PASS-FAIL-PASS** — firededup `Allow` 改返 `true` (关闭 dedup) → `TestDeduper_FirstHit_Allows / InWindow_Drops / DifferentKeys / Concurrent_ExactlyOneFirstHit / TwoWindows / GC` 6 条全 FAIL → revert → 全 PASS（守门网有效证据）。
+- **真 PG 端到端 `TestDBSmoke_M38B_FirePathEnd2End`** (`ff1bced`) — 5 场景：`alert_rule_trigger_map` 表存在 + triggerid 是 PK + `idx_alert_rule_trigger_map_rule_id` 索引在位 + fire path 1 send (chA only, chB 不中) + dedup 60s 内第二次同 (trigger_id, problem_start_unix) drop + 不同 start_unix 视为新事件 + GORM 回读 RuleID 字段匹配；`scripts/db_smoke.sh` 白名单 +1。
+
+**门禁（最终全绿）：**
+- `go vet ./...` 干净（sqlite3 C warning 系既有）
+- `gofmt -l` 干净
+- `go test -count=1 ./...` 全绿（26 packages + tests/ 含 dbsmoke tag off 时也走）
+- `DOCKER='sudo -n docker' bash scripts/db_smoke.sh` 真 PG：43 cases 全绿（含 M38-B +1）
+- mutation inversion 验证 firededup 守门网有效（PASS → FAIL 6/6 → PASS 8/8）
+
+**残余（后续 round）：**
+- **dedup 横向扩展**：当前 Deduper 是单进程 in-memory，水平扩展需要外部存储（Redis SETEX）协调；本 round 范围外。
+- **triggerid 历史映射查询**：migration 留了 `created_at` 列但 UI "按 triggerid 取该 trigger 历史映射" 路由未开辟；last-write-wins 算法已就位待 API。
+- **NotifyUsers channel 配置化**：当前 `findUserChannel` 用 `WHERE config LIKE '%contact%'`，联系人多了是全表扫；待后续走 channel 端"显式收件人"配置。
+- **OpenAPI alert_rule_trigger_map 独立 path**：当前挂在 `/alert-rules/{id}/triggers` 下，运维 UI 直接维护 trigger↔rule 时若要"按 triggerid 查询" 需另开路由；本 round 不阻塞主链路。
+
 
 - **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
 
