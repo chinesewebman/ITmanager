@@ -49,3 +49,9 @@ dumps/
 # backend/frontend 的 Dockerfile 永远进不了仓库（G-9 的根因之一）。现在这两个文件
 # 是交付物，必须跟踪；只忽略本地覆盖文件。
 docker-compose.override.yml
+
+# Agent knowledge-graph indexes (project-local rebuilds; do NOT commit)
+# 用斜杠结尾限定根目录：避免误匹配 backend/<x>/graphify-out 等未来子目录。
+# .codegraph 已自带 .codegraph/.gitignore，这里再加一次全局保险。
+graphify-out/
+.codegraph/
