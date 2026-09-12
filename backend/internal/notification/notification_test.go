@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -729,4 +730,129 @@ func TestHandleAlertEvent_日志不得被渠道名伪造(t *testing.T) {
 	assert.NotContains(t, logged, "\r", "渠道名里的 CR 不得进日志：%q", logged)
 	assert.NotContains(t, logged, "群\r\n", "渠道名里的 CR/LF 不得进日志")
 	assert.Contains(t, logged, "FORGED LINE", "内容保留（只是并进同一行），证明不是丢弃")
+}
+
+// ==================== M37-A: AlertRule.NotifyChannels worker 过滤测试 ====================
+// 设计参考: AC-M37-A-1/2/3 (intent-M37-A.md)
+//
+// 输入约定 (worker.handleAlertEvent 的契约):
+//   - payload NotifyChannelIDs != nil → 走过滤
+//     - 非空 → 只推被勾的 channel
+//     - 空数组 → 推 0 次（运维明确清空语义）
+//   - payload NotifyChannelIDs == nil → 走 fallback（推全启用 channels，与改动前一致）
+
+// TestHandleAlertEvent_按Rule过滤_发被勾的Ch M37-A AC-1
+func TestHandleAlertEvent_按Rule过滤_发被勾的Ch(t *testing.T) {
+	db, mock := newMockDB(t)
+	mockSender := &mockSender{typ: "dingtalk"}
+	RegisterSender("dingtalk", mockSender)
+	t.Cleanup(func() { delete(customSenders, "dingtalk") })
+
+	chA := uuid.New()
+	chB := uuid.New()
+	chC := uuid.New()
+	ruleID := uuid.New()
+
+	// 三条 enabled channels, payload 只勾了 chA + chB
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(chA.String(), "钉钉-A", "dingtalk", `{"webhook_url":"https://a"}`, true).
+			AddRow(chB.String(), "钉钉-B", "dingtalk", `{"webhook_url":"https://b"}`, true).
+			AddRow(chC.String(), "钉钉-C", "dingtalk", `{"webhook_url":"https://c"}`, true))
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	payload := []byte(fmt.Sprintf(`{"event_type":"resolved","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":["%s","%s"]}`,
+		ruleID, chA, chB))
+	require.NoError(t, w.handleAlertEvent(context.Background(), eventbus.Event{Payload: payload}))
+
+	require.Equal(t, int32(2), atomic.LoadInt32(&mockSender.hits),
+		"必须只发到 chA + chB, chC 一次都不发 (AC-M37-A-1)")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestHandleAlertEvent_RuleID空_走fallback全发 M37-A AC-2
+// 历史 alert: alert_rule_id=NULL, payload 不带 RuleID 与 NotifyChannelIDs (json 里字段直接没出现 → omitempty → nil)
+func TestHandleAlertEvent_RuleID空_走fallback全发(t *testing.T) {
+	db, mock := newMockDB(t)
+	mockSender := &mockSender{typ: "dingtalk"}
+	RegisterSender("dingtalk", mockSender)
+	t.Cleanup(func() { delete(customSenders, "dingtalk") })
+
+	chA := uuid.New()
+	chB := uuid.New()
+	chC := uuid.New()
+
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(chA.String(), "A", "dingtalk", `{"webhook_url":"https://a"}`, true).
+			AddRow(chB.String(), "B", "dingtalk", `{"webhook_url":"https://b"}`, true).
+			AddRow(chC.String(), "C", "dingtalk", `{"webhook_url":"https://c"}`, true))
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	// payload 没 rule_id / notify_channel_ids — 与改动前一致, 走全启用 fallback
+	require.NoError(t, w.handleAlertEvent(context.Background(),
+		eventbus.Event{Payload: []byte(`{"event_type":"resolved","trigger":"t","host_name":"h"}`)}))
+
+	require.Equal(t, int32(3), atomic.LoadInt32(&mockSender.hits),
+		"RuleID 空必须走 fallback 全发, 保持旧行为 (AC-M37-A-2)")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestHandleAlertEvent_Rule显式空_推0次 M37-A AC-3
+// 运维把 rule.NotifyChannels 显式清空 → payload NotifyChannelIDs=[]string{} → 推 0 次
+func TestHandleAlertEvent_Rule显式空_推0次(t *testing.T) {
+	db, mock := newMockDB(t)
+	mockSender := &mockSender{typ: "dingtalk"}
+	RegisterSender("dingtalk", mockSender)
+	t.Cleanup(func() { delete(customSenders, "dingtalk") })
+
+	chA := uuid.New()
+	ruleID := uuid.New()
+
+	// DB 里有一条 enabled channel, 但 payload 明确告知 "运维清空 → 推 0 次"
+	mock.ExpectQuery(`SELECT \* FROM "notification_channels"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "type", "config", "is_enabled"}).
+			AddRow(chA.String(), "A", "dingtalk", `{"webhook_url":"https://a"}`, true))
+
+	w := NewWorker(db, WorkerConfig{Tick: time.Hour, MaxBatch: 10})
+	payload := []byte(fmt.Sprintf(`{"event_type":"resolved","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":[]}`, ruleID))
+	require.NoError(t, w.handleAlertEvent(context.Background(), eventbus.Event{Payload: payload}))
+
+	require.Equal(t, int32(0), atomic.LoadInt32(&mockSender.hits),
+		"notify_channel_ids=[] 必须推 0 次, 即使 DB 有 enabled channel 也跳过 (AC-M37-A-3)")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M37-A: filterChannelsByIDs helper 单元测试 ====================
+
+// TestFilterChannelsByIDs_保序仅保留wantIDs M37-A
+// helper 设计: 迭代 channels (输入顺序), 仅保留在 wantIDs 集合里的项 → 输出顺序 = 输入 channels 顺序
+// (若按运维 UI 勾选顺序推送, 把 rule.NotifyChannels JSON 解析后传 wantIDs 时按 UI 顺序; 这里是 worker 内部保 channels 原始顺序)
+func TestFilterChannelsByIDs_保序仅保留wantIDs(t *testing.T) {
+	chA := models.NotificationChannel{ID: uuid.New(), Name: "A"}
+	chB := models.NotificationChannel{ID: uuid.New(), Name: "B"}
+	chC := models.NotificationChannel{ID: uuid.New(), Name: "C"}
+	in := []models.NotificationChannel{chA, chB, chC}
+
+	// 想要 chC + chA → helper 按 channels 顺序保留 → 输出 [A, C] (保序)
+	got := filterChannelsByIDs(in, []string{chC.ID.String(), chA.ID.String()})
+	require.Len(t, got, 2)
+	require.Equal(t, "A", got[0].Name, "helper 保持 channels 输入顺序")
+	require.Equal(t, "C", got[1].Name)
+}
+
+// TestFilterChannelsByIDs_wantIDs空_返nil M37-A
+// wantIDs 是 []string{} 时返 nil (而不是空 slice), 让 worker 走 "推 0 次" 路径 (AC-3)
+func TestFilterChannelsByIDs_wantIDs空_返nil(t *testing.T) {
+	chA := models.NotificationChannel{ID: uuid.New()}
+	got := filterChannelsByIDs([]models.NotificationChannel{chA}, []string{})
+	require.Nil(t, got, "wantIDs 空应返 nil (worker 拿到后直接推 0 次)")
+}
+
+// TestFilterChannelsByIDs_无匹配_返空切片 M37-A
+// 输入 channel 全没在 wantIDs 里 → 返空切片, worker 拿到后 len==0 走 "no enabled channels after filter" 分支
+func TestFilterChannelsByIDs_无匹配_返空切片(t *testing.T) {
+	chA := models.NotificationChannel{ID: uuid.New()}
+	got := filterChannelsByIDs([]models.NotificationChannel{chA}, []string{uuid.New().String()})
+	require.Empty(t, got)
 }

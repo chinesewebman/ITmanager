@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -482,4 +483,80 @@ func TestAlertService_UpdateRule_不存在返ErrNotFound(t *testing.T) {
 
 	_, err := svc.UpdateRule(context.Background(), "nonexistent", map[string]interface{}{"severity": 5})
 	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+// M37-A: loadRuleNotifyChannelIDs 单元测试 (AC-M37-A-1/2/3 配套)
+// 4 场景: 规则存在有 2 个 channel / 规则存在 NotifyChannels 为空 / 规则不存在 / JSON 解析失败
+func TestAlertService_LoadRuleNotifyChannelIDs_有效JSON返回切片(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	ruleID := uuid.New()
+	chA := uuid.New()
+	chB := uuid.New()
+	rows := sqlmock.NewRows([]string{"id", "notify_channels"}).
+		AddRow(ruleID.String(), fmt.Sprintf(`["%s","%s"]`, chA, chB))
+	mock.ExpectQuery(`SELECT.*"alert_rules".*WHERE id = .*$`).
+		WithArgs(ruleID, sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	ids := svc.(*alertService).loadRuleNotifyChannelIDs(ctx, ruleID)
+	require.Len(t, ids, 2)
+	require.Equal(t, chA.String(), ids[0])
+	require.Equal(t, chB.String(), ids[1])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// AC-M37-A-3 配套: rule 显式空 NotifyChannels → 返 []string{} (不是 nil), 让 worker 推 0 次
+func TestAlertService_LoadRuleNotifyChannelIDs_显式空返空切片(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	ruleID := uuid.New()
+	rows := sqlmock.NewRows([]string{"id", "notify_channels"}).
+		AddRow(ruleID.String(), "")
+	mock.ExpectQuery(`SELECT.*"alert_rules".*WHERE id = .*$`).
+		WithArgs(ruleID, sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	ids := svc.(*alertService).loadRuleNotifyChannelIDs(ctx, ruleID)
+	require.NotNil(t, ids, "显式空必须返 []string{} (非 nil), 让 worker 走推 0 次路径")
+	require.Len(t, ids, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// AC-M37-A-2 配套: rule 不存在 → 返 nil → worker fallback 全启用 channels (兼容历史 alert)
+func TestAlertService_LoadRuleNotifyChannelIDs_规则不存在返nil(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	ruleID := uuid.New()
+	mock.ExpectQuery(`SELECT.*"alert_rules".*WHERE id = .*$`).
+		WithArgs(ruleID, sqlmock.AnyArg()).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	ids := svc.(*alertService).loadRuleNotifyChannelIDs(ctx, ruleID)
+	require.Nil(t, ids, "规则不存在返 nil, worker 走 fallback 不漏告警")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// JSON 解析失败 (运维配错) → 返 nil → worker fallback (不漏告警, 运维看日志修配置)
+func TestAlertService_LoadRuleNotifyChannelIDs_JSON解析失败返nil(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAlertService(gormDB)
+	ctx := context.Background()
+
+	ruleID := uuid.New()
+	rows := sqlmock.NewRows([]string{"id", "notify_channels"}).
+		AddRow(ruleID.String(), `{this is not valid json}`)
+	mock.ExpectQuery(`SELECT.*"alert_rules".*WHERE id = .*$`).
+		WithArgs(ruleID, sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	ids := svc.(*alertService).loadRuleNotifyChannelIDs(ctx, ruleID)
+	require.Nil(t, ids, "JSON 解析失败返 nil (worker fallback 全启用, 不漏告警)")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

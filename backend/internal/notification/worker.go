@@ -112,8 +112,8 @@ type AlertEventPayload struct {
 
 	// M37-A：让 worker 能按 AlertRule.NotifyChannels 过滤推送，避免二次 DB 读 rule
 	// RuleID 空 → worker fallback 推全启用 channels（与改动前一致）
-	RuleID            string   `json:"rule_id,omitempty"`
-	NotifyChannelIDs  []string `json:"notify_channel_ids,omitempty"` // 解析后的 UUID 字符串数组；空 = "推全启用"
+	RuleID           string   `json:"rule_id,omitempty"`
+	NotifyChannelIDs []string `json:"notify_channel_ids,omitempty"` // 解析后的 UUID 字符串数组；空 = "推全启用"
 }
 
 // handleAlertEvent 处理 alert 事件, 真发通知

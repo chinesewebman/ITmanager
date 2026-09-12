@@ -17,7 +17,7 @@ type Alert struct {
 	// (migration 000001_init.up.sql:651 已建 UUID FK REFERENCES alert_rules(id))
 	// 历史 alert（rule_id NULL）仍走 worker fallback 推全启用 channels，与改动前一致
 	AlertRuleID *uuid.UUID `json:"alert_rule_id" gorm:"type:uuid;index"`
-	HostIP   string     `json:"host_ip" gorm:"size:45"`
+	HostIP      string     `json:"host_ip" gorm:"size:45"`
 
 	// 告警信息
 	TriggerName  string `json:"trigger_name" gorm:"size:500"`
