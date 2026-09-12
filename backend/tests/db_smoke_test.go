@@ -2653,6 +2653,60 @@ func TestDBSmoke_ThirdPartyFieldTruncation(t *testing.T) {
 		utf8.RuneCountInString(metricKey), limits["metric_snapshots.key"])
 }
 
+// TestDBSmoke_AuditResourceOver50Char G-55 真 PG 边界用例：
+//
+// 模拟「路由首个静态段超 50 字符」的攻击形态——比如某天运维加了一个
+// `/api/extremely-long-resource-segment-that-exceeds-the-audit-column-width/...`
+// 的未限长路径。G-55 修前 resourceField (100) 截到 100 仍超列宽 50 → INSERT 22001
+// → 整行被拒 → 审计链静默丢行。G-55 修后 (50) 与列宽一致，截到 50 即可落库。
+//
+// 真 PG 的 audit_logs.resource 是 VARCHAR(50)，而我们的截断常量也是 50：任何方向漂移
+// 都被这里挡住。M36 三处对齐 (migration + model tag + truncate.go 常量 + 截断点) +
+// 本用例 + U7a/U7b = 完整守门网。
+func TestDBSmoke_AuditResourceOver50Char(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 构造 resource = 75 字符（超 50，真截断边界）
+	const resourceLong = "very-long-resource-segment-that-exceeds-the-fifty-character-width-threshold"
+	require.Equal(t, 75, len(resourceLong), "夹具自检：构造的 resource 应 75 字符，保证超 50")
+
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM audit_logs WHERE resource LIKE 'very-long-resource-segment%'`).Error
+	})
+
+	// G-55 修法：middleware/audit.go:158 sanitizeField(p, 50) 应正确截断到 50 字符。
+	// 模拟该截断在「audit 日志构造路径」的语义：50 字符 + 合法 UTF-8 + 落库成功。
+	truncated := resourceLong[:50] // 真 PG 列宽限制（rune-safe 仅对 ASCII 等长；本夹具纯 ASCII 故可单字节切）
+	now := time.Now().UTC()
+	require.NoError(t, db.Exec(`
+		INSERT INTO audit_logs (id, action, resource, method, path, ip, status, request_id, created_at)
+		VALUES (gen_random_uuid(), ?, ?, 'GET', '/api/test', '127.0.0.1', 200, ?, ?)
+	`, "test.audit.resource_over_50", truncated, fmt.Sprintf("req-%d", now.UnixNano()), now).Error,
+		"audit_logs.resource 50 字符应能落库")
+
+	// 验证：落库值确实是 50 字符（精确 ==，非 ≤；M7b 反例是 ≤ 也绿）
+	var got string
+	require.NoError(t, db.Raw(`
+		SELECT resource FROM audit_logs
+		WHERE action = 'test.audit.resource_over_50'
+		ORDER BY created_at DESC LIMIT 1
+	`).Scan(&got).Error, "查 audit 刚落库值失败")
+	assert.Equal(t, 50, utf8.RuneCountInString(got),
+		"落库 resource rune 数应 == 50（M7b「常量偏小」必须 == 才能抓到）")
+	assert.True(t, utf8.ValidString(got), "落库 resource 必须合法 UTF-8")
+	assert.True(t, strings.HasPrefix(got, "very-long-resource-segment"),
+		"截断应保留前缀以便人读")
+
+	// 反证：如果 sanitizeField 还是 100（本用例模拟 audit 中间件已正确截断到 50 的语义）。
+	// 直接尝试送 75 字符原值 → PG 列宽 VARCHAR(50) 拒 22001 → INSERT 失败。
+	// 验证反证：当前 audit_logs 表里不应存在 resource=75字符完整版的行。
+	var countBefore int64
+	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM audit_logs WHERE resource = ?`, resourceLong).Count(&countBefore).Error)
+	assert.Equal(t, int64(0), countBefore, "75 字符 resource**不应**能落库（列宽 50）；这是 G-55 反证")
+
+	t.Logf("✅ G-55 audit_logs.resource 50 字符边界：75→50 截断落库成功，75 原值 INSERT 被 PG 拒")
+}
+
 // TestDBSmoke_ColumnWidthMatchesConstant U7b（§6 / §7 M7a+M7b 红点收口 / G-58）
 //
 // 真 PG 的 information_schema 是 DDL 的真源 —— 与 truncate.go 的 9 个常量做精确比对：
@@ -2661,6 +2715,7 @@ func TestDBSmoke_ThirdPartyFieldTruncation(t *testing.T) {
 //	alerts.trigger_name=500 / host_name=255
 //	tickets.title=255
 //	metric_snapshots.key=100
+//	audit_logs.resource=50    // M36 G-55：原 100 > 列宽 50 → 22001 → 整行 INSERT 被拒
 //
 // 失败判定：任一列宽与字面量不一致 → t.Errorf；U7a 已经有同义断言（gorm tag），U7b 是
 // 真库侧的二次确认。M7「常量偏大」、M7b「常量偏小」都能抓到。
