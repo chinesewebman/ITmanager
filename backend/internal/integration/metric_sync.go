@@ -107,8 +107,15 @@ func (w *MetricSyncWorker) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := SyncMetricsFromZabbix(ctx, w.svc.zabbix, w.db, w.batchLimit); err != nil {
+			written, ft, err := SyncMetricsFromZabbix(ctx, w.svc.zabbix, w.db, w.batchLimit)
+			if err != nil {
 				log.Printf("[zabbix metric sync] tick error: %v", err)
+				continue
+			}
+			// M33/G-45：这条路径既没有 HTTP 面也没有前端入口，日志是唯一出口 —— 不接住
+			// 计数就等于字段被静默截短（FIX-PLAN §1.3-B 的失效形态）。
+			if ft > 0 {
+				log.Printf("[zabbix metric sync] tick ok: written=%d, field_truncations=%d", written, ft)
 			}
 		}
 	}
@@ -116,23 +123,23 @@ func (w *MetricSyncWorker) run(ctx context.Context) {
 
 // SyncMetricsFromZabbix 单次同步：从 Zabbix 拉所有 numeric item 的 lastvalue，
 // 按 Host.name == Asset.Name 关联，写入 metric_snapshots。
-// 返回写入条数。集成未配置（URL 空）→ 返 0, nil。
+// 返回 (写入条数, 字段截断处数)。集成未配置（URL 空）→ 返 0, 0, nil。
 //
 // 幂等：每条 (asset_id, key, ts) 唯一。同一 tick 内 ts 一致 → 重启时仍可能
 // 因 ts 偏移产生重复行 — 接受，作为时序数据的"重复点"语义。
-func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, batchLimit int) (int, error) {
+func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, batchLimit int) (written, fieldsTruncated int, err error) {
 	// 1) Zabbix 未配置（URL 空）→ 静默 no-op，避免每次 tick 都刷日志
 	if z == nil || z.user == "" || z.password == "" {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// 2) 拉 item.get（自动 login 复用 client）
 	items, err := z.GetMetricItems(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(items) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// 3) 收集 host 列表（去重），一次 select 查所有 asset
@@ -144,7 +151,7 @@ func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, ba
 		hostSet[items[i].Hosts[0].Host] = struct{}{}
 	}
 	if len(hostSet) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	hostNames := make([]string, 0, len(hostSet))
 	for n := range hostSet {
@@ -154,7 +161,7 @@ func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, ba
 	if err := db.WithContext(ctx).
 		Where("name IN ?", hostNames).
 		Find(&assets).Error; err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	assetByName := make(map[string]uuid.UUID, len(assets))
 	for i := range assets {
@@ -165,6 +172,7 @@ func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, ba
 	now := time.Now()
 	snaps := make([]models.MetricSnapshot, 0, len(items))
 	var skipped int
+	var fc fieldCounter // M33：循环内有 4 处 continue，必须声明在循环外
 	for i := range items {
 		it := &items[i]
 		if len(it.Hosts) == 0 {
@@ -189,18 +197,22 @@ func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, ba
 		}
 		snaps = append(snaps, models.MetricSnapshot{
 			AssetID: assetID,
-			Key:     it.Key,
-			Value:   v,
-			TS:      now,
+			// M33/G-45：item key 是源侧可控文本，metric_snapshots.key 是 varchar(100)。
+			Key:   fc.truncate("key", it.Key, colMetricKey),
+			Value: v,
+			TS:    now,
 		})
 	}
 	if len(snaps) == 0 {
 		log.Printf("[zabbix metric sync] items=%d, skipped=%d (no host match / parse fail)", len(items), skipped)
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// 5) 批量 insert（按 batchLimit 分批，避免单条 BulkInsert 1000 上限）
-	written := 0
+	//
+	// 注意：**不改分批语义**（FIX-PLAN D-8）。截断已经保证单条不会再触发 22001，
+	// 分批只是原有的大批量切分，与长度无关。
+	written = 0
 	for start := 0; start < len(snaps); start += batchLimit {
 		end := start + batchLimit
 		if end > len(snaps) {
@@ -208,12 +220,14 @@ func SyncMetricsFromZabbix(ctx context.Context, z *ZabbixClient, db *gorm.DB, ba
 		}
 		batch := snaps[start:end]
 		if err := bulkInsert(ctx, db, batch); err != nil {
-			return written, err
+			// 失败时已写入的批次仍要如实回报（written 是具名返回，此处显式写回）
+			return written, fc.count(), err
 		}
 		written += len(batch)
 	}
 	log.Printf("[zabbix metric sync] items=%d, skipped=%d, written=%d", len(items), skipped, written)
-	return written, nil
+	logFieldSanitization("zabbix_metrics", &fc)
+	return written, fc.count(), nil
 }
 
 // bulkInsert 直走 GORM Create（与 MetricSnapshotService.BulkInsert 等价，

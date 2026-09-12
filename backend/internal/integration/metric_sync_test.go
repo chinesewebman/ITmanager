@@ -139,7 +139,7 @@ func newZabbixWithFake(t *testing.T, f *fakeZabbix) (*ZabbixClient, func()) {
 func TestSyncMetricsFromZabbix_未配置返零(t *testing.T) {
 	db := initSchema(t)
 	z := NewZabbixClient(&config.ZabbixConfig{URL: "", User: "", Password: ""}, nil)
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("want nil err got %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSyncMetricsFromZabbix_正常写入(t *testing.T) {
 	z, cleanup := newZabbixWithFake(t, fz)
 	defer cleanup()
 
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("sync err: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestSyncMetricsFromZabbix_Host不匹配跳过(t *testing.T) {
 	z, cleanup := newZabbixWithFake(t, fz)
 	defer cleanup()
 
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("sync err: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestSyncMetricsFromZabbix_ItemsEmpty(t *testing.T) {
 	z, cleanup := newZabbixWithFake(t, fz)
 	defer cleanup()
 
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("sync err: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestSyncMetricsFromZabbix_LastValue空跳过(t *testing.T) {
 	z, cleanup := newZabbixWithFake(t, fz)
 	defer cleanup()
 
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("sync err: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSyncMetricsFromZabbix_无Hosts字段跳过(t *testing.T) {
 	z, cleanup := newZabbixWithFake(t, fz)
 	defer cleanup()
 
-	n, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
+	n, _, err := SyncMetricsFromZabbix(context.Background(), z, db, 1000)
 	if err != nil {
 		t.Fatalf("sync err: %v", err)
 	}

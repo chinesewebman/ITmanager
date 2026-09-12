@@ -51,7 +51,7 @@ func TestSyncFromZabbix_截断可见(t *testing.T) {
 		t.Cleanup(func() { log.SetOutput(oldOut) })
 
 		f := newZabbixFake(t, zabbixManyTriggers(zabbixTriggerLimit+1))
-		n, truncated, err := f.service().SyncFromZabbix(context.Background())
+		n, truncated, _, err := f.service().SyncFromZabbix(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 1, truncated, "超过上限必须置截断标志")
 		assert.Equal(t, zabbixTriggerLimit, n, "入库条数必须是上限（多要的那 1 条只用于判定）")
@@ -68,7 +68,7 @@ func TestSyncFromZabbix_截断可见(t *testing.T) {
 		db := newUpsertTestDB(t)
 
 		f := newZabbixFake(t, zabbixManyTriggers(zabbixTriggerLimit))
-		n, truncated, err := f.service().SyncFromZabbix(context.Background())
+		n, truncated, _, err := f.service().SyncFromZabbix(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, truncated, "正好这么多不是截断 —— 判据是「> 上限」")
 		assert.Equal(t, zabbixTriggerLimit, n)
@@ -85,7 +85,7 @@ func TestSyncFromZabbix_截断可见(t *testing.T) {
 // 去掉 selectItems 是为了不再白拉一份没有任何读取点的 items。
 func TestGetTriggers_请求上限与不再拉items(t *testing.T) {
 	f := newZabbixFake(t, `[]`)
-	_, _, err := f.service().SyncFromZabbix(context.Background())
+	_, _, _, err := f.service().SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 
 	require.Len(t, f.triggerParams, 1, "应当只发一次 trigger.get")

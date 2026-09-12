@@ -58,23 +58,25 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 
 	switch req.Type {
 	case "netbox":
-		count, e := h.svc.SyncFromNetBox(ctx)
-		results = map[string]int{"netbox": count}
+		// M33/G-45：*_field_truncations = 被截断的字段处数（不是条数、不是 0/1 标志）。
+		count, ft, e := h.svc.SyncFromNetBox(ctx)
+		results = map[string]int{"netbox": count, "netbox_field_truncations": ft}
 		err = e
 	case "zabbix":
 		// M27/D-6：truncated 是 0/1 标志（不是条数），与 glpi_skipped 同位置透出。
-		count, truncated, e := h.svc.SyncFromZabbix(ctx)
-		results = map[string]int{"zabbix": count, "zabbix_truncated": truncated}
+		// M33/G-45：field_truncations 是字段处数，与之并列但语义不同（D-5 的键名区分）。
+		count, truncated, ft, e := h.svc.SyncFromZabbix(ctx)
+		results = map[string]int{"zabbix": count, "zabbix_truncated": truncated, "zabbix_field_truncations": ft}
 		err = e
 	case "zabbix_metrics":
 		// v2.3: Zabbix 兜底采集，单独走 item.get → metric_snapshots
-		count, e := h.svc.SyncMetricsFromZabbix(ctx)
-		results = map[string]int{"zabbix_metrics": count}
+		count, ft, e := h.svc.SyncMetricsFromZabbix(ctx)
+		results = map[string]int{"zabbix_metrics": count, "zabbix_metrics_field_truncations": ft}
 		err = e
 	case "glpi":
 		// M26/D-6：skipped 是档位越界被跳过的条数，一并透出 —— 静默丢票没人看得出来。
-		count, skipped, e := h.svc.SyncFromGLPI(ctx)
-		results = map[string]int{"glpi": count, "glpi_skipped": skipped}
+		count, skipped, ft, e := h.svc.SyncFromGLPI(ctx)
+		results = map[string]int{"glpi": count, "glpi_skipped": skipped, "glpi_field_truncations": ft}
 		err = e
 	default:
 		results, err = h.svc.SyncAll(ctx)

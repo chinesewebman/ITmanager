@@ -98,13 +98,16 @@ func (s *IntegrationService) ReloadGLPI(cfg *config.GLPIConfig) {
 var netboxUpdateCols = []string{"name", "asset_type", "brand", "model", "sn", "site_name", "updated_at"}
 
 // SyncFromNetBox 从 NetBox 同步资产（C-P6：批量 upsert；C-P7：ctx 透传）。
-func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
+//
+// 返回 (synced, fieldsTruncated, err)：fieldsTruncated 是**被截断的字段处数**（M33/G-45）。
+// 与 SyncFromZabbix 的 truncated（源侧 0/1 标志）语义不同，故命名不复用。
+func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (synced, fieldsTruncated int, err error) {
 	devices, err := s.netbox.SyncDevices(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(devices) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// 1. 构造 upsert 列表
@@ -113,6 +116,7 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 	now := time.Now().UTC() // 与 gorm 的 NowFunc（database.go 的 time.Now().UTC()）对齐，否则同行的 created_at/updated_at 差一个时区偏移
 	toUpsert := make([]models.Asset, 0, len(devices))
 	seen := make(map[int]struct{}, len(devices))
+	var fc fieldCounter // M33：函数局部（D-10），计数经返回值透出；循环内有 continue，必须声明在循环外
 	for _, d := range devices {
 		asset := d.ConvertToAsset()
 		// 同一批次内重复的 net_box_id 会让 ON CONFLICT DO UPDATE 二次命中同一行，
@@ -123,16 +127,19 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 		}
 		seen[d.ID] = struct{}{}
 		toUpsert = append(toUpsert, models.Asset{
-			Source:       "netbox",
+			Source: "netbox",
+			// M33/G-45：第三方字段写进有长度约束的列前按**字符**截断（列宽见 truncate.go）。
+			// 不截的后果不是「字段被截短」，而是整批回滚 —— 一条超长 → 22001 →
+			// CreateInBatches 整批原子 → 同步报 0 条，外部看不出原因。
 			NetBoxID:     asset.NetboxID,
-			Name:         asset.Name,
+			Name:         fc.truncate("name", asset.Name, colAssetName),
 			AssetType:    asset.AssetType,
 			Status:       asset.Status,
-			Brand:        asset.Brand,
-			Model:        asset.Model,
-			SN:           asset.SN,
-			SiteName:     asset.SiteName,
-			RackName:     asset.RackName,
+			Brand:        fc.truncate("brand", asset.Brand, colAssetBrand),
+			Model:        fc.truncate("model", asset.Model, colAssetModel),
+			SN:           fc.truncate("sn", asset.SN, colAssetSN),
+			SiteName:     fc.truncate("site_name", asset.SiteName, colAssetSiteName),
+			RackName:     asset.RackName, // ConvertToAsset 恒不赋值（见 netboxUpdateCols 注释），非风险面
 			Tags:         "[]",
 			CustomFields: "{}",
 			UpdatedAt:    now,
@@ -144,22 +151,25 @@ func (s *IntegrationService) SyncFromNetBox(ctx context.Context) (int, error) {
 	if err := database.DB.WithContext(ctx).
 		Clauses(buildUpsertClause("net_box_id", netboxUpdateCols...)).
 		CreateInBatches(toUpsert, 100).Error; err != nil {
-		return 0, fmt.Errorf("NetBox 批量 upsert 失败: %w", err)
+		return 0, 0, fmt.Errorf("NetBox 批量 upsert 失败: %w", err)
 	}
 
 	log.Printf("从 NetBox 同步了 %d 个设备 (新增+更新)", len(toUpsert))
-	return len(toUpsert), nil
+	logFieldSanitization("netbox", &fc)
+	return len(toUpsert), fc.count(), nil
 }
 
 // SyncFromZabbix 从 Zabbix 同步告警（C-P6 + C-P7）。
 //
-// 返回 (synced, truncated, err)：truncated 是 **0/1 标志**（不是条数）—— 源侧的进行中
-// 告警超过 zabbixTriggerLimit 时为 1。单独透出是因为「静默丢告警」比「同步报错」更难
-// 发现（同 SyncFromGLPI 的 skipped）。
-func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, truncated int, err error) {
+// 返回 (synced, truncated, fieldsTruncated, err)：
+//   - truncated 是 **0/1 标志**（不是条数）—— 源侧的进行中告警超过 zabbixTriggerLimit 时为 1。
+//     单独透出是因为「静默丢告警」比「同步报错」更难发现（同 SyncFromGLPI 的 skipped）。
+//   - fieldsTruncated（M33/G-45）是被截断的**字段处数**，与上面那个 0/1 标志是两回事，
+//     命名刻意不复用 truncated。
+func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, truncated, fieldsTruncated int, err error) {
 	triggers, err := s.zabbix.GetTriggers(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	// M27/B：GetTriggers 请求 limit = zabbixTriggerLimit+1，所以「收到超过上限」是可判定的。
 	// 恰好多要 1 条是必须的：源侧正常返回正好等于 limit 时（就是这么多），
@@ -173,7 +183,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 		triggers = triggers[:zabbixTriggerLimit]
 	}
 	if len(triggers) == 0 {
-		return 0, truncated, nil
+		return 0, truncated, 0, nil
 	}
 
 	triggerIDs := make([]string, 0, len(triggers))
@@ -189,7 +199,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 		Where("source = ? AND trigger_id IN ?", "zabbix", triggerIDs).
 		Select("trigger_id", "problem_start", "status").
 		Find(&existing).Error; err != nil {
-		return 0, truncated, fmt.Errorf("Zabbix 已存在查询失败: %w", err)
+		return 0, truncated, 0, fmt.Errorf("Zabbix 已存在查询失败: %w", err)
 	}
 
 	// exact：同一 trigger 的同一「故障发生」。
@@ -212,6 +222,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 
 	now := time.Now()
 	toInsert := make([]models.Alert, 0, len(triggers))
+	var fc fieldCounter // M33：循环内有 3 处 continue，必须声明在循环外，否则计数丢
 	for _, t := range triggers {
 		if len(t.Hosts) == 0 {
 			continue
@@ -238,10 +249,13 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 			}
 		}
 		toInsert = append(toInsert, models.Alert{
-			TriggerID:    t.TriggerID,
-			HostName:     alert.HostName,
-			TriggerName:  alert.TriggerName,
-			Problem:      alert.Problem,
+			TriggerID: t.TriggerID,
+			// M33/G-45：有界列按字符截断；problem 是 TEXT（无长度约束）但照样拒 NUL，
+			// 且与上面两列同处一条 CreateInBatches 事务 —— 一条含 NUL 就整批回滚，
+			// 所以 TEXT 列也必须过 StripControl（只剥不截）。
+			HostName:     fc.truncate("host_name", alert.HostName, colAlertHostName),
+			TriggerName:  fc.truncate("trigger_name", alert.TriggerName, colAlertTriggerName),
+			Problem:      fc.text("problem", alert.Problem),
 			Severity:     alert.Severity,
 			SeverityName: alert.SeverityName,
 			ProblemStart: problemStart,
@@ -253,7 +267,7 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 	}
 
 	if len(toInsert) == 0 {
-		return 0, truncated, nil
+		return 0, truncated, 0, nil
 	}
 	// M27/D-4：迁移 000027 建了部分唯一索引 uq_alerts_zabbix_identity。上面的 exact/open
 	// 预过滤是 TOCTOU —— 预查之后、插入之前若有并发同步插了同一身份，CreateInBatches
@@ -288,11 +302,13 @@ func (s *IntegrationService) SyncFromZabbix(ctx context.Context) (synced, trunca
 		synced = int(after - before)
 		return nil
 	}); err != nil {
-		return 0, truncated, fmt.Errorf("Zabbix 批量插入失败: %w", err)
+		return 0, truncated, 0, fmt.Errorf("Zabbix 批量插入失败: %w", err)
 	}
 
 	log.Printf("从 Zabbix 同步了 %d 个告警（截断标志 %d）", synced, truncated)
-	return synced, truncated, nil
+	// 与上面那行**各自表述**：截断标志是源侧条数上限，字段截断是列宽保真，语义不同不合并。
+	logFieldSanitization("zabbix", &fc)
+	return synced, truncated, fc.count(), nil
 }
 
 // alertIdentityKey 是 M27/A 的去重身份：同一 trigger 的**同一次故障发生**。
@@ -306,15 +322,17 @@ func alertIdentityKey(triggerID string, problemStart time.Time) string {
 
 // SyncFromGLPI 从 GLPI 同步工单（C-P6 + C-P7）。
 //
-// 返回 (synced, skipped, err)：skipped 是档位越界被跳过的条数（M26/D-1、D-6）。
-// 单独计数并透出，是因为「静默丢票」比「同步报错」更难发现 —— 报错有人看，少几张没人看。
-func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped int, err error) {
+// 返回 (synced, skipped, fieldsTruncated, err)：
+//   - skipped 是档位越界被跳过的条数（M26/D-1、D-6）。单独计数并透出，是因为
+//     「静默丢票」比「同步报错」更难发现 —— 报错有人看，少几张没人看。
+//   - fieldsTruncated（M33/G-45）是被截断的字段处数。
+func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped, fieldsTruncated int, err error) {
 	tickets, err := s.glpi.GetTickets(ctx)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if len(tickets) == 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 
 	externalIDs := make([]string, 0, len(tickets))
@@ -325,7 +343,7 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped 
 	if err := database.DB.WithContext(ctx).
 		Where("external_id IN ?", externalIDs).
 		Find(&existing).Error; err != nil {
-		return 0, 0, fmt.Errorf("GLPI 已存在查询失败: %w", err)
+		return 0, 0, 0, fmt.Errorf("GLPI 已存在查询失败: %w", err)
 	}
 	existingSet := make(map[string]struct{}, len(existing))
 	for _, e := range existing {
@@ -334,6 +352,7 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped 
 
 	toUpsert := make([]models.Ticket, 0, len(tickets))
 	now := time.Now()
+	var fc fieldCounter // M33：循环内有 continue（已存在 / 越界跳过），必须声明在循环外
 	for _, t := range tickets {
 		local := t.ConvertToTicket()
 		if _, ok := existingSet[local.ExternalID]; ok {
@@ -359,9 +378,11 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped 
 		}
 
 		nt := models.Ticket{
-			ExternalID:  local.ExternalID,
-			Title:       local.Title,
-			Description: local.Description,
+			ExternalID: local.ExternalID,
+			// M33/G-45：title 有界（varchar 255）→ 截断；description 是 TEXT → 只剥不截
+			// （TEXT 拒 NUL，且与 title 同一条 CreateInBatches 事务）。
+			Title:       fc.truncate("title", local.Title, colTicketTitle),
+			Description: fc.text("description", local.Description),
 			Status:      local.Status,
 			Priority:    local.Priority,
 			TicketType:  local.TicketType,
@@ -393,7 +414,7 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped 
 	}
 
 	if len(toUpsert) == 0 {
-		return 0, skipped, nil
+		return 0, skipped, 0, nil
 	}
 	// 批量插入前显式分配工单号（TODO G-25）：CreateInBatches 会把整批的 BeforeCreate
 	// 都在 INSERT 之前跑完，每行各自按「当天条数」算号 → 整批同一个号 →
@@ -440,11 +461,12 @@ func (s *IntegrationService) SyncFromGLPI(ctx context.Context) (synced, skipped 
 		synced = int(after - before)
 		return nil
 	}); err != nil {
-		return 0, skipped, fmt.Errorf("GLPI 批量插入失败: %w", err)
+		return 0, skipped, 0, fmt.Errorf("GLPI 批量插入失败: %w", err)
 	}
 
 	log.Printf("从 GLPI 同步了 %d 个工单（跳过越界 %d 条）", synced, skipped)
-	return synced, skipped, nil
+	logFieldSanitization("glpi", &fc)
+	return synced, skipped, fc.count(), nil
 }
 
 // SyncAll 同步所有数据（P1-审计：返回 errors.Join 合并所有失败，不再静默吞错）
@@ -455,14 +477,15 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 	results := make(map[string]int)
 	var errs []error
 
-	if n, err := s.SyncFromNetBox(ctx); err != nil {
+	if n, ft, err := s.SyncFromNetBox(ctx); err != nil {
 		log.Printf("NetBox 同步失败: %v", err)
 		errs = append(errs, fmt.Errorf("netbox: %w", err))
 	} else {
 		results["netbox"] = n
+		results["netbox_field_truncations"] = ft
 	}
 
-	if n, trunc, err := s.SyncFromZabbix(ctx); err != nil {
+	if n, trunc, ft, err := s.SyncFromZabbix(ctx); err != nil {
 		log.Printf("Zabbix 同步失败: %v", err)
 		errs = append(errs, fmt.Errorf("zabbix: %w", err))
 	} else {
@@ -470,14 +493,17 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 		// M27/D-6：截断标志一并透出 —— 静默丢告警比同步报错更难发现。
 		// 失败分支刻意不写：与 glpi_skipped 同形（失败时连键都没有，前端 ?? 0 兜住）。
 		results["zabbix_truncated"] = trunc
+		// M33/G-45：键名带 _field_truncations 以区别于上面那个 0/1 标志（D-5）。
+		results["zabbix_field_truncations"] = ft
 	}
 
-	if n, skip, err := s.SyncFromGLPI(ctx); err != nil {
+	if n, skip, ft, err := s.SyncFromGLPI(ctx); err != nil {
 		log.Printf("GLPI 同步失败: %v", err)
 		errs = append(errs, fmt.Errorf("glpi: %w", err))
 	} else {
 		results["glpi"] = n
 		results["glpi_skipped"] = skip
+		results["glpi_field_truncations"] = ft
 	}
 
 	if len(errs) > 0 {
@@ -488,8 +514,9 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 
 // SyncMetricsFromZabbix v2.3: Zabbix → metric_snapshots 兜底单次同步。
 // 给 HTTP handler 手动触发用（运维 / 调试）；cron worker 也走同一个函数。
-// Zabbix 未配置 → 返 0, nil；登录失败 / item.get 失败 → 返 error。
-func (s *IntegrationService) SyncMetricsFromZabbix(ctx context.Context) (int, error) {
+// Zabbix 未配置 → 返 0, 0, nil；登录失败 / item.get 失败 → 返 error。
+// 第二返回值是字段截断处数（M33/G-45）。
+func (s *IntegrationService) SyncMetricsFromZabbix(ctx context.Context) (int, int, error) {
 	return SyncMetricsFromZabbix(ctx, s.zabbix, s.db(), 1000)
 }
 

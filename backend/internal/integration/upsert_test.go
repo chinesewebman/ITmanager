@@ -222,7 +222,7 @@ func TestSyncFromNetBox_冲突时更新且保留ID(t *testing.T) {
 		netboxDevice(1, "sw01", "switch", "Catalyst 9300", "SN-001"),
 		netboxDevice(2, "srv01", "server", "PowerEdge R750", "SN-002"),
 	)
-	n, err := svc.SyncFromNetBox(context.Background())
+	n, _, err := svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "首次同步失败 —— 冲突目标列名或唯一索引有问题")
 	require.Equal(t, 2, n)
 
@@ -245,7 +245,7 @@ func TestSyncFromNetBox_冲突时更新且保留ID(t *testing.T) {
 	payload = netboxDevicesJSON(t, moved,
 		netboxDevice(2, "srv01", "server", "PowerEdge R750", "SN-002"),
 	)
-	n, err = svc.SyncFromNetBox(context.Background())
+	n, _, err = svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "二次同步（冲突更新）失败")
 	require.Equal(t, 2, n)
 
@@ -267,7 +267,7 @@ func TestSyncFromNetBox_冲突时更新且保留ID(t *testing.T) {
 	manual := models.Asset{Name: "manual-asset", AssetType: "server", Source: "manual"}
 	require.NoError(t, db.Create(&manual).Error)
 	payload = netboxDevicesJSON(t, netboxDevice(1, "sw01-renamed", "server", "Catalyst 9300", "SN-999"))
-	_, err = svc.SyncFromNetBox(context.Background())
+	_, _, err = svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "存在 NULL net_box_id 的手工资产时同步失败（唯一索引不该约束 NULL）")
 	require.NoError(t, db.First(&models.Asset{}, "id = ?", manual.ID).Error, "手工资产被误删/误改")
 }
@@ -293,7 +293,7 @@ func TestSyncFromNetBox_混合批次(t *testing.T) {
 		netboxDevice(2, "srv01", "server", "PowerEdge R750", "SN-002"),       // 新行
 	)
 
-	n, err := svc.SyncFromNetBox(context.Background())
+	n, _, err := svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "混合批次（1 冲突 + 1 新增）失败")
 	require.Equal(t, 2, n)
 
@@ -331,7 +331,7 @@ func TestSyncFromNetBox_同批重复ID去重(t *testing.T) {
 		netboxDevice(7, "dup-second", "switch", "Catalyst 9300", "SN-B"),
 	)
 
-	n, err := svc.SyncFromNetBox(context.Background())
+	n, _, err := svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "同批重复 id 必须被去重，而不是让整条 upsert 失败")
 	assert.Equal(t, 1, n, "重复 id 只保留一条")
 
@@ -357,14 +357,14 @@ func TestSyncFromNetBox_空列表与错误(t *testing.T) {
 
 	// 空列表 → (0, nil)：不写库
 	payload = `{"count":0,"results":[]}`
-	n, err := svc.SyncFromNetBox(context.Background())
+	n, _, err := svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, n)
 
 	// NetBox 报错 → 必须把错误传出去，不能静默当空列表（否则同步失败无人知）
 	status = http.StatusBadRequest
 	payload = `{"detail":"bad request"}`
-	_, err = svc.SyncFromNetBox(context.Background())
+	_, _, err = svc.SyncFromNetBox(context.Background())
 	require.Error(t, err, "NetBox 4xx 必须报错")
 	assert.Contains(t, err.Error(), "400", "错误里应带状态码: %v", err)
 }
@@ -409,7 +409,7 @@ func TestSyncFromZabbix_保留历史且不重复(t *testing.T) {
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
 
 	// 第一次：预过滤只命中 problem 行 → 历史行不算「已存在」，必须插入一条新的 problem 行
-	n, _, err := svc.SyncFromZabbix(context.Background())
+	n, _, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err, "首次同步失败 —— 加回了 ON CONFLICT？alerts.trigger_id 没有唯一索引")
 	require.Equal(t, 1, n)
 
@@ -420,7 +420,7 @@ func TestSyncFromZabbix_保留历史且不重复(t *testing.T) {
 	assert.Equal(t, "problem", rows[1].Status)
 
 	// 第二次：新插入的 problem 行进了预过滤 → 不再插入
-	n, _, err = svc.SyncFromZabbix(context.Background())
+	n, _, _, err = svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "同 trigger 的未恢复告警已存在，不应重复插入")
 
@@ -475,7 +475,7 @@ func TestSyncFromZabbix_ProblemStart来自LastChange(t *testing.T) {
 	srv := fakeZabbixServer(t, strconv.FormatInt(lastChange.Unix(), 10))
 
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
-	n, _, err := svc.SyncFromZabbix(context.Background())
+	n, _, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -509,7 +509,7 @@ func TestSyncFromZabbix_LastChange缺失回落(t *testing.T) {
 
 	before := time.Now()
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
-	n, _, err := svc.SyncFromZabbix(context.Background())
+	n, _, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -564,7 +564,7 @@ func TestSyncFromZabbix_本地已确认的告警不再重复插入(t *testing.T)
 
 	svc := &IntegrationService{zabbix: NewZabbixClient(&config.ZabbixConfig{URL: srv.URL, User: "admin", Password: "p"}, nil)}
 
-	n, _, err := svc.SyncFromZabbix(context.Background())
+	n, _, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已 ack 的故障不该因为被确认而复活成新行（G-27）")
 
@@ -607,11 +607,11 @@ func TestSyncFromGLPI_两次同步不重复(t *testing.T) {
 
 	svc := &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
 
-	n, _, err := svc.SyncFromGLPI(context.Background())
+	n, _, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "首次同步失败 —— 加回了 ON CONFLICT？tickets.external_id 没有唯一索引")
 	require.Equal(t, 1, n)
 
-	n, _, err = svc.SyncFromGLPI(context.Background())
+	n, _, _, err = svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已存在的工单应被跳过")
 
@@ -650,7 +650,7 @@ func TestSyncFromGLPI_一次同步多张工单不撞号(t *testing.T) {
 
 	svc := &IntegrationService{glpi: NewGLPIClient(&config.GLPIConfig{URL: srv.URL, AppToken: "a", UserToken: "u"}, nil)}
 
-	n, _, err := svc.SyncFromGLPI(context.Background())
+	n, _, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "一次同步 3 张新工单不得撞号（G-25）")
 	require.Equal(t, 3, n)
 
@@ -668,7 +668,7 @@ func TestSyncFromGLPI_一次同步多张工单不撞号(t *testing.T) {
 	}
 
 	// 第二次同步：3 张都已在库，应全跳过，且不因重算编号而改写
-	n, _, err = svc.SyncFromGLPI(context.Background())
+	n, _, _, err = svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n, "已存在的工单应被跳过")
 
@@ -715,7 +715,7 @@ func TestSyncFromGLPI_CreatedAt来自GLPI(t *testing.T) {
 	srv := fakeGLPIServer(t, `[{"id":1,"name":"Disk full","content":"x","status":1,"priority":4,"date":"2026-09-09 10:00"}]`)
 	svc := glpiSvc(srv)
 
-	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	n, skipped, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 	require.Equal(t, 0, skipped)
@@ -741,7 +741,7 @@ func TestSyncFromGLPI_ClosedAt不发明(t *testing.T) {
 	srv := fakeGLPIServer(t, `[{"id":1,"name":"closed-no-date","content":"x","status":5,"priority":3,"date":"2026-09-01 09:00"}]`)
 	svc := glpiSvc(srv)
 
-	n, _, err := svc.SyncFromGLPI(context.Background())
+	n, _, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -761,7 +761,7 @@ func TestSyncFromGLPI_ClosedAt有值(t *testing.T) {
 		"date":"2026-09-01 09:00","solvedate":"2026-09-02 11:30","closedate":"2026-09-03 16:45"}]`)
 	svc := glpiSvc(srv)
 
-	n, _, err := svc.SyncFromGLPI(context.Background())
+	n, _, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
@@ -789,7 +789,7 @@ func TestSyncFromGLPI_越界跳过并计数(t *testing.T) {
 	]`)
 	svc := glpiSvc(srv)
 
-	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	n, skipped, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "一张越界票不得让整批同步失败")
 	assert.Equal(t, 2, n, "id=1 与 id=3 应入库；priority=0 是合法档位（M26/D-1 已补词表）")
 	assert.Equal(t, 1, skipped, "status=7 越界，应恰好跳过 1 条")
@@ -832,7 +832,7 @@ func TestSyncFromGLPI_预查后漏进冲突行仍幂等(t *testing.T) {
 	]`)
 	svc := glpiSvc(srv)
 
-	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	n, skipped, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err,
 		"预查后漏进的冲突行必须被 ON CONFLICT 幂等跳过；报 23505 说明 ON CONFLICT 没了")
 	require.Equal(t, 0, skipped)
