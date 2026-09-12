@@ -296,6 +296,34 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 
 
 
+### M37-A — G-39 AlertRule.NotifyChannels 写不读修复（ResolveAlert 路径）（2026-09-12）
+
+**修复内容：**
+- **models.Alert.AlertRuleID 字段** (`f7d2c2a`) — 修复 GORM 模型↔DB 漂移：DB 已有 `alerts.alert_rule_id UUID FK`（migration 000001 建）但模型原本没此字段，GORM 完全看不见。修复后 GORM 能 SELECT/INSERT 该列。
+- **worker 按 Rule.NotifyChannels 过滤** (`85c148f`) — `worker.handleAlertEvent` 新增 `NotifyChannelIDs != nil → 过滤` 路径；空数组明确推 0 次（运维清空语义）；nil 走旧 fallback 全启用 channels（兼容历史 alert）。`filterChannelsByIDs` helper 走 map 查找 O(N+M) 保输入 channel 顺序。
+- **ResolveAlert snapshot RuleID + NotifyChannels** (`71f946b`) — `alert_service.ResolveAlert` publish payload 携带 `RuleID` + 解析后的 `NotifyChannelIDs`；`loadRuleNotifyChannelIDs` helper：rule 不存在/DB 错/JSON 解析失败 → 返 nil（worker fallback，不漏告警）；显式空 → 返 `[]string{}`（推 0 次）。
+- **单元测试 9 条 + mutation inversion PASS-FAIL-PASS** (`f36b900`) — worker 3 条（按 Rule 过滤 / RuleID 空 fallback / 显式空推 0）+ filterChannelsByIDs 3 条 + service 4 条（有效 JSON / 显式空 / rule 不存在 / JSON 解析失败）；gofmt 空白规整。
+- **真 PG 端到端 `TestDBSmoke_M37A_AlertRuleNotifyChannelsWorkerFilter`** (`71ac5c3`) — 4 场景：`alert_rule_id` 列存在 + 显式空发 0 + 勾 2 发 2（chC 0 次）+ 无 RuleID fallback 全发 m37a- 3 个；`AlertRuleID` GORM 字段 INSERT/SELECT 回读非 nil；`HandleAlertEventForTest` exported wrapper 让外部包能驱动 worker；`scripts/db_smoke.sh` 白名单 +1。
+
+**门禁：**
+- `go vet ./...` 干净（sqlite3 C warning 系既有）
+- `gofmt -l` 干净
+- `go test -count=1 ./internal/{notification,service}/...` 全绿（含 9 条新单元测试）
+- `go test -tags dbsmoke` 真 PG：42 case 全绿（含新增 `M37A_AlertRuleNotifyChannelsWorkerFilter`）
+- mutation inversion 验证 2 处：worker filter 禁用 → test FAIL（守门网有效证据）
+
+**残余（留 M38-B，非本 round）：**
+- **fire 路径仍不通知**：`ingestion/service.go` 不 publish `TopicAlertCreated`，worker subscribe 形同虚设（生产代码 grep 仅 eventbus_test + worker subscribe 出现）。M38-B 整链路修复（E 选项）。
+- **告警 ↔ 规则匹配**：Zabbix trigger 没有结构化字段匹配 AlertRule 的 5 维度（metric/operator/threshold/host_group/asset_type）。M38-B 走 E1.b：triggerid → rule_id 映射表（运维在 ITmanager UI 配）。
+- **fire 去重**：Zabbix/GLPI/手动/ticket 多源对同一 alert。M38-B 走 E2.a：`trigger_id + problem_start` 60s 窗口 dedup。
+- **NotifyUsers**：同 NotifyChannels 一并留到 M38-B 整链路。
+
+**架构决策（Poison 2026-09-12 23:35 拍板）：**
+- 走 Option E（M37-A + M38-B 两轮），M37-A 仅修运维主动 ResolveAlert 路径
+- 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
+- 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
+
+
 - **M34 — D-1/D-2 tickets 收尾 + G-25 残余闭环（2026-09-12）**
 
 - **D-1 tickets 表 schema 收尾** (`4496087`) — `migrations/000028_tickets_schema_align.up.sql`：`DROP NOT NULL ticket_type`（让模型 `gorm:\"size:20\"` 可落库空串）；12 条 `ADD COLUMN IF NOT EXISTS` 显式零增量（与 `000013` 重复声明是为幂等保留、非新缺陷）。
