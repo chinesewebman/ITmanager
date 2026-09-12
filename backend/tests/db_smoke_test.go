@@ -640,7 +640,7 @@ func TestDBSmoke_NetBoxUpsert(t *testing.T) {
 		},
 	}, nil)
 
-	n, err := svc.SyncFromNetBox(context.Background())
+	n, _, err := svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "真 PG 上 SyncFromNetBox 失败 —— 000015 的唯一索引没生效（42P10）？")
 	require.Equal(t, 2, n)
 
@@ -664,7 +664,7 @@ func TestDBSmoke_NetBoxUpsert(t *testing.T) {
 		smokeNetBoxDevice(990101, "smoke-nb-sw01-renamed", "switch", "Catalyst 9300", "SN-999", "DC2"),
 		smokeNetBoxDevice(990102, "smoke-nb-srv01", "server", "PowerEdge R750", "SN-102", "DC1"),
 	}})
-	n, err = svc.SyncFromNetBox(context.Background())
+	n, _, err = svc.SyncFromNetBox(context.Background())
 	require.NoError(t, err, "二次同步（冲突更新）失败")
 	require.Equal(t, 2, n)
 
@@ -1307,7 +1307,7 @@ func TestDBSmoke_GLPITimeZoneWallClock(t *testing.T) {
 		},
 	}, nil)
 
-	n, skipped, err := svc.SyncFromGLPI(context.Background())
+	n, skipped, _, err := svc.SyncFromGLPI(context.Background())
 	require.NoError(t, err, "真 PG 上 SyncFromGLPI 失败 —— 000026 的部分唯一索引没生效（42P10）？")
 	require.Equal(t, 1, n)
 	require.Equal(t, 0, skipped)
@@ -1486,7 +1486,7 @@ func TestDBSmoke_ZabbixSyncOnConflict(t *testing.T) {
 		},
 	}, nil)
 
-	n, truncated, err := svc.SyncFromZabbix(context.Background())
+	n, truncated, _, err := svc.SyncFromZabbix(context.Background())
 	require.NoError(t, err,
 		"预查后漏进的冲突行必须被 ON CONFLICT 幂等跳过；报 23505 说明 TargetWhere/ON CONFLICT 没了")
 	assert.Equal(t, 0, truncated, "两条不构成截断")
