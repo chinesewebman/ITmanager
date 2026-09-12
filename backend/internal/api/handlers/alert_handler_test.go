@@ -170,6 +170,10 @@ func newAlertTestRouter(svc service.AlertService) *gin.Engine {
 		api.POST("/rules", h.CreateAlertRule)
 		api.PUT("/rules/:id", h.UpdateAlertRule)
 		api.DELETE("/rules/:id", h.DeleteAlertRule)
+		// M38-B Round 4 与生产 routes.go 同形, 让路由测试能命中
+		api.GET("/rules/:id/triggers", h.ListTriggerMappings)
+		api.POST("/rules/:id/triggers", h.CreateTriggerMapping)
+		api.DELETE("/rules/:id/triggers", h.DeleteTriggerMapping)
 		api.POST("/bulk-ack", h.BulkAcknowledge)
 		api.POST("/bulk-resolve", h.BulkResolve)
 		api.POST("/bulk-delete", h.BulkDelete)

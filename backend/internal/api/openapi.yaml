@@ -642,6 +642,81 @@ paths:
         '200':
           description: 删除成功
 
+  # ==================== M38-B: triggerid → rule_id 映射 ====================
+  /alert-rules/{id}/triggers:
+    get:
+      tags:
+        - 告警中心
+      summary: 列出某 rule 下的 triggerid 映射 (M38-B)
+      operationId: listAlertRuleTriggers
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlertRuleTriggerMap'
+    post:
+      tags:
+        - 告警中心
+      summary: 创建 triggerid → rule_id 映射 (last-write-wins, 同 triggerid 多次 POST 后写覆盖前写)
+      operationId: createAlertRuleTrigger
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [triggerid]
+              properties:
+                triggerid:
+                  type: string
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRuleTriggerMap'
+        '400': { description: "参数错误" }
+        '404': { description: "规则不存在" }
+    delete:
+      tags:
+        - 告警中心
+      summary: 删除 triggerid → rule_id 映射 (幂等)
+      operationId: deleteAlertRuleTrigger
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: triggerid
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 删除成功 (或不存在, 幂等返 200)
+
   # ==================== 机房 ====================
   /sites:
     get:
@@ -3020,6 +3095,19 @@ components:
           type: array
           items:
             type: string
+
+    # M38-B: triggerid → rule_id 映射 (apps/cmd/server/internal/models/alert.go)
+    AlertRuleTriggerMap:
+      type: object
+      properties:
+        triggerid:
+          type: string
+        rule_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
 
     AlertRuleInput:
       type: object

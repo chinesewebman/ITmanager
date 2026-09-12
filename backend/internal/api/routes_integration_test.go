@@ -706,6 +706,9 @@ var gatedRoutes = []struct {
 	{middleware.CapManage, http.MethodDelete, "/api/assets/:id", false},
 	{middleware.CapManage, http.MethodPost, "/api/alerts/bulk-delete", false},
 	{middleware.CapManage, http.MethodDelete, "/api/alert-rules/:id", false},
+	// M38-B Round 4: triggerid → rule_id 映射
+	// DELETE 走 manage (与 DELETE /:id 同源); POST 走 write; GET 默认读地板(下面 ungatedRoutes)
+	{middleware.CapManage, http.MethodDelete, "/api/alert-rules/:id/triggers", false},
 	{middleware.CapManage, http.MethodDelete, "/api/alert-suppressions/:id", false},
 	{middleware.CapManage, http.MethodDelete, "/api/oncall/schedules/:id", false},
 	{middleware.CapManage, http.MethodDelete, "/api/oncall/shifts/:shift_id", false},
@@ -719,6 +722,8 @@ var gatedRoutes = []struct {
 	{middleware.CapWrite, http.MethodPost, "/api/assets/:id/restore", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alert-rules", false},
 	{middleware.CapWrite, http.MethodPut, "/api/alert-rules/:id", false},
+	// M38-B Round 4: POST /triggers 加映射 (manage 配置修改走 write 同一档)
+	{middleware.CapWrite, http.MethodPost, "/api/alert-rules/:id/triggers", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alerts/bulk-ack", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alerts/bulk-resolve", false},
 	{middleware.CapWrite, http.MethodPut, "/api/alerts/:id/ack", false},
@@ -770,14 +775,16 @@ var ungatedRoutes = map[string]string{
 	"GET /swagger/*any":     "Swagger UI",
 
 	// ---- 读地板：业务读（列表 / 详情 / 统计 / 导出）----
-	"GET /api/assets":                          "资产读",
-	"GET /api/assets/:id":                      "资产读",
-	"GET /api/assets/export":                   "资产导出（全量 + X-Total-Count + safeCSV，独立限流 10/min）",
-	"GET /api/alerts":                          "告警读",
-	"GET /api/alerts/:id":                      "告警读",
-	"GET /api/alerts/stats":                    "告警统计",
-	"GET /api/alerts/false-positives/export":   "误报导出（safeCSV）",
-	"GET /api/alert-rules":                     "规则读",
+	"GET /api/assets":                        "资产读",
+	"GET /api/assets/:id":                    "资产读",
+	"GET /api/assets/export":                 "资产导出（全量 + X-Total-Count + safeCSV，独立限流 10/min）",
+	"GET /api/alerts":                        "告警读",
+	"GET /api/alerts/:id":                    "告警读",
+	"GET /api/alerts/stats":                  "告警统计",
+	"GET /api/alerts/false-positives/export": "误报导出（safeCSV）",
+	"GET /api/alert-rules":                   "规则读",
+	// M38-B Round 4: GET triggerid 映射 - 同规则读地板
+	"GET /api/alert-rules/:id/triggers":        "triggerid 映射读 (M38-B 规则 → triggers)",
 	"GET /api/alert-suppressions":              "抑制读",
 	"GET /api/alert-suppressions/:id":          "抑制读",
 	"GET /api/tickets":                         "工单读",

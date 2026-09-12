@@ -265,6 +265,102 @@ func (h *AlertHandler) DeleteAlertRule(c *gin.Context) {
 	})
 }
 
+// ==================== M38-B: triggerid → rule_id 映射 CRUD ====================
+//
+// POST   /api/alert-rules/:id/triggers  body { "triggerid": "zabbix-trigger-123" }
+// GET    /api/alert-rules/:id/triggers  query ?rule_id=:id 可省（运营总览）
+// DELETE /api/alert-rules/:id/triggers  query ?triggerid=... 必填
+//
+// 路径子段 :id = ruleID（与现有 /:id 路由形状保持一致，避免另起 /rule-triggers）；
+// 静态段 /triggers 比 :id/path 早注册（Gin 默认按声明顺序匹配，已在 routes.go 处理）。
+//
+// 状态码：
+//   400 — 非法 UUID / 缺 triggerid / 空 triggerid
+//   404 — rule 不存在 (CreateMapping)
+//   409 — 留作未来扩展（当前 last-write-wins 不抛 409）
+//   500 — 真错
+
+// CreateTriggerMapping POST /api/alert-rules/:id/triggers
+// body: {"triggerid":"..."}  → 201 + 写入行；同 triggerid 后写覆盖前写
+func (h *AlertHandler) CreateTriggerMapping(c *gin.Context) {
+	ruleID, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		TriggerID string `json:"triggerid" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.TriggerID == "" {
+		apierr.BadRequest(c, "triggerid 必填")
+		return
+	}
+	row, err := h.svc.CreateMapping(c.Request.Context(), ruleID, req.TriggerID)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			apierr.NotFound(c, "告警规则不存在")
+			return
+		}
+		if errors.Is(err, service.ErrInvalidInput) {
+			apierr.BadRequest(c, "参数错误 (id 必须为 UUID, triggerid 非空)")
+			return
+		}
+		apierr.Internal(c, "创建映射失败", err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"code": 0,
+		"data": row,
+	})
+}
+
+// ListTriggerMappings GET /api/alert-rules/:id/triggers
+// :id 即 ruleID — 路径子段复用 alertPathID 校验 UUID
+func (h *AlertHandler) ListTriggerMappings(c *gin.Context) {
+	ruleID, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	items, err := h.svc.ListMappings(c.Request.Context(), ruleID)
+	if err != nil {
+		if errors.Is(err, service.ErrInvalidInput) {
+			apierr.BadRequest(c, "参数错误")
+			return
+		}
+		apierr.Internal(c, "列出映射失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": items,
+	})
+}
+
+// DeleteTriggerMapping DELETE /api/alert-rules/:id/triggers?triggerid=...
+// 不存在 → 200 (idempotent, 客户端脚本跑幂等不应被拒)
+func (h *AlertHandler) DeleteTriggerMapping(c *gin.Context) {
+	ruleID, ok := alertPathID(c)
+	if !ok {
+		return
+	}
+	triggerID := c.Query("triggerid")
+	if triggerID == "" {
+		apierr.BadRequest(c, "triggerid 查询参数必填")
+		return
+	}
+	if err := h.svc.DeleteMapping(c.Request.Context(), ruleID, triggerID); err != nil {
+		if errors.Is(err, service.ErrInvalidInput) {
+			apierr.BadRequest(c, "参数错误")
+			return
+		}
+		apierr.Internal(c, "删除映射失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "删除成功",
+	})
+}
+
 // BulkRequest C-P6: 批量操作请求体
 type BulkRequest struct {
 	IDs []string `json:"ids" binding:"required"`

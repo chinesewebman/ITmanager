@@ -341,6 +341,11 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				rules.POST("", canWrite, alertH.CreateAlertRule)
 				rules.PUT("/:id", canWrite, alertH.UpdateAlertRule)
 				rules.DELETE("/:id", canManage, alertH.DeleteAlertRule)
+				// M38-B Round 4: triggerid → rule_id 映射 CRUD
+				// /:id/triggers 是 :id 的子路由, 不与 /:id 单段冲突
+				rules.GET("/:id/triggers", alertH.ListTriggerMappings)
+				rules.POST("/:id/triggers", canWrite, alertH.CreateTriggerMapping)
+				rules.DELETE("/:id/triggers", canManage, alertH.DeleteTriggerMapping)
 			}
 
 			tickets := protected.Group("/tickets")
