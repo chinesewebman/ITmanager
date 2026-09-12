@@ -158,10 +158,12 @@ func resourceFromPath(c *gin.Context) string {
 		}
 		// 跳过动态段, 继续找第一个静态段
 		// 修 audit-P1: /api/:tenant/users → "users" (旧版返 "")
+		// G-55: 列宽 VARCHAR(50)（migrations/000001_init.up.sql:1097），不再用 100——那是
+		// 历史副本漂移，截到 100 仍可能超 50 → 22001 → 整行 INSERT 被拒 → 审计链少一行。
 		if len(p) > 0 && p[0] == ':' {
 			continue
 		}
-		return sanitizeField(p, 100)
+		return sanitizeField(p, 50)
 	}
 	return "unknown"
 }
