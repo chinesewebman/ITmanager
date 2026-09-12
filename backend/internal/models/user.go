@@ -103,7 +103,7 @@ type AuditLog struct {
 	UserID     *uuid.UUID `json:"user_id" gorm:"type:uuid"`
 	Username   string     `json:"username" gorm:"size:100"`
 	Action     string     `json:"action" gorm:"size:50;not null"`
-	Resource   string     `json:"resource" gorm:"size:100"`
+	Resource   string     `json:"resource" gorm:"size:50"` // G-55: 与 migrations/000001_init.up.sql:1097 VARCHAR(50) 对齐 + middleware/audit.go resourceFromPath 截断常量
 	ResourceID *uuid.UUID `json:"resource_id" gorm:"type:uuid"`
 	Method     string     `json:"method" gorm:"size:10"`
 	Path       string     `json:"path" gorm:"size:500"`
