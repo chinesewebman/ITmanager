@@ -358,3 +358,10 @@ func filterChannelsByIDs(channels []models.NotificationChannel, wantIDs []string
 	}
 	return out
 }
+
+
+// M37-A：测试专用 exported wrapper, 让外部包 (db_smoke) 能驱动 handleAlertEvent
+// 不动方法语义, 仅做导出 (设计理由: 真 PG 集成测试需要"喂事件→观察推送"链路, 单测 sqlmock 已覆盖单元边界)
+func (w *Worker) HandleAlertEventForTest(ctx context.Context, e eventbus.Event) error {
+	return w.handleAlertEvent(ctx, e)
+}

@@ -602,3 +602,6 @@ func (w *WebhookSender) Send(ctx context.Context, _, content string) error {
 	}
 	return webhookRespErr(respBody(resp.Body))
 }
+
+
+// (M37-A 真 PG 测试直接走 WorkerConfig.Resolver, 不再用 RegisterSender, 所以 GetCustomSendersForTest 已删)

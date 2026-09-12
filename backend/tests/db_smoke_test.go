@@ -42,6 +42,8 @@ import (
 	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/migrate"
 	"network-monitor-platform/internal/models"
+	"network-monitor-platform/internal/eventbus"
+	"network-monitor-platform/internal/notification"
 	"network-monitor-platform/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -2989,4 +2991,145 @@ func TestDBSmoke_TicketNumberRetry(t *testing.T) {
 		"期望 PG 23505 unique_violation, 实际: %v", err)
 
 	t.Logf("✅ ticket_number 唯一索引在位: 23505 拒绝 dup INSERT")
+}
+
+
+// ==================== M37-A: 真 PG AlertRule.NotifyChannels worker 过滤测试 ====================
+// AC-M37-A-1/2/3/4 真 PG 闭环 (参考 intent-M37-A.md)
+// 为什么必须上真 PG: worker.handleAlertEvent 走 GORM Where + Find, 模型↔DB 漂移只在真 PG
+// 反证得彻底 (sqlite 的 UUID/JSONB 行为与 PG 有差异), 且真库能直接验 alert_rule_id 列存在。
+//
+// 测试方法: 构造 rule + 3 channels + alert (with AlertRuleID) → 直接调 worker.HandleAlertEventForTest
+// 喂 3 个 payload (空规则 / 勾 2 / 无 RuleID fallback) → 校验每次 Send 触发的 channel.id 集合
+
+func TestDBSmoke_M37A_AlertRuleNotifyChannelsWorkerFilter(t *testing.T) {
+	db := openSmokeDB(t)
+
+	// 校验 alert_rule_id 列确实存在 (AC-M37-A-4: 模型↔DB 漂移修复)
+	var hasCol int
+	require.NoError(t, db.Raw(`SELECT count(*) FROM information_schema.columns
+		WHERE table_name='alerts' AND column_name='alert_rule_id'`).Scan(&hasCol).Error)
+	require.Equal(t, 1, hasCol, "alerts.alert_rule_id 列必须存在 (migration 000001 已建)")
+
+	// Cleanup
+	t.Cleanup(func() {
+		db.Where("name LIKE ?", "m37a-%").Delete(&models.AlertRule{})
+		db.Where("name LIKE ?", "m37a-%").Delete(&models.NotificationChannel{})
+		db.Where("alert_id LIKE ?", "m37a-%").Delete(&models.Alert{})
+	})
+
+	// 构造 3 个 enabled channel
+	chA := &models.NotificationChannel{Name: "m37a-A", Type: "dingtalk",
+		Config: `{"webhook_url":"https://a.example/r"}`, IsEnabled: true}
+	chB := &models.NotificationChannel{Name: "m37a-B", Type: "dingtalk",
+		Config: `{"webhook_url":"https://b.example/r"}`, IsEnabled: true}
+	chC := &models.NotificationChannel{Name: "m37a-C", Type: "dingtalk",
+		Config: `{"webhook_url":"https://c.example/r"}`, IsEnabled: true}
+	require.NoError(t, db.Create(chA).Error)
+	require.NoError(t, db.Create(chB).Error)
+	require.NoError(t, db.Create(chC).Error)
+
+	// AC-M37-A-3: rule 显式空 → 发 0 次
+	ruleEmpty := &models.AlertRule{
+		Name: "m37a-empty", Metric: "cpu", Operator: ">", Threshold: 90,
+		NotifyChannels: "", NotifyUsers: "[]", IsEnabled: true,
+	}
+	require.NoError(t, db.Create(ruleEmpty).Error)
+	alertEmpty := &models.Alert{AlertID: "m37a-empty-1", AlertRuleID: &ruleEmpty.ID, Severity: 3, Problem: "empty rule"}
+	require.NoError(t, db.Create(alertEmpty).Error)
+
+	// AC-M37-A-1: rule 勾 2 个 channel → 发 chA + chB
+	ruleTwo := &models.AlertRule{
+		Name: "m37a-two", Metric: "cpu", Operator: ">", Threshold: 90,
+		NotifyChannels: fmt.Sprintf(`["%s","%s"]`, chA.ID, chB.ID), NotifyUsers: "[]", IsEnabled: true,
+	}
+	require.NoError(t, db.Create(ruleTwo).Error)
+	alertTwo := &models.Alert{AlertID: "m37a-two-1", AlertRuleID: &ruleTwo.ID, Severity: 3, Problem: "two rule"}
+	require.NoError(t, db.Create(alertTwo).Error)
+
+	// captures sent channel ids in order (M37-A 真 PG 验证)
+	var sentIDs []uuid.UUID
+	var mu sync.Mutex
+
+	// Worker: Resolver 直接返 m37aCapturingSender (每个 channel 绑一个, closure 捕获 channelID)
+	w := notification.NewWorker(db, notification.WorkerConfig{
+		Tick: time.Hour, MaxBatch: 10,
+		Resolver: func(ch *models.NotificationChannel) (notification.Sender, error) {
+			return &m37aCapturingSender{channelID: ch.ID, sink: &sentIDs, mu: &mu}, nil
+		},
+	})
+
+	// 场景 ①: rule 显式空 → 发 0 次
+	sentIDs = nil
+	payload1 := []byte(fmt.Sprintf(`{"event_type":"resolved","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":[]}`, ruleEmpty.ID))
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payload1}))
+	// 仅看 m37a 通道: 必须空 (其他历史通道在本测试无法控制)
+	m37aIDs := filterM37AIDs(t, db, sentIDs)
+	require.Empty(t, m37aIDs, "AC-M37-A-3: notify_channel_ids=[] 必须发 0 次 (m37a channels)")
+
+	// 场景 ②: rule 勾 2 个 → 发 2 次 (chA + chB)
+	sentIDs = nil
+	payload2 := []byte(fmt.Sprintf(`{"event_type":"resolved","trigger":"t","host_name":"h","rule_id":"%s","notify_channel_ids":["%s","%s"]}`,
+		ruleTwo.ID, chA.ID, chB.ID))
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payload2}))
+	m37aIDs = filterM37AIDs(t, db, sentIDs)
+	require.Len(t, m37aIDs, 2, "AC-M37-A-1: 勾 2 个 m37a channel 必须发 2 次")
+	require.NotContains(t, m37aIDs, chC.ID, "AC-M37-A-1: 未勾的 chC 必须 0 次")
+	require.Contains(t, m37aIDs, chA.ID)
+	require.Contains(t, m37aIDs, chB.ID)
+
+	// 场景 ③: AC-M37-A-2: payload 没 RuleID → 走 fallback 全发 3 次
+	sentIDs = nil
+	payload3 := []byte(`{"event_type":"resolved","trigger":"t","host_name":"h"}`)
+	require.NoError(t, w.HandleAlertEventForTest(context.Background(), eventbus.Event{Payload: payload3}))
+	m37aIDs = filterM37AIDs(t, db, sentIDs)
+	require.Len(t, m37aIDs, 3, "AC-M37-A-2: RuleID 空必须走 fallback 全发 3 个 m37a channel (兼容历史 alert)")
+
+	// AC-M37-A-4: 模型↔DB 漂移修复 — GORM 能用 AlertRuleID 字段写并回读
+	roundtrip := models.Alert{AlertID: "m37a-roundtrip", AlertRuleID: &ruleTwo.ID, Severity: 3, Problem: "rt"}
+	require.NoError(t, db.Create(&roundtrip).Error)
+	var got models.Alert
+	require.NoError(t, db.First(&got, "id = ?", roundtrip.ID).Error)
+	require.NotNil(t, got.AlertRuleID, "AC-M37-A-4: GORM 回读 AlertRuleID 必须非 nil (修复模型↔DB 漂移)")
+	require.Equal(t, ruleTwo.ID, *got.AlertRuleID)
+
+	t.Logf("✅ M37-A 真 PG 四场景全过: 空规则 0 / 勾 2 发 2 / 无 RuleID fallback 3 / AlertRuleID 字段回读非 nil")
+}
+
+// m37aCapturingSender 绑定 channelID, Send 时回调 sink 记录本次调用的 channel
+type m37aCapturingSender struct {
+	channelID uuid.UUID
+	sink      *[]uuid.UUID
+	mu        *sync.Mutex
+}
+
+func (m *m37aCapturingSender) Type() string { return "dingtalk" }
+func (m *m37aCapturingSender) Send(_ context.Context, _, _ string) error {
+	m.mu.Lock()
+	*m.sink = append(*m.sink, m.channelID)
+	m.mu.Unlock()
+	return nil
+}
+
+// filterM37AIDs 从 sentIDs 列表中筛出 m37a 命名前缀的 channel.id
+// 为什么需要: db_smoke 升级路径库可能残留其他测试的 channel (非 m37a 命名), worker fallback 推全启用会带它们走
+// 但本测试只关心自己造的 3 个 m37a channel 的行为
+func filterM37AIDs(t *testing.T, db *gorm.DB, sentIDs []uuid.UUID) []uuid.UUID {
+	if len(sentIDs) == 0 {
+		return nil
+	}
+	t.Helper()
+	var m37aChs []models.NotificationChannel
+	require.NoError(t, db.Where("name LIKE ?", "m37a-%").Find(&m37aChs).Error)
+	m37aSet := make(map[uuid.UUID]bool, len(m37aChs))
+	for _, ch := range m37aChs {
+		m37aSet[ch.ID] = true
+	}
+	var out []uuid.UUID
+	for _, id := range sentIDs {
+		if m37aSet[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
