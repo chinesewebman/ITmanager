@@ -12,6 +12,11 @@ type Alert struct {
 	AlertID  string     `json:"alert_id" gorm:"size:100;index"` // Zabbix 告警ID
 	HostID   *uuid.UUID `json:"host_id" gorm:"type:uuid;index"`
 	HostName string     `json:"host_name" gorm:"size:255"`
+
+	// M37-A：AlertRule.NotifyChannels 写不读修复 — 让 GORM 能读写 DB 已有但模型缺失的 alert_rule_id 列
+	// (migration 000001_init.up.sql:651 已建 UUID FK REFERENCES alert_rules(id))
+	// 历史 alert（rule_id NULL）仍走 worker fallback 推全启用 channels，与改动前一致
+	AlertRuleID *uuid.UUID `json:"alert_rule_id" gorm:"type:uuid;index"`
 	HostIP   string     `json:"host_ip" gorm:"size:45"`
 
 	// 告警信息
