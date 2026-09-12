@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"time"
 
@@ -352,14 +354,24 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 		return s.classifyAlertNoRows(ctx, id, "resolved")
 	}
 	// v2.0: 发 alert.resolved 事件给 event bus (通知 worker subscriber)
-	s.publish(eventbus.TopicAlertResolved, notification.AlertEventPayload{
+	// M37-A：snapshot 携带 RuleID + NotifyChannels 给 worker，避免 worker 二次 DB 读
+	//   - alert.AlertRuleID nil（历史 alert）→ 传 nil NotifyChannelIDs → worker fallback 全启用（兼容）
+	//   - 加载 rule 失败 → log + 同样传 nil（不漏告警）
+	//   - NotifyChannels 解析失败 → 同样传 nil（worker fallback 全启用）
+	//   - 解析成功但为空数组 → 传 []string{}（worker 推 0 次，运维明确清空语义）
+	payload := notification.AlertEventPayload{
 		AlertID:   alert.ID.String(),
 		HostName:  alert.HostName,
 		Severity:  alert.Severity,
 		Trigger:   alert.TriggerName,
 		Status:    "resolved",
 		EventType: "resolved",
-	})
+	}
+	if alert.AlertRuleID != nil {
+		payload.RuleID = alert.AlertRuleID.String()
+		payload.NotifyChannelIDs = s.loadRuleNotifyChannelIDs(ctx, *alert.AlertRuleID)
+	}
+	s.publish(eventbus.TopicAlertResolved, payload)
 	return s.writeNotificationTrigger(ctx, alert.ID, "resolved", userID)
 }
 
@@ -604,4 +616,33 @@ func (s *alertService) ListFalsePositives(ctx context.Context, since *time.Time)
 		return nil, err
 	}
 	return items, nil
+}
+
+// loadRuleNotifyChannelIDs M37-A：根据 AlertRule.ID 加载 rule，解析 NotifyChannels JSON 字段为 UUID 字符串数组
+//
+// 返回约定（与 worker handleAlertEvent 的契约一致）：
+//   - rule 加载失败 / NotifyChannels 解析失败 → 返回 nil → worker 走 "推全启用 channels" fallback（不漏告警）
+//   - NotifyChannels 字段为 NULL（运维未配）→ 返回 []string{} → worker 推 0 次（明确空语义）
+//   - 解析成功但里面 UUID 在 DB 找不到对应 channel → worker 端会按 ID 过滤时自然清空，与设计一致
+//
+// NotifyChannels 字段语义：JSON 字符串数组（v3 需求 §3.2），元素是 notification_channels.id (UUID)。
+// 早期版本可能存成其他格式；解析失败一律走 fallback，不抛错（运维可读警告日志后修配置）。
+func (s *alertService) loadRuleNotifyChannelIDs(ctx context.Context, ruleID uuid.UUID) []string {
+	var rule models.AlertRule
+	if err := s.db.WithContext(ctx).
+		Select("id", "notify_channels").
+		First(&rule, "id = ?", ruleID).Error; err != nil {
+		log.Printf("[alert_service] loadRuleNotifyChannelIDs rule %s: %v → fallback (worker 推全启用)", ruleID, err)
+		return nil
+	}
+	if rule.NotifyChannels == "" {
+		// 字段未写过 → 明确空语义（运维主动留空 = 不通知任何人）
+		return []string{}
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(rule.NotifyChannels), &ids); err != nil {
+		log.Printf("[alert_service] loadRuleNotifyChannelIDs rule %s: notify_channels JSON parse err %v → fallback", ruleID, err)
+		return nil
+	}
+	return ids
 }
