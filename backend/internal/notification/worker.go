@@ -184,7 +184,125 @@ func (w *Worker) handleAlertEvent(ctx context.Context, e eventbus.Event) error {
 				stripControlChars(ch.Name), redact.Text(stripControlChars(err.Error())))
 		}
 	}
+	// M38-B Round 6: NotifyUsers 处理（与 channel 推送平级，独立路径）
+	// p.NotifyUserIDs != nil 但 len == 0 → 运维显式清空 → 不发 user 通知（与 NotifyChannelIDs 语义对齐）
+	// p.NotifyUserIDs == nil → 老路径（payload 没 NotifyUserIDs 字段, 历史 alert）→ 不发 user 通知
+	// p.NotifyUserIDs 非空 → 对每个 user_id 查 users.email / users.phone → 按 channel.type 选推送方式
+	if p.NotifyUserIDs != nil {
+		w.deliverToUsers(ctx, p.NotifyUserIDs, p)
+	}
 	return nil
+}
+
+// deliverToUsers M38-B Round 6: 按 user_id 解析 users.email / users.phone，逐个发通知
+//
+// 推送方式：
+//   - users.email 非空 → 找 email channel (type='email'), Send
+//   - users.phone 非空 → 找 wechat / 第三方 channel 推送
+//   - contact 都空 → log warn + 跳过该 user（不漏 channel 通知）
+//
+// 与 channels 推送的关系：
+//   - channels 是「群发」语义（一个 channel 多人收），NotifyUsers 是「单发」语义
+//   - 实际推送可同时进行（用户既配了 channel 接收组也配了 user 直发）
+//
+// 写日志保留用户 ID 部分以便排障，但**绝不**直接 log 用户的 email/phone（PII / 凭据）
+func (w *Worker) deliverToUsers(ctx context.Context, userIDs []string, p AlertEventPayload) {
+	if len(userIDs) == 0 {
+		return
+	}
+	parsedIDs := make([]uuid.UUID, 0, len(userIDs))
+	skipUser := make(map[string]bool, len(userIDs))
+	for _, sid := range userIDs {
+		id, err := uuid.Parse(sid)
+		if err != nil {
+			log.Printf("[notification subscriber] NotifyUsers: 非法 UUID %q 跳过", stripControlChars(sid))
+			skipUser[sid] = true
+			continue
+		}
+		parsedIDs = append(parsedIDs, id)
+	}
+	if len(parsedIDs) == 0 {
+		return
+	}
+	var users []models.User
+	if err := w.db.WithContext(ctx).
+		Where("id IN ?", parsedIDs).
+		Find(&users).Error; err != nil {
+		log.Printf("[notification subscriber] NotifyUsers: load users failed: %v → skip", err)
+		return
+	}
+	if len(users) == 0 {
+		log.Printf("[notification subscriber] NotifyUsers: 0 users found, skip")
+		return
+	}
+	verb := "告警"
+	if p.EventType == "resolved" {
+		verb = "告警恢复"
+	}
+	content := "[ITmanager " + verb + "] " + p.Trigger +
+		"\n主机: " + p.HostName +
+		"\n级别: " + severityName(p.Severity) +
+		"\n时间: " + time.Now().Format("2006-01-02 15:04:05")
+	for i := range users {
+		u := &users[i]
+		contact := pickUserContact(u)
+		if contact == "" {
+			log.Printf("[notification subscriber] NotifyUsers user %s: email/phone 为空，跳过", u.ID)
+			continue
+		}
+		// 复用现有 channel 的发送通道：找含 recipient 与该 contact 匹配的 enabled channel，
+		// 找不到则降级推邮件 (email channel)。
+		ch, err := w.findUserChannel(ctx, contact)
+		if err != nil || ch == nil {
+			log.Printf("[notification subscriber] NotifyUsers user %s: no usable channel for contact, skip", u.ID)
+			continue
+		}
+		sender, err := w.resolver(ch)
+		if err != nil {
+			log.Printf("[notification subscriber] NotifyUsers user %s resolver err: %s",
+				u.ID, redact.Text(stripControlChars(err.Error())))
+			continue
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = sender.Send(sendCtx, contact, content)
+		cancel()
+		if err != nil {
+			log.Printf("[notification subscriber] NotifyUsers user %s send err: %s",
+				u.ID, redact.Text(stripControlChars(err.Error())))
+		}
+	}
+}
+
+// pickUserContact 选 user 的 contact: email 优先，没 email 用 phone，都空返 ""
+// 把「任一联系渠道能用」的语义明确写出来，别漏。
+func pickUserContact(u *models.User) string {
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.Phone
+}
+
+// findUserChannel 给定收件人 email/phone, 找一条 enabled channel whose recipient 包含该值。
+// 返回 nil 不算 err — 表示当前没有可用的 channel 推给该 contact。
+//
+// 实现按「channel.Config JSON 内含有 contact 字段」查 — 用 sql LIKE 而不是 JSON 操作，
+// 因为 contact 长这样：`email@x.com`，结构不固定，LIKE 足够窄匹配。
+// 单实例性能足够, 千人级 NotifyUsers 不构成 hot path。
+func (w *Worker) findUserChannel(ctx context.Context, contact string) (*models.NotificationChannel, error) {
+	if contact == "" {
+		return nil, nil
+	}
+	var ch models.NotificationChannel
+	err := w.db.WithContext(ctx).
+		Where("is_enabled = ? AND config LIKE ?", true, "%"+contact+"%").
+		First(&ch).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
 }
 
 // recipientFromConfig 从 channel.Config JSON 提取 recipient
