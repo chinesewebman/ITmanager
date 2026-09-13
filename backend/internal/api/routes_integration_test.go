@@ -126,6 +126,9 @@ func setupTestRouter(t *testing.T) *gin.Engine {
 	database.SetDBForTest(db)
 	t.Cleanup(func() {
 		database.SetDBForTest(oldDB)
+		// M41: 重置 authStatusCache 避免 package singleton 跨 test 污染
+		// (30s TTL + 上 test 留下的 inactive 缓存会让新 test 拿到旧 user 状态).
+		middleware.ResetAuthStatusCacheForTest()
 		_ = sqlDB.Close()
 	})
 
@@ -222,11 +225,14 @@ log:
 	return cfg
 }
 
-// genValidToken 生成一个能通过 AuthMiddleware 的 JWT
+// genValidToken 生成一个能通过 AuthMiddleware 的 JWT.
+// M41: 同时 seed 一个 'admin' role user 到当前 test DB, 避免 M40 引入的
+// lookupUserStatus fail-closed 把"user 不存在"默认作 inactive → 401.
+// fixture 不变 = 所有 caller 零改动.
 func genValidToken(t *testing.T) string {
 	t.Helper()
-	userID := uuid.NewString()
-	tok, err := middleware.GenerateToken(userID, "testuser", "admin")
+	userID := seedUserWithRole(t, middleware.RoleAdmin)
+	tok, err := middleware.GenerateToken(userID, "testuser", middleware.RoleAdmin)
 	require.NoError(t, err)
 	return tok
 }
@@ -654,10 +660,14 @@ func TestRoutes_DiagnosticTimeline_无效UUID返400(t *testing.T) {
 
 // ==================== 权限矩阵：路由级鉴权（docs/FIX-PLAN-AUTHZ.md §3.3） ====================
 
-// genTokenWithRole 生成指定角色的 JWT（genValidToken 固定 admin）
+// genTokenWithRole 生成指定角色的 JWT（genValidToken 固定 admin）.
+// M41: 同时 seed 对应 role user, 避免 M40 lookupUserStatus fail-closed 把
+// "user 不存在" → inactive → 401 (能力矩阵期望 403 / 通过, 401 会让所有
+// role 测试拿不到正确的 capability 检查结果).
 func genTokenWithRole(t *testing.T, role string) string {
 	t.Helper()
-	tok, err := middleware.GenerateToken(uuid.NewString(), "role-"+role, role)
+	userID := seedUserWithRole(t, role)
+	tok, err := middleware.GenerateToken(userID, "role-"+role, role)
 	require.NoError(t, err)
 	return tok
 }

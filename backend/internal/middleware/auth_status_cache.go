@@ -79,6 +79,13 @@ func resetAuthStatusCache() {
 	defaultAuthStatusCache.data = make(map[string]authStatusCacheEntry)
 }
 
+// ResetAuthStatusCacheForTest 跨包测试用：导出版 resetAuthStatusCache.
+// M41: 让 internal/api 包的 setupTestRouter cleanup 调用, 避免 cache
+// singleton 跨 test 污染. 生产代码不应调用.
+func ResetAuthStatusCacheForTest() {
+	resetAuthStatusCache()
+}
+
 // InvalidateAuthStatusCacheForUser 测试用：清掉指定 user_id 的 cache 条目，
 // 用于「模拟 cache 自然过期」的测试场景（真 PG db_smoke 不能 sleep 31s）。
 //
