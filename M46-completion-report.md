@@ -132,8 +132,11 @@ func (e redactedError) Unwrap() error { return e.original }
 - mutation inversion 实证
 
 ### 未 ship (明确不在 scope)
-- **慢查询 (elapsed > SlowThreshold) SQL 文本**: gorm logger 默认会打, 但 wrapper 仍调 l.Interface.Trace → 走默认路径, 含值骨架. 完整修需自己实现 Trace, 跨多文件. **留 backlog** (T-46)
-- **Trace 路径 fc() 返回的 sql (含参数值)**: ParamsFilter 已处理 (vars=nil → Explain 拿骨架), 但如果 gorm 内部某路径不调 ParamsFilter 直接 Explain, 仍可能含值. **留观察**
+- ~~**慢查询 (elapsed > SlowThreshold) SQL 文本**~~ — **已 ship (M46 自身覆盖)**:
+  `callbacks.go:131-136` 慢查询与普通日志走**同一个 fc()**, fc 内部
+  `if filter, ok := db.Logger.(ParamsFilter); ok { sql, vars = filter.ParamsFilter(...) }`
+  所以 ParamsFilter=vars=nil 同时修了正常路径 + 慢查询路径, **无需单独 Trace 重写**.
+  M46 误判的"留 backlog T-46"实际只是担心 fc 内部有 bypass — 现已证无 bypass.
 
 ### 已 ship 但需观察
 - redactGormLogger wrapper 在生产 LogLevel=Warn 下, Trace 路径仅 error + 慢查询触发 → 与 G-16 ship 一致
