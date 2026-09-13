@@ -530,6 +530,15 @@ func (s *ticketService) Update(ctx context.Context, id string, updates map[strin
 	if err := validateTicketEnumValues(updates); err != nil {
 		return nil, err
 	}
+	// M43 / G-23: jsonb 列规范化 (ticket.Tags 列 jsonb). 必须在 enum 校验之后,
+	// closed_at 自动维护之前 — tags 错就拒, 不该让 status=closed 路径走通后再 fail.
+	// 与 G-21 handler 守门同款口径 (handler 层 normalizeJSONBFields + service 层兜底),
+	// 防未来第二个 handler / 内部 caller 绕过 handler 直接调 service.
+	if v, ok := updates["tags"]; ok {
+		if err := validateJSONBField("tags", v); err != nil {
+			return nil, err
+		}
+	}
 	// M24：closed_at 跟着 status 走 —— 但判据必须落在**行自己身上**（SQL 表达式），
 	// 不能落在 Go 里读到的 `t.Status` 快照上。三个场景各自的期望：
 	//

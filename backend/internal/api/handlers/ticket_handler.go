@@ -161,6 +161,12 @@ func (h *TicketHandler) UpdateTicket(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
+	// M43 / G-23: 规范化 jsonb 入参 (ticket.Tags 列 jsonb). 同 G-21 asset
+	// handler 守门 — service 层另有兜底 (jsonb_validate.go), 双层防御.
+	if err := normalizeJSONBFields(updates); err != nil {
+		apierr.BadRequest(c, err.Error())
+		return
+	}
 	t, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates, actorFromContext(c))
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
