@@ -117,6 +117,13 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
+	// M42: 规范化 jsonb 入参 (G-21, docs/FIX-PLAN-ASSET-JSONB.md §2.3 R-1).
+	// service.Update 走 db.Updates(map) 不经过 BeforeSave 钩子,
+	// 非法 jsonb 入参会在 PG 触发 22P02 (500) 或写 NULL 破坏回填不变量.
+	if err := normalizeJSONBFields(updates); err != nil {
+		apierr.BadRequest(c, err.Error())
+		return
+	}
 	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
