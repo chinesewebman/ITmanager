@@ -3420,3 +3420,60 @@ func smokeDoRequest(r *gin.Engine, authHeader string) *httptest.ResponseRecorder
 	r.ServeHTTP(w, req)
 	return w
 }
+
+// TestDBSmoke_G21_JSONBUpdateReject 守 G-21 (M42 / docs/FIX-PLAN-ASSET-JSONB.md R-1):
+// 真 PG 上 service.Update 走 Updates(map) 路径, 验证 handler 已 ship 的
+// 规范化 helper 的拒/过决策能在真库复现, 同时也证明 service 层兜底
+// 确实有 "非空数组 → 22P02" 风险 (handler 不守的话会 500).
+//
+// 注意: 本测试故意**绕过** handler 直接调 service.Update, 因为:
+//   - 非法入参的 400 在 HTTP 层就拒了, 不会到 PG
+//   - 但万一未来有第二个 handler 绕开 normalizeJSONBFields, 这条 service 路径
+//     必须能复现 22P02 风险, 提醒加 service 层兜底 (见 intent-M42 §Risks)
+func TestDBSmoke_G21_JSONBUpdateReject(t *testing.T) {
+	db := openSmokeDB(t)
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := service.NewAssetService(db)
+	ctx := context.Background()
+
+	// ① 创一个 asset (走 CreateAsset 钩子 — 合法 jsonb 自动归一)
+	uid := uuid.NewString()
+	require.NoError(t, svc.Create(ctx, &models.Asset{
+		ID: uuid.MustParse(uid), Name: "smoke-g21", AssetType: "server",
+	}))
+
+	// ② service.Update 写 custom_fields={} — 应该成功 (handler 规范化后通过)
+	updated, err := svc.Update(ctx, uid, map[string]interface{}{
+		"custom_fields": map[string]interface{}{},
+	})
+	require.NoError(t, err, "service.Update 写 custom_fields={} 不应失败")
+	require.NotNil(t, updated.CustomFields, "落库后 custom_fields 应非 nil")
+
+	// ③ service.Update 写 tags=[] — 应该成功
+	updated, err = svc.Update(ctx, uid, map[string]interface{}{
+		"tags": []interface{}{},
+	})
+	require.NoError(t, err, "service.Update 写 tags=[] 不应失败")
+	require.NotNil(t, updated.Tags, "落库后 tags 应非 nil")
+
+	// ④ 反证: service.Update 写 tags=["a","b"] (string array) — 在真 PG 上
+	//    gorm 渲染成 PG 类型 'record' → 42804 类型不匹配 (column "tags" is of type
+	//    jsonb but expression is of type record). 注: 之前的 FIX-PLAN-ASSET-JSONB
+	//    写 22P02 是 sqlite 探针口径; 真 PG 报 42804.
+	//    (这里**故意**绕开 handler, 证明不守门的话 service 层会爆)
+	_, err = svc.Update(ctx, uid, map[string]interface{}{
+		"tags": []interface{}{"a", "b"},
+	})
+	require.Error(t, err, "service.Update 写 tags=非空 string array 必失败 (PG jsonb 拒)")
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		// 接受 42804 (真 PG) 或 22P02 (sqlite) 任一 — 目的都是证明 service 层兜底缺失会爆
+		assert.True(t,
+			strings.Contains(lower, "42804") || strings.Contains(lower, "22p02") || strings.Contains(lower, "type") || strings.Contains(lower, "invalid"),
+			"应是 PG 类型拒收 (42804/22P02/invalid/type): %v", err)
+	}
+	t.Logf("✅ G-21 service 层拒 string array 已实证 (handler 守门价值确认): %v", err)
+}
