@@ -323,6 +323,31 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M43 — G-23 ticket.Tags 双层入参规范化（2026-09-13）
+
+**修复内容：**
+
+- **handler 层加 normalizeJSONBFields** (`internal/api/handlers/ticket_handler.go`):
+  ticket `UpdateTicket` 加 `normalizeJSONBFields(updates)` 前置, 与 G-21
+  asset handler 守门同款. G-21 ship 时**没覆盖** ticket handler 路径——M43
+  补全.
+
+- **service 层兜底** (`internal/service/jsonb_validate.go` + `ticket_service.go`):
+  新加 `validateJSONBField(col, v)` 与 `ErrInvalidJSONBInput`, service 层
+  兜底校验. 拒 `nil`/`""`/string 标量/数值/非空数组, 过 `[]`/object.
+
+- **unit test** (`internal/service/jsonb_validate_test.go`): 7 个用例覆盖
+  拒类 5 + 过类 2.
+
+- **真 PG db_smoke** (`tests/db_smoke_test.go` `TestDBSmoke_G23_TicketTagsUpdateReject`):
+  6 场景, 含故意绕过 handler 直接调 service.Update, 验证 service 层兜底.
+
+**实证：** 27 packages 全绿；真 PG db_smoke 47 PASS / 0 FAIL；
+mutation inversion (service 层 validateJSONBField 永返 nil → 5/7 unit FAIL)
+→ 实证 service 层必要。
+
+**残余：** `models.Ticket.Tags` 类型仍是 `string`（表示 vs jsonb 不一致），不改（跨多文件）。
+
 ### M42 — G-21 UpdateAsset jsonb 入参规范化（2026-09-13）
 
 **修复内容：**
