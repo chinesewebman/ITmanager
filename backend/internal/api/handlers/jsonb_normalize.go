@@ -9,6 +9,13 @@ import (
 // caller 应当用 errors.Is 判断后转 400.
 var ErrInvalidJSONBInput = errors.New("jsonb 输入非法")
 
+// NormalizeJSONBFieldsForTest 跨包测试用：导出版 normalizeJSONBFields.
+// 生产代码不应直接调用 — 应该用未导出的 normalizeJSONBFields (同 package).
+// 这里导出仅供 handlers_test 包的单测使用.
+func NormalizeJSONBFieldsForTest(updates map[string]interface{}) error {
+	return normalizeJSONBFields(updates)
+}
+
 // jsonbFieldCols 列出需要规范化检查的 jsonb 列。
 // 集中定义避免散在多个 handler 各写一遍.
 var jsonbFieldCols = []string{"tags", "custom_fields"}
