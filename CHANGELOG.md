@@ -323,6 +323,41 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M48 — G-UI-TopoClick 拓扑节点从「死按钮」变成真按钮（2026-09-14）
+
+**改了什么（PM-direct 自查项, ≤2h, 单 frontend file + test file）：**
+
+- **`frontend/src/pages/Topology.tsx`** — 拓扑节点 `<g>` 原来只有 inner `<circle>` 上的
+  `style={{ cursor: 'pointer' }}`, **没有任何 onClick** —— 鼠标变手型、点了毫无反应, 是
+  纯视觉欺骗（运维会以为「点不动是图卡了」）。
+  - 光标上移到 `<g>`（点击区域随之覆盖整个节点: 圆 + 名称 + 类型 label, 触控友好）,
+    inner `<circle>` 的 cursor **移除**, 不再双重化。
+  - `<g>` 加 `role="button"` + `tabIndex={0}` + `aria-label={n.name}` +
+    `onKeyDown` (Enter / Space, Space 额外 `preventDefault` 防止滚动页面)。
+  - 子元素加 SVG `<title>{n.name}</title>` —— 浏览器原生 tooltip, 不引外部 tooltip 库。
+  - **点击行为**: 普通节点 (`!is_virtual`) → `navigate('/assets/<id>/diagnostics')`
+    （拓扑页的核心价值就是故障节点一键查诊断）; 虚拟节点 (`is_virtual === true`) →
+    弹 antd `Popover` 显示 `name` / `asset_type` / `open_alerts`, **不 navigate**
+    （虚拟节点没有 assets 记录, 跳详情必 404）。
+  - 未给节点套 `<button>` —— HTML `button` 不能包 SVG group, 故走 `role="button"` 路线。
+  - `handleNodeClick` 内无 `console.log`; `useApiQuery` 的 key / staleTime / refetch
+    **一字未动**。
+
+**测试（`frontend/src/pages/Topology.test.tsx`, 16/16 PASS）：**
+
+- 老 11 个用例 100% 保留（其中「渲染所有节点名」加 `ignore: 'title'`, 因为 `<title>`
+  tooltip 里同名会命中两次）。
+- M48 新 5 个:
+  - `点击普通节点 navigate 到 /assets/<id>/diagnostics` —— `app-01` → `/assets/n2/diagnostics`。
+  - `点击虚拟节点不 navigate, 弹出 meta popover` —— `rtr-wan` → 断言 `navigateMock`
+    未被调用 + 三项元数据可见。
+  - `键盘 Enter 触发 navigate（键盘可达）` —— `fireEvent.keyDown(g, { key: 'Enter' })`。
+  - `键盘 Space 触发虚拟节点 popover（不 navigate）`。
+  - `节点是 role=button + aria-label, 且无 inner cursor 双重化` —— 顺带钉住
+    `tabindex="0"` / `<title>` 文本 / inner `circle` 无 inline style。
+- **Mutation inversion 实证**: 把 `handleNodeClick` 整体改成 `return null` →
+  `vitest run src/pages/Topology.test.tsx` **4 failed | 12 passed**; revert 后 16/16 PASS。
+
 ### M47 — G-UI-Breadcrumb 详情面包屑显示资产名 / 工单标题（2026-09-13）
 
 **改了什么（PM-direct 自查项, ≤1h, 单 frontend file）：**
