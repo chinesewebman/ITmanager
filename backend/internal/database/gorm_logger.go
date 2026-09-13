@@ -57,17 +57,22 @@ func gormLoggerConfig(level gormlogger.LogLevel) gormlogger.Config {
 	}
 }
 
-// newGormLogger 构造 gorm logger，并顺带收口记录器的参数过滤。
+// newGormLogger 构造 gorm logger, 并顺带收口记录器的参数过滤 + 错误文本脱敏.
 //
-// 为什么不能只靠 Config.ParameterizedQueries：(*DB).Scan 会把 logger 换成
-// traceRecorder（finisher_api.go:527-533），它的 ParamsFilter 走的是**包级**
-// RecorderParamsFilter（logger.go:220-225），默认恒等 no-op（logger.go:85-88）——
-// 于是 Scan 路径的参数照样被展开落日志。下面这行覆盖那个钩子。
+// 为什么不能只靠 Config.ParameterizedQueries: (*DB).Scan 会把 logger 换成
+// traceRecorder (finisher_api.go:527-533), 它的 ParamsFilter 走的是**包级**
+// RecorderParamsFilter (logger.go:220-225), 默认恒等 no-op (logger.go:85-88) —
+// 于是 Scan 路径的参数照样被展开落日志. 下面这行覆盖那个钩子.
 //
-// w 只用于测试注入（生产传 log.Writer()，即标准库 log 的 stderr）。
+// M46 / G-32: 包一层 redactGormLogger, Error / Trace 路径的 err 走
+// redact.Text + StripControl (防 pgx %#v 编码错误带值落日志).
+//
+// w 只用于测试注入 (生产传 log.Writer(), 即标准库 log 的 stderr).
 func newGormLogger(w io.Writer) gormlogger.Interface {
 	gormlogger.RecorderParamsFilter = dropRecorderParams
-	return gormlogger.New(log.New(w, "\r\n", log.LstdFlags), gormLoggerConfig(gormLogLevel))
+	return &redactGormLogger{
+		Interface: gormlogger.New(log.New(w, "\r\n", log.LstdFlags), gormLoggerConfig(gormLogLevel)),
+	}
 }
 
 // dropRecorderParams 丢弃参数，只留占位符骨架。
