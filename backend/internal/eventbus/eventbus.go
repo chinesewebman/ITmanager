@@ -348,10 +348,15 @@ var ErrBufferFull = errors.New("event bus buffer full")
 // ErrPayloadTooLarge payload 超 MaxPayloadSize (默认 64KB)
 var ErrPayloadTooLarge = errors.New("event payload too large")
 
-// newID 生成本事件 ID (基于 timestamp + atomic counter 避免 uuid 依赖)
+// idCounter 全局原子计数器 (newID 用).
+// 不要在 newID 外的代码读写 — 必须用 atomic.* API.
 var idCounter uint64
 
+// newID 生成本事件 ID (基于 timestamp + atomic counter 避免 uuid 依赖).
+// M41: 用 AddUint64 返回新值一次原子读改, 避免「先 Add 再读」两步间的
+// race — race detector 在 TestPublish_并发安全 抓过 (两个 goroutine 各自
+// 的 Add + Read 交错 → DATA RACE).
 func newID() string {
-	atomic.AddUint64(&idCounter, 1)
-	return fmt.Sprintf("%d-%d", time.Now().UTC().UnixNano(), idCounter)
+	n := atomic.AddUint64(&idCounter, 1)
+	return fmt.Sprintf("%d-%d", time.Now().UTC().UnixNano(), n)
 }
