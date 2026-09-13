@@ -215,6 +215,8 @@ func TestSubscribe_不同topic互不影响(t *testing.T) {
 	assert.Equal(t, int32(0), ticketCount.Load())
 }
 
+// TestPublish_并发安全 race detector 守门 (M41): 100 个并发 Publish, 跑
+// `go test -race` 必过. 任何 newID 的两步原子实现回归都会让这测试 FAIL.
 func TestPublish_并发安全(t *testing.T) {
 	bus, _ := newTestBus(t)
 	defer bus.Close()
