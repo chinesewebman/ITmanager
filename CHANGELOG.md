@@ -323,6 +323,33 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M46 — G-32 gorm logger 错误脱敏 + ParamsFilter 补漏（2026-09-13）
+
+**修复内容：**
+
+- **redactGormLogger wrapper** (`backend/internal/database/gorm_logger_redact.go`):
+  - Error / Trace 路径的 err 走 `redact.Text + StripControl` (G-32 真正 scope)
+  - 实现 `gormlogger.ParamsFilter` 接口 — `vars=nil` 让 `Dialector.Explain`
+    拿到骨架 sql, **不展开参数值** (G-16 ship 过的 `ParameterizedQueries=true`
+    在 sqlite driver 下失效, 这是真活缺陷, 顺手补漏)
+  - `redactedError{original, text}` 双字段 — Error() 输出脱敏文本,
+    Unwrap() 回原 err 保 errors.Is/As 错误链
+
+- **接线** (`backend/internal/database/gorm_logger.go`):
+  `newGormLogger` 套 `&redactGormLogger{Interface: gormlogger.New(...)}`.
+
+- **7 个新单测** (`backend/internal/database/gorm_logger_redact_test.go`):
+  RedactToken / StripControl / Trace_ErrRedact / Trace_ErrUnwrap /
+  ParamsFilter_DropVars / OriginalError / RedactToken (redactErr).
+
+**实证：** 7/7 单测 PASS；27 packages 全绿；真 PG db_smoke 47 PASS / 0 FAIL；
+mutation inversion (`redactErr` 永返原串) → 4 用例 FAIL → revert → 7/7 PASS;
+已有 G-16 测试 `TestGormLogger_普通查询不落参数值` /
+`TestGormLogger_Scan路径不落参数值` 都 PASS (wrapper 没破 G-16 保护).
+
+**残余：** 慢查询 (elapsed > SlowThreshold) SQL 文本仍含值骨架 (T-46 backlog);
+Trace 路径若某内部路径不调 ParamsFilter 直接 Explain, 可能仍含值 (留观察).
+
 ### M45 — G-31 apierr 4xx 路径脱敏收口（2026-09-13）
 
 **修复内容：**
