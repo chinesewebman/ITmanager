@@ -47,7 +47,10 @@ jobs:
 
       - name: go test
         working-directory: backend
-        run: go test ./...
+        # M41: 加 -race flag 守门 DATA RACE. baseline race detector 抓过
+        # eventbus.newID 的两步原子 race (已修). 任何后续 race regression
+        # 会立刻让 CI 红.
+        run: go test -race ./...
 
       - name: Build server
         working-directory: backend
