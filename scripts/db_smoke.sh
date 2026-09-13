@@ -76,6 +76,11 @@ cleanup() {
   if [[ -n "${CONTAINER:-}" ]]; then
     ${DOCKER:-docker} rm -f "$CONTAINER" >/dev/null 2>&1 || true
   fi
+  # M44 / G-30: 临时凭据文件清理 (0600 + trap rm)
+  [[ -n "${ENVFILE:-}" ]] && rm -f "$ENVFILE"
+  [[ -n "${PGPASS:-}" ]] && rm -f "$PGPASS"
+  # unset 明文密码 env vars, 不让父进程 / 兄弟进程读到
+  unset PGPASSWORD PGUSER PGHOST PGPORT PGDATABASE TEST_DATABASE_URL
 }
 trap cleanup EXIT INT TERM
 
@@ -83,18 +88,23 @@ trap cleanup EXIT INT TERM
 if [[ "$EXTERNAL" -eq 1 ]]; then
   HOST_PORT="${SMOKE_PG_PORT:-5432}"
   log "外部 Postgres: ${SMOKE_PG_HOST}:${HOST_PORT} | 库: $DB_NAME"
-  psql_q()     { PGPASSWORD="$DB_PASS" psql     -h "$SMOKE_PG_HOST" -p "$HOST_PORT" -U "$DB_USER" -v ON_ERROR_STOP=1 -q "$@"; }
-  createdb_q() { PGPASSWORD="$DB_PASS" createdb -h "$SMOKE_PG_HOST" -p "$HOST_PORT" -U "$DB_USER" "$@"; }
+  psql_q()     { psql     -h "$SMOKE_PG_HOST" -p "$HOST_PORT" -U "$DB_USER" -v ON_ERROR_STOP=1 -q "$@"; }
+  createdb_q() { createdb -h "$SMOKE_PG_HOST" -p "$HOST_PORT" -U "$DB_USER" "$@"; }
 else
   log "镜像: $IMAGE | 容器: $CONTAINER | 库: $DB_NAME"
   ${DOCKER:-docker} image inspect "$IMAGE" >/dev/null 2>&1 || {
     fail "本地没有镜像 $IMAGE (本脚本不做 pull; 可设 SMOKE_PG_IMAGE 指定已有镜像)"
     exit 1
   }
+  # M44 / G-30: 临时凭据文件 — docker run --env-file 走临时文件
+  # (0600 + trap rm), 不再用 `-e POSTGRES_PASSWORD=...` 把密码塞 argv
+  # (argv 进 /proc/<pid>/cmdline, 同机任意用户 ps aux 可见).
+  ENVFILE=$(mktemp -t dbsmoke-env.XXXXXX)
+  chmod 0600 "$ENVFILE"
+  printf 'POSTGRES_PASSWORD=%s\nPOSTGRES_DB=%s\n' "$DB_PASS" "$DB_NAME" > "$ENVFILE"
   log "启动临时 Postgres 容器..."
   ${DOCKER:-docker} run -d --name "$CONTAINER" \
-    -e POSTGRES_PASSWORD="$DB_PASS" \
-    -e POSTGRES_DB="$DB_NAME" \
+    --env-file "$ENVFILE" \
     -p 127.0.0.1::5432 \
     "$IMAGE" >/dev/null
 
@@ -104,6 +114,19 @@ else
   psql_q()     { ${DOCKER:-docker} exec -i "$CONTAINER" psql     -v ON_ERROR_STOP=1 -q -U "$DB_USER" "$@"; }
   createdb_q() { ${DOCKER:-docker} exec    "$CONTAINER" createdb -U "$DB_USER" "$@"; }
 fi
+
+# M44 / G-30: 写 .pgpass (0600 + trap rm), psql / go test 走 PGPASSFILE
+# 不再 set PGPASSWORD="$DB_PASS" 进 env. 路径可任意, 不含密码.
+PGPASS=$(mktemp -t pgpass.XXXXXX)
+chmod 0600 "$PGPASS"
+printf '%s:%s:%s:%s:%s\n' \
+  "${SMOKE_PG_HOST:-127.0.0.1}" "${HOST_PORT:-5432}" "$DB_NAME" "$DB_USER" "$DB_PASS" \
+  > "$PGPASS"
+# 也覆盖其他可能用到的库 (升级路径 _upgrade)
+printf '%s:%s:%s:%s:%s\n' \
+  "${SMOKE_PG_HOST:-127.0.0.1}" "${HOST_PORT:-5432}" "${DB_NAME}_upgrade" "$DB_USER" "$DB_PASS" \
+  >> "$PGPASS"
+export PGPASSFILE="$PGPASS"
 
 # ---- 2. 等库 ready ----
 log "等待 Postgres 就绪..."
@@ -195,15 +218,22 @@ UPGRADE_DSN="postgres://${DB_USER}:${DB_PASS}@127.0.0.1:${HOST_PORT}/${UPGRADE_D
 
 rc=0
 log "① 全新安装路径: migrate.Up 从零建库 + 核心链路 (build tag: dbsmoke)"
-log "   TEST_DATABASE_URL=postgres://${DB_USER}:***@127.0.0.1:${HOST_PORT}/${DB_NAME}"
-( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$FRESH_DSN" "$GO_BIN" test \
+log "   PGUSER=$DB_USER PGHOST=127.0.0.1 PGPORT=$HOST_PORT PGDATABASE=$DB_NAME (PGPASSWORD 走 .pgpass + PGPASSFILE)"
+# M44 / G-30: 不再用 TEST_DATABASE_URL (含明文密码进 env). 改 PG* 拆分 +
+# PGPASSFILE (pgx/gorm 都支持 libpq env vars).
+( cd "$BACKEND_DIR" && \
+  PGUSER="$DB_USER" PGHOST=127.0.0.1 PGPORT="$HOST_PORT" PGDATABASE="$DB_NAME" \
+  "$GO_BIN" test \
     -tags dbsmoke -count=1 -v \
     -run 'TestDBSmoke_MigrateRunner|TestDBSmoke_LoginQuery|TestDBSmoke_AuditInsert|TestDBSmoke_AuditFieldTruncation|TestDBSmoke_AuditResourceOver50Char|TestDBSmoke_TicketInsert|TestDBSmoke_TicketsSchemaRoundTrip|TestDBSmoke_GenerateTicketNumberDayScoped|TestDBSmoke_TicketNumberRetry|TestDBSmoke_TypeConvertedModels|TestDBSmoke_TicketNumberUnique|TestDBSmoke_MigrationReapply|TestDBSmoke_MigrationNoSessionGUCLeak|TestDBSmoke_AssetJSONBDefaults|TestDBSmoke_NetBoxUpsert|TestDBSmoke_NetBoxFieldTruncation|TestDBSmoke_ZabbixFieldTruncation|TestDBSmoke_ThirdPartyFieldTruncation|TestDBSmoke_ColumnWidthMatchesConstant|TestDBSmoke_SyncAllFailureOmitsKeys|TestDBSmoke_NotificationPendingIndex|TestDBSmoke_AlertsProblemStartIndex|TestDBSmoke_AlertsTriggerIDIndex|TestDBSmoke_TicketsExternalIDIndex|TestDBSmoke_AssetsNameIndex|TestDBSmoke_AuditLogsPathIndex|TestDBSmoke_AlertBulkTransitionGuards|TestDBSmoke_AlertStatusDefault|TestDBSmoke_TicketHistory|TestDBSmoke_TicketResolvedAt|TestDBSmoke_TicketsGLPIExternalIDUnique|TestDBSmoke_GLPITimeZoneWallClock|TestDBSmoke_AlertsZabbixIdentityUnique|TestDBSmoke_ZabbixSyncOnConflict|TestDBSmoke_M37A_AlertRuleNotifyChannelsWorkerFilter|TestDBSmoke_M38B_FirePathEnd2End|TestDBSmoke_M40_JWTDisableTakesEffect|TestDBSmoke_G21_JSONBUpdateReject|TestDBSmoke_G23_TicketTagsUpdateReject' \
     ./tests/ ) || rc=$?
 
 if [[ "$rc" -eq 0 ]]; then
   log "② 存量升级路径: 只应用 000013 之后的迁移, 校验 role/jsonb 回填 + 回滚不丢旧列"
-  ( cd "$BACKEND_DIR" && TEST_DATABASE_URL="$UPGRADE_DSN" SMOKE_EXPECT_UPGRADE=1 "$GO_BIN" test \
+  ( cd "$BACKEND_DIR" && \
+    PGUSER="$DB_USER" PGHOST=127.0.0.1 PGPORT="$HOST_PORT" PGDATABASE="${UPGRADE_DB}" \
+    SMOKE_EXPECT_UPGRADE=1 \
+    "$GO_BIN" test \
       -tags dbsmoke -count=1 -v \
       -run 'TestDBSmoke_UpgradePath|TestDBSmoke_AssetJSONBBackfill|TestDBSmoke_TicketPriorityNormalize|TestDBSmoke_DownPreservesLegacyColumns|TestDBSmoke_Migration026BlockedByDuplicates|TestDBSmoke_Migration027BlockedByDuplicates|TestDBSmoke_Migration027AllowsNullProblemStart' ./tests/ ) || rc=$?
 fi

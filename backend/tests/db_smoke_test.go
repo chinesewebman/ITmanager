@@ -53,13 +53,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// openSmokeDB 连接 TEST_DATABASE_URL 指向的库; 未设置则 skip。
+// openSmokeDB 优先用 PGPASSFILE 走 libpq .pgpass 协议 (M44 / G-30):
+//   db_smoke.sh 把密码写到 0600 临时 .pgpass, 设 PGPASSFILE=该路径, 不进 env.
+//   pgx 自动从 PGPASSFILE 读 PGPASSWORD (libpq 标准行为).
+// Fallback 1: PG* 拆分 env vars (PGUSER/PGHOST/PGPORT/PGDATABASE/PGPASSWORD),
+//   用于手工测试或 CI 显式覆盖.
+// Fallback 2: TEST_DATABASE_URL (旧行为, 含明文进 env, 不推荐).
+// 未设置任一则 skip。
 func openSmokeDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL 未设置 —— 跳过真 Postgres 冒烟测试(由 scripts/db_smoke.sh 驱动)")
+	pgUser := os.Getenv("PGUSER")
+	pgHost := os.Getenv("PGHOST")
+	pgPort := os.Getenv("PGPORT")
+	pgDB := os.Getenv("PGDATABASE")
+	if pgUser == "" {
+		// 全部 PG* 没设 → fallback TEST_DATABASE_URL (旧行为)
+		dsn := os.Getenv("TEST_DATABASE_URL")
+		if dsn == "" {
+			t.Skip("PGUSER/PGPASSFILE/TEST_DATABASE_URL 未设置 —— 跳过真 Postgres 冒烟测试(由 scripts/db_smoke.sh 驱动)")
+		}
+		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+			Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+		})
+		if err != nil {
+			t.Fatalf("连接 Postgres 失败 [%s]:\n%v", maskDSN(dsn), err)
+		}
+		return db
 	}
+	// 走 PG* 拆分 + PGPASSFILE (PGPASSWORD 由 libpq 从 .pgpass 自动读)
+	// 不在 DSN 里 embed password=. gorm/pgx 的 pgx.Config 支持 PGPASSFILE env.
+	if pgHost == "" {
+		pgHost = "127.0.0.1"
+	}
+	if pgPort == "" {
+		pgPort = "5432"
+	}
+	dsn := fmt.Sprintf("host=%s port=%s user=%s dbname=%s sslmode=disable",
+		pgHost, pgPort, pgUser, pgDB)
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
