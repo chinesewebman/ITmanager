@@ -6,6 +6,7 @@ import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import type * as RouterDom from 'react-router-dom'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
 const h = vi.hoisted(() => ({
@@ -29,6 +30,14 @@ const GRAPH = {
   ],
   stats: { total_nodes: 4, total_edges: 3, nodes_with_alert: 1, down_edges: 1, virtual_nodes: 1, window_days: 30 },
 }
+
+// M48：节点点击 → navigate 到诊断页，用 spy 的 useNavigate 断言（同 CommandPalette
+// 测试的写法：importActual 之后再覆盖单点，MemoryRouter 等真实实现保持不变）。
+const navigateMock = vi.fn()
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof RouterDom>('react-router-dom')
+  return { ...actual, useNavigate: () => navigateMock }
+})
 
 vi.mock('../hooks/useApiQuery', () => ({
   useApiQuery: () => ({
@@ -55,6 +64,7 @@ function renderPage() {
 beforeEach(() => {
   h.override = {}
   h.refetch.mockClear()
+  navigateMock.mockClear()
 })
 
 describe('Topology', () => {
@@ -79,7 +89,10 @@ describe('Topology', () => {
   it('渲染所有节点名', () => {
     const { container } = renderPage()
     const svg = container.querySelector('svg') as unknown as HTMLElement
-    expect(within(svg).getAllByText(/sw-core|app-01|app-02|rtr-wan/)).toHaveLength(4)
+    // M48：<title> tooltip 里也有节点名，忽略 title 子树，否则同一个名字命中两次
+    expect(
+      within(svg).getAllByText(/^(sw-core|app-01|app-02|rtr-wan)$/, { ignore: 'title' }),
+    ).toHaveLength(4)
   })
 
   it('告警节点显示 badge 数字', () => {
@@ -141,5 +154,46 @@ describe('Topology', () => {
       document.querySelectorAll('.ant-statistic-content-value'),
     ).map((el) => el.textContent)
     expect(values).toEqual(['0', '0', '0', '0', '0', '0 天'])
+  })
+
+  // ---- M48：节点是真按钮（此前只有 cursor:pointer，点了毫无反应）----
+  const nodeButton = (name: string) => screen.getByRole('button', { name })
+
+  it('M48：点击普通节点 navigate 到 /assets/<id>/diagnostics', () => {
+    renderPage()
+    fireEvent.click(nodeButton('app-01'))
+    expect(navigateMock).toHaveBeenCalledWith('/assets/n2/diagnostics')
+  })
+
+  it('M48：点击虚拟节点不 navigate，弹出 meta popover', () => {
+    renderPage()
+    fireEvent.click(nodeButton('rtr-wan'))
+    expect(navigateMock).not.toHaveBeenCalled()
+    // 元数据：name / asset_type / open_alerts
+    expect(screen.getByText('资产名：rtr-wan')).toBeInTheDocument()
+    expect(screen.getByText('类型：router')).toBeInTheDocument()
+    expect(screen.getByText('当前告警：0')).toBeInTheDocument()
+  })
+
+  it('M48：键盘 Enter 触发 navigate（键盘可达）', () => {
+    renderPage()
+    fireEvent.keyDown(nodeButton('sw-core'), { key: 'Enter' })
+    expect(navigateMock).toHaveBeenCalledWith('/assets/n1/diagnostics')
+  })
+
+  it('M48：键盘 Space 触发虚拟节点 popover（不 navigate）', () => {
+    renderPage()
+    fireEvent.keyDown(nodeButton('rtr-wan'), { key: ' ' })
+    expect(navigateMock).not.toHaveBeenCalled()
+    expect(screen.getByText('资产名：rtr-wan')).toBeInTheDocument()
+  })
+
+  it('M48：节点是 role=button + aria-label，且无 inner cursor 双重化', () => {
+    const { container } = renderPage()
+    expect(nodeButton('sw-core')).toHaveAttribute('tabindex', '0')
+    // 节点名进原生 tooltip
+    expect(container.querySelector('g[aria-label="sw-core"] > title')?.textContent).toBe('sw-core')
+    // cursor 只在 group 上，inner circle 不再单独写
+    expect(container.querySelector('g[aria-label="sw-core"] circle')).not.toHaveAttribute('style')
   })
 })
