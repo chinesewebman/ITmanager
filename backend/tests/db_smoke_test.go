@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -3476,4 +3477,74 @@ func TestDBSmoke_G21_JSONBUpdateReject(t *testing.T) {
 			"应是 PG 类型拒收 (42804/22P02/invalid/type): %v", err)
 	}
 	t.Logf("✅ G-21 service 层拒 string array 已实证 (handler 守门价值确认): %v", err)
+}
+
+// TestDBSmoke_G23_TicketTagsUpdateReject 守 G-23 (M43): ticket.Tags 也是 jsonb 列,
+// G-21 ship 时**没覆盖** ticket handler/service 路径. M43 补 service 层兜底
+// + ticket handler 守门. 本测试故意**绕过** handler 直接调 service.Update,
+// 验证 service 层 validateJSONBField 真起作用 (handler 已 ship 同款 normalize).
+//
+// 三场景:
+//   ① service.Update tags=[] — 通过 (合法)
+//   ② service.Update tags=null — service 层拒 ErrInvalidJSONBInput
+//   ③ service.Update tags=["a","b"] — service 层拒 ErrInvalidJSONBInput (非空 string array)
+//   ④ service.Update tags={"k":"v"} — 通过 (object 合法)
+//   ⑤ service.Update tags="" — service 层拒 ErrInvalidJSONBInput (空字符串)
+func TestDBSmoke_G23_TicketTagsUpdateReject(t *testing.T) {
+	db := openSmokeDB(t)
+	oldDB := database.GetDB()
+	database.SetDBForTest(db)
+	defer database.SetDBForTest(oldDB)
+
+	svc := service.NewTicketService(db)
+	ctx := context.Background()
+
+	// ① 创一个 ticket (走 Create 路径 — tags "" → "[]" 兜底归一)
+	tid := uuid.NewString()
+	actor := service.Actor{Name: "smoke-g23"}
+	require.NoError(t, svc.Create(ctx, &models.Ticket{
+		ID: uuid.MustParse(tid), Title: "smoke-g23",
+		Priority: "normal", Status: "open", Source: "manual",
+	}, actor))
+
+	// ② service.Update tags=[] — 通过 (合法)
+	updated, err := svc.Update(ctx, tid, map[string]interface{}{
+		"tags": []interface{}{},
+	}, actor)
+	require.NoError(t, err, "service.Update 写 tags=[] 不应失败 (G-23 空数组合法)")
+	require.NotNil(t, updated.Tags, "落库后 tags 应非 nil")
+
+	// ③ service.Update tags=null — service 层兜底应拒
+	_, err = svc.Update(ctx, tid, map[string]interface{}{
+		"tags": nil,
+	}, actor)
+	require.Error(t, err, "service.Update 写 tags=null 必拒 (G-23)")
+	require.True(t, errors.Is(err, service.ErrInvalidJSONBInput),
+		"应是 service.ErrInvalidJSONBInput, got: %v", err)
+	t.Logf("✅ G-23 service 层拒 null 已实证: %v", err)
+
+	// ④ service.Update tags=["a","b"] — service 层兜底应拒 (非空 string array 会让 PG 渲染 'record')
+	_, err = svc.Update(ctx, tid, map[string]interface{}{
+		"tags": []interface{}{"a", "b"},
+	}, actor)
+	require.Error(t, err, "service.Update 写 tags=非空 string array 必拒 (G-23)")
+	require.True(t, errors.Is(err, service.ErrInvalidJSONBInput),
+		"应是 service.ErrInvalidJSONBInput, got: %v", err)
+	t.Logf("✅ G-23 service 层拒非空 string array 已实证: %v", err)
+
+	// ⑤ service.Update tags={"k":"v"} — object 合法, 应通过
+	updated, err = svc.Update(ctx, tid, map[string]interface{}{
+		"tags": map[string]interface{}{"k": "v"},
+	}, actor)
+	require.NoError(t, err, "service.Update 写 tags=object 不应失败 (G-23)")
+	require.NotNil(t, updated.Tags, "落库后 tags 应非 nil")
+
+	// ⑥ service.Update tags="" — service 层兜底应拒 (空字符串)
+	_, err = svc.Update(ctx, tid, map[string]interface{}{
+		"tags": "",
+	}, actor)
+	require.Error(t, err, "service.Update 写 tags=\"\" 必拒 (G-23)")
+	require.True(t, errors.Is(err, service.ErrInvalidJSONBInput),
+		"应是 service.ErrInvalidJSONBInput, got: %v", err)
+	t.Logf("✅ G-23 service 层拒空字符串已实证: %v", err)
 }
