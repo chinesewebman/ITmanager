@@ -323,6 +323,34 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M42 — G-21 UpdateAsset jsonb 入参规范化（2026-09-13）
+
+**修复内容：**
+
+- **handler 层加 normalizeJSONBFields** (`internal/api/handlers/jsonb_normalize.go`):
+  校验 PATCH 入参中 `tags` / `custom_fields` 两列的合法性，非法入参
+  (null / `""` / string 标量 / 非空数组 / 数值标量) 一律 400 拒绝。
+  空数组 `[]` / 空对象 `{}` / 非空对象 通过；非 jsonb 列（name/status）
+  不拦。UpdateAsset 在 `ShouldBindJSON` 之后立即调，错误转 `apierr.BadRequest`。
+- **Create 路径不变**：BeforeSave 钩子 (G-20 已 ship) 把零值归一为 `[]`/`{}`；
+  Update 路径无钩子兜底，统一用 400 拒比归一更明确 (client 立即知道错)。
+- **真 PG db_smoke** (`TestDBSmoke_G21_JSONBUpdateReject`): 5 场景，
+  其中第 5 个**反证** service.Update 写 `tags=["a","b"]` 在真 PG 上
+  会爆 `42804 column ... is of type jsonb but expression is of type record`，
+  实证 handler 守门价值 + 钉住未来若第二个 handler 绕过 normalizeJSONBFields
+  会爆的风险。
+
+**残余 / 已知：**
+
+- service.Update 仍是裸 `Updates(map)`，handler 是唯一守门；下 round
+  可在 service 层加兜底（不在 M42 scope，避免扩大爆炸半径）。
+- 非空数组（含 object elements 如 `tags: [{"k":"v"}]`）当前**拒**——保守策略；
+  若 telemetry 显示 client 真要传 object array 可放宽。
+- 结构体 `Updates` 零值被 gorm 静默跳过（gorm 设计，非 ITmanager 缺陷）。
+
+**验证：** `go test -race ./...` 27 包绿；`scripts/db_smoke.sh` 45 PASS / 0 FAIL；
+mutation inversion（`checkJSONBValue` 永返 nil → 6 测试 FAIL → revert → PASS）。
+
 ### M41 — CI 加 -race + fixture 修复 + eventbus race fix（2026-09-13）
 
 **修复内容：**
