@@ -2,12 +2,19 @@
 // 0 依赖 SVG 渲染节点 + 边，自动布局（后端算 position）
 // 故障节点高亮（红色 + badge），down 边变红
 
+// M48：节点原本只有 `cursor: pointer` 而没有 onClick —— 看着能点，点了毫无反应。
+// 现在节点是真按钮：普通节点 → `/assets/<id>/diagnostics`（运维点故障节点的第一诉求
+// 就是查诊断）；虚拟节点没有资产记录（跳详情必然 404），改为就地弹出 Popover 显示
+// 元数据。a11y 用 role=button + aria-label + 键盘 Enter/Space，另加 SVG <title> 原生
+// tooltip；不引外部 tooltip 库，也不给节点套 <button>（HTML button 不能包 SVG group）。
+//
 // W1：`:84` `?? MOCK_GRAPH` 与 `catch { return MOCK_GRAPH }` 双重兜底已删除。
 // 原写法让 isError 恒 false —— 接口挂了页面照常画出 5 个虚构节点和 4 条虚构链路，
 // 运维会对着不存在的拓扑排查「db-01 为什么 down」。
 
-import { useState } from 'react'
-import { Card, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
+import { Fragment, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Card, Popover, Skeleton, Space, Statistic, Switch, Typography } from 'antd'
 import { useApiQuery } from '../hooks/useApiQuery'
 import api from '../services/api'
 import { EmptyState } from '../components/EmptyState'
@@ -83,9 +90,24 @@ function nodeColor(n: TopologyNode): string {
   return '#52c41a'
 }
 
+// 虚拟节点（手工录入的外部设备，没有 assets 记录）的元数据弹层内容
+function VirtualNodeMeta({ node }: { node: TopologyNode }) {
+  return (
+    <div style={{ fontSize: 12, lineHeight: 1.9, minWidth: 160 }}>
+      <div>资产名：{node.name}</div>
+      <div>类型：{node.asset_type ?? '未知'}</div>
+      <div>当前告警：{node.open_alerts}</div>
+      <div style={{ color: '#8c8c8c' }}>虚拟节点无资产详情页</div>
+    </div>
+  )
+}
+
 export function Topology() {
   useDocumentTitle('网络拓扑')
+  const navigate = useNavigate()
   const [onlyWithAlerts, setOnlyWithAlerts] = useState(false)
+  // 当前展开元数据的虚拟节点（普通节点直接跳诊断页，不需要选中态）
+  const [virtualNode, setVirtualNode] = useState<TopologyNode | null>(null)
 
   const { data, isLoading, isError, error, refetch } = useApiQuery<TopologyGraph>(
     ['topology', onlyWithAlerts] as const,
@@ -100,6 +122,16 @@ export function Topology() {
   const graph = normalizeGraph(data)
   // 把后端 position 映射到 viewbox
   const nodeMap = new Map(graph.nodes.map((n) => [n.id, n]))
+
+  // 节点点击：虚拟节点没有 assets 记录（跳 /assets/<id> 必 404）→ 就地弹元数据；
+  // 普通节点 → 诊断页（拓扑页的核心价值：故障节点一键查诊断）。
+  const handleNodeClick = (n: TopologyNode) => {
+    if (n.is_virtual) {
+      setVirtualNode(n)
+      return
+    }
+    navigate(`/assets/${n.id}/diagnostics`)
+  }
 
   return (
     <div>
@@ -171,13 +203,27 @@ export function Topology() {
                 const cy = CENTER + n.position_y
                 const color = nodeColor(n)
                 const r = n.open_alerts > 0 ? 32 : 26
-                return (
-                  <g key={n.id}>
+                const node = (
+                  <g
+                    role="button"
+                    tabIndex={0}
+                    aria-label={n.name}
+                    onClick={() => handleNodeClick(n)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        // Space 默认会滚动页面，节点既然当按钮用就得吞掉
+                        e.preventDefault()
+                        handleNodeClick(n)
+                      }
+                    }}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    {/* 浏览器原生 tooltip（不引外部 tooltip 库） */}
+                    <title>{n.name}</title>
                     <circle
                       cx={cx} cy={cy} r={r}
                       fill={color} fillOpacity={0.15}
                       stroke={color} strokeWidth={2.5}
-                      style={{ cursor: 'pointer' }}
                     />
                     {n.open_alerts > 0 && (
                       <g>
@@ -194,6 +240,23 @@ export function Topology() {
                       {n.asset_type ?? ''}{n.is_virtual ? ' · 虚拟' : ''}
                     </text>
                   </g>
+                )
+                return (
+                  <Fragment key={n.id}>
+                    {n.is_virtual ? (
+                      <Popover
+                        open={virtualNode?.id === n.id}
+                        onOpenChange={(open) => { if (!open) setVirtualNode(null) }}
+                        trigger="click"
+                        title={n.name}
+                        content={<VirtualNodeMeta node={n} />}
+                      >
+                        {node}
+                      </Popover>
+                    ) : (
+                      node
+                    )}
+                  </Fragment>
                 )
               })}
             </svg>
