@@ -323,6 +323,30 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M44 — G-30 db_smoke 密码泄漏收紧（2026-09-13）
+
+**修复内容：**
+
+- **docker run argv 泄漏收紧** (`scripts/db_smoke.sh`): 旧 `docker run -e
+  POSTGRES_PASSWORD=***` 改 `--env-file <(mktemp)` (0600 + trap rm).
+  argv 不再含密码 (`/proc/<pid>/cmdline` 默认全局可读已失效).
+
+- **PGPASSWORD env 泄漏收紧**: 旧 `PGPASSWORD=*** psql/createdb` 改
+  `.pgpass` 0600 + `PGPASSFILE` env (libpq 标准协议). 密码进文件不进 env.
+  外部模式 + 升级路径两处统一.
+
+- **DSN TEST_DATABASE_URL 泄漏收紧**: 旧 `TEST_DATABASE_URL=postgres://
+  user:***@host/db` 改 go test 拆分 `PGUSER/PGHOST/PGPORT/PGDATABASE`
+  4 个 env vars (PGPASSWORD 仍走 PGPASSFILE). `openSmokeDB` 优先 PG*
+  env vars, fallback `TEST_DATABASE_URL` (向后兼容).
+
+- **临时文件 0600 + trap rm** (`cleanup`): ENVFILE + PGPASS 两个临时
+  凭据文件, EXIT/INT/TERM 信号均清理; 同时 unset PG* + TEST_DATABASE_URL.
+
+**实证：** 47 真 PG db_smoke PASS / 0 FAIL (PGPASSFILE libpq 协议生效)；
+静态验证 4 项全 ✓ (argv/env/DSN 三类无泄漏 + 临时文件 0600 + trap rm)；
+mutation inversion (注释 trap rm) → `/tmp/pgpass.*` 残留可见 → revert → 不残留。
+
 ### M43 — G-23 ticket.Tags 双层入参规范化（2026-09-13）
 
 **修复内容：**
