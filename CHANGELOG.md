@@ -323,6 +323,25 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M45 — G-31 apierr 4xx 路径脱敏收口（2026-09-13）
+
+**修复内容：**
+
+- **apierr 4xx helper 入口加 sanitizeMessage** (`internal/apierr/apierr.go`):
+  BadRequest / Unauthorized / Forbidden / NotFound / Conflict 5 个 helper
+  入口全过 `redact.Text(redact.StripControl(msg))`. 之前 5xx 路径已过 redact
+  (G-28), 4xx 路径**也**加, 防 caller 拼 `err.Error()` 把凭据/控制字符带进
+  400/401/403/404/409 body.
+
+- **顺序沿用 5xx 路径口径** (Strip→Text), 否则 CR/LF 截断 redact.Text 值类
+  外层 Strip 接回尾部 = 泄漏.
+
+- **不动 38 个 caller**: apierr API 不变, caller 自动受益.
+
+**实证：** 4 个新单测全 PASS (StripControl/RedactToken/ChineseNoop/
+NotFoundStrip); 27 packages 全绿; 真 PG db_smoke 47 PASS / 0 FAIL;
+mutation inversion (sanitizeMessage 永返原 msg) → 3/4 new FAIL → revert → PASS.
+
 ### M44 — G-30 db_smoke 密码泄漏收紧（2026-09-13）
 
 **修复内容：**
