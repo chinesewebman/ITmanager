@@ -323,6 +323,36 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M47 — G-UI-Breadcrumb 详情面包屑显示资产名 / 工单标题（2026-09-13）
+
+**改了什么（PM-direct 自查项, ≤1h, 单 frontend file）：**
+
+- **`frontend/src/components/AppBreadcrumb.tsx`** — 加 `useDetailLabel()` hook,
+  命中 `/assets/:id` 调 `assetApi.get(id)` 取 `name`,
+  命中 `/tickets/:id` 调 `ticketApi.get(id)` 取 `title`.
+  Fetch 失败 / loading 中 fallback 到原来的 `ID: a1b2c3d4...` (100% 老行为兼容).
+  范围限定: `/alert-suppressions` / `/metric-snapshots` 等其他详情页保留 ID 截断,
+  scope 不扩散.
+- **`useApiQuery` 60s `staleTime`** — 同一详情来回切不二次拉.
+- **`fallbackIdLabel(id)` 函数** — 把老 `slice(0, 8)` 封装成函数, 不留 magic.
+
+**测试（9/9 PASS）：**
+
+- 老 5 个用例 100% 保留 (首页不显示 / 二级 / 三级 fallback / 告警中心 / 404 兜底).
+- M47 新 4 个:
+  - `资产详情 fetch 命中时显示资产名` —— `switch-core-01` 出现, `ID: a1b2c3d4` 不再出现.
+  - `工单详情 fetch 命中时显示工单标题` —— `交换机端口告警` 出现, `ID: t1-id` 不再出现.
+  - `工单详情 fetch 失败保持 ID fallback` —— `ID: abcd1234` 仍在.
+  - `alert-suppressions 仍走 fallback ID (范围不扩散)` —— 仍 `ID: some-id`.
+
+**残余（明确不在 scope）：**
+
+- 名字过长不截断 (中文 50+ 字溢出面包屑一行) — ≤30min PM-direct, 留 backlog.
+- 用 icon/color 美化 (`<ServerOutlined />` 前缀等) — PM-direct v2.
+- alert-suppressions / metric-snapshots / racks 详情也 fetch — 范围扩大 (~2h PM-direct),
+  留 backlog.
+- frontend vitest 加 CI step —— package.json 没 `test` script, 另立 round.
+
 ### M46 — G-32 gorm logger 错误脱敏 + ParamsFilter 补漏（2026-09-13）
 
 **修复内容：**
