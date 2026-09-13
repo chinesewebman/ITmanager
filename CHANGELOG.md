@@ -323,6 +323,36 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M41 — CI 加 -race + fixture 修复 + eventbus race fix（2026-09-13）
+
+**修复内容：**
+
+- **CI 加 `-race` flag** (`.github/workflows/ci.yml`): `go test ./...` →
+  `go test -race ./...`，守门 DATA RACE。任何后续 race regression 立即 CI 红。
+- **fixture 修复** (`internal/api/routes_integration_test.go`):
+  `genValidToken` / `genTokenWithRole` 现在自动 `seedUserWithRole`，
+  解决 M40 引入的 `lookupUserStatus` fail-closed 把「user 不存在」当
+  inactive → 401 的连锁（7 个 baseline 测试 FAIL 全修）。所有 caller
+  零 diff，集中改 helper。
+- **cache reset helper** (`internal/middleware/auth_status_cache.go`):
+  导出 `ResetAuthStatusCacheForTest()` 给 `internal/api` 包的
+  `setupTestRouter` cleanup 用，避免 `defaultAuthStatusCache` package
+  singleton 跨 test 污染。
+- **eventbus race fix** (`internal/eventbus/eventbus.go:newID`):
+  `atomic.AddUint64` 合并返回值一次性读改，修复 race detector
+  在 `TestPublish_并发安全` 抓的 DATA RACE（两个 goroutine 的 Add
+  + 后续 Read 交错）。
+
+**残余 / 已知：**
+
+- `internal/eventbus.TestStats_计数正确` 在 `count >= 5` + race 时偶
+  发 FAIL（pre-existing，与本 round race fix 无关：handler dispatch
+  时序敏感的断言，非 race detector 报告）。CI 走默认 `count=1`，不
+  影响。后续可加 `Eventually` 或更长 wait 修，不在本 round scope。
+- `count=1` 无 race 与有 race 全包 27 packages 0 FAIL。
+
+**验证：** `go test -race -count=1 ./...` 全绿，CI workflow 已切。
+
 ### M40 — G-5 JWT 用户禁用即时生效（2026-09-13）
 
 **修复内容：**
