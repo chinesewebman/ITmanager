@@ -55,9 +55,11 @@ func Respond(c *gin.Context, status int, code, message string, internalErr error
 	})
 }
 
-// BadRequest 400
+// BadRequest 400 — message 已脱敏 + 去控制字符 (M45 / G-31 收口).
+// 之前 5xx 路径已过 redact+StripControl (G-28), 4xx helper 入口**也**加,
+// 防 caller 拼 `err.Error()` 把凭据/控制字符带进 400 body.
 func BadRequest(c *gin.Context, message string) {
-	Respond(c, http.StatusBadRequest, CodeBadRequest, message, nil)
+	Respond(c, http.StatusBadRequest, CodeBadRequest, sanitizeMessage(message), nil)
 }
 
 // Unauthorized 401
@@ -65,7 +67,7 @@ func Unauthorized(c *gin.Context, message string) {
 	if message == "" {
 		message = "未授权或登录已过期"
 	}
-	Respond(c, http.StatusUnauthorized, CodeUnauthorized, message, nil)
+	Respond(c, http.StatusUnauthorized, CodeUnauthorized, sanitizeMessage(message), nil)
 }
 
 // Forbidden 403
@@ -73,7 +75,7 @@ func Forbidden(c *gin.Context, message string) {
 	if message == "" {
 		message = "无访问权限"
 	}
-	Respond(c, http.StatusForbidden, CodeForbidden, message, nil)
+	Respond(c, http.StatusForbidden, CodeForbidden, sanitizeMessage(message), nil)
 }
 
 // NotFound 404
@@ -81,7 +83,7 @@ func NotFound(c *gin.Context, message string) {
 	if message == "" {
 		message = "资源不存在"
 	}
-	Respond(c, http.StatusNotFound, CodeNotFound, message, nil)
+	Respond(c, http.StatusNotFound, CodeNotFound, sanitizeMessage(message), nil)
 }
 
 // Conflict 409（资源冲突，如唯一键冲突）
@@ -89,7 +91,15 @@ func Conflict(c *gin.Context, message string) {
 	if message == "" {
 		message = "资源冲突"
 	}
-	Respond(c, http.StatusConflict, CodeConflict, message, nil)
+	Respond(c, http.StatusConflict, CodeConflict, sanitizeMessage(message), nil)
+}
+
+// sanitizeMessage 4xx 路径统一脱敏 + 去控制字符 (M45 / G-31).
+// 顺序: StripControl → Text (同 apierr.Respond 5xx 路径的「内层先 Strip 再 Text」,
+// 否则 CR/LF 截断 redact.Text 的值类, 外层 Strip 把尾部接回去 = 泄漏).
+// 中文静态文案 no-op (StripControl 只去 < 0x20 控制字符, Text 只去 URL/凭据类).
+func sanitizeMessage(msg string) string {
+	return redact.Text(redact.StripControl(msg))
 }
 
 // Internal 500 - 不向客户端暴露原始 err
