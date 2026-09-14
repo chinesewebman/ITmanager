@@ -323,6 +323,64 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M49 — G-UI-Audit 审计日志前端页 + admin 入口（2026-09-14）
+
+**改了什么（frontend-only, 后端零改动）：**
+
+- **`frontend/src/pages/Audit.tsx`（新）** — 审计日志页。后端 `/api/audit-logs` 自 M22 就在
+  （`routes.go:286` + `canAudit` 能力），但前端**零入口**，管理员想知道「谁什么时候改了某资产」
+  只能自己 curl（PM 自查 G-UI-Audit P1）。
+  - 列: 时间 / 操作人 / 动作 / 对象类型 / 对象 ID / 摘要（method + path + status 三件套, 无请求体）
+    / [详情]。最新在前由**服务端** `ORDER BY created_at DESC, id DESC` 保证，故不加前端 sorter
+    （只能排当前 30 条，会让人误以为是全局排序）。
+  - `[详情]` → antd `Drawer` 显示该行完整 JSON。**审计行不含请求体**（只记 method/path/status/
+    error_msg），抽屉如实展示整行，不伪装成「字段 diff」。
+  - 过滤 4 项: 操作人（user_id 精确）/ 动作（精确）/ 方法 / 路径前缀。词表**不硬编码** ——
+    后端没有 action/user 枚举接口（`action` 是自由字符串 `varchar(50)`），下拉项取**不带筛选**的
+    100 条采样（`queryKeys.audit.vocabulary()`，与列表分开缓存）∪ 当前页；用「当前页」做词表会让
+    筛到只剩一条后再也切不回去。
+  - 分页是 **cursor 式**（`limit` + `next_cursor`，后端**没有** total/page/page_size）→ UI 是
+    上一页/下一页 + cursor 栈，不是页码跳转。**没有 `next_cursor` 即到底**（不是「本页不满」）。
+  - 空态分两种: 无筛选 → `EmptyState`「暂无审计事件」；有筛选 → 预设 `no-search-result`「暂无匹配」。
+  - 请求失败 → `ErrorState`（不静默回落到空列表 —— 那会把 500 伪装成「没有留痕」）。
+- **`frontend/src/services/api.ts`** — `auditApi.list(params)`。路径 `/audit-logs`（**不是**
+  `/audit/logs`；写错会落到 NoRoute 返回 index.html，同 B1-1 `/auth/api-keys` 的教训）。
+  另加 `authApi.me()` —— 入口门禁用。
+- **`frontend/src/types/index.ts`** — `AuditEvent`（逐字段对齐 openapi `AuditLog`，含
+  `user_id: null` 的未认证语义）+ `AuditListParams`。附**单向**漂移守卫
+  `AuditLogDriftOK`：openapi 的 AuditLog 未声明 required，反方向恒真不构成断言，只钉正方向。
+- **`frontend/src/pages/Settings.tsx`** — API 密钥 tab 下方加「管理」卡片 + `Menu.Item`
+  「审计日志」→ `navigate('/audit')`。**不新加 tab**：审计页是独立路由（懒加载 chunk），
+  这里只做导航。入口按 `/auth/me` 下发的 **capabilities** 显示（`audit` ∈ capabilities），
+  不复制一份角色→能力矩阵 —— `middleware/roles.go` 的注释明确警告复制会漂移，且 auditor
+  角色**有** audit 而无 manage，按 role/manage 判会把它的入口藏掉。取不到能力 → fail-closed 不渲染。
+- **`frontend/src/App.tsx`** — 懒加载 `Audit` + `<Route path="/audit">`。
+- **`frontend/src/AppBreadcrumb.tsx`** — `TOP_LABELS['/audit'] = '审计日志'`。
+- **`frontend/src/hooks/useApiQuery.ts`** — `queryKeys.audit.{all,list,vocabulary}`。
+
+**测试（`frontend/src/pages/Audit.test.tsx` 6 新 + `Settings.test.tsx` 3 新）：**
+
+- Audit: 渲染列表（含 `user_id: null` → 「匿名」）/ 两种空态 / 动作筛选（请求带 action 且**丢掉
+  cursor** 回第一页）/ cursor 翻页（无 `next_cursor` → 下一页禁用）/ 详情抽屉完整 JSON（且**无**
+  payload 字段）/ 失败 → 错误态（不显示「暂无审计事件」）。
+- 这一层**不打桩组件依赖**（真 useApiQuery + 真 auditApi + 真 Table/Drawer），只桩最外层 axios
+  实例的 `api.get` → 断言同时钉住「传了哪些 filter」与「真实路径 + 参数形状」。
+- Settings: `render(<Settings />)` 全部改为 `renderSettings()`（套 `MemoryRouter` —— Settings 现在
+  内含 `useNavigate`，裸渲染会抛「useNavigate() may be used only in the context of a <Router>」）；
+  新增 3 例: 有 audit 能力 → 入口显示**且点击真跳 `/audit`**（`RouteProbe` 断言 location）/
+  readonly → 整块「管理」不渲染 / `/auth/me` 403 → fail-closed 不渲染。
+- **Mutation inversion 实证（审计页）**: `useApiQuery` 的 fetcher 换成
+  `async () => ({items: []})`（绕过 `fetchAudit`）→ `5 failed | 1 passed`；revert 后 6/6 PASS。
+- **Mutation inversion 实证（入口门禁）**: `{canAudit && (` → `{true && (` →
+  `2 failed | 29 passed`（readonly + 403 两例红）；revert 后 31/31 PASS。
+- **同轮发现（测试基建）**: `beforeEach` 里用 `vi.restoreAllMocks()` 会把 `test/setup.ts` 里
+  `window.matchMedia` 的 `vi.fn()` 实现一起清掉 → antd `responsiveObserver` 在
+  `({ matches }) => …` 上解构 undefined，Table/Grid 一挂就炸。改用 `vi.clearAllMocks()`。
+
+**未做（intent 明确 out of scope）**: audit 导出（PDF/CSV）/ 高级搜索（后端无 since-until、
+entity_type 过滤）/ 实时 stream / 任何 write（edit·delete）/ 非 admin 开放。
+时间区间与 entity 过滤**不做前端假过滤** —— 拿一页数据本地筛会漏掉未加载的行，比没有更危险。
+
 ### M48 — G-UI-TopoClick 拓扑节点从「死按钮」变成真按钮（2026-09-14）
 
 **改了什么（PM-direct 自查项, ≤2h, 单 frontend file + test file）：**
