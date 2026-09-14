@@ -4,6 +4,7 @@ import {
   CheckOutlined,
   CheckCircleOutlined,
   DownloadOutlined,
+  StopOutlined,
 } from "@ant-design/icons";
 import { alertApi } from "../services/api";
 import type { AlertListParams } from "../services/apiClient";
@@ -103,7 +104,8 @@ function Alerts() {
   // C-P6: 批量写操作 (v1.3: 改逐条 ack/resolve 以显示 progress modal)
   const [bulkProgress, setBulkProgress] = useState<{
     open: boolean
-    kind: "ack" | "resolve"
+    // M53: 加 "mark-fp" 用于批量标记误报
+    kind: "ack" | "resolve" | "mark-fp"
     total: number
     done: number
     failed: number
@@ -112,7 +114,7 @@ function Alerts() {
   // 工具: 逐条执行, 实时更新进度
   async function runBulk(
     ids: string[],
-    kind: "ack" | "resolve",
+    kind: "ack" | "resolve" | "mark-fp",
     action: (id: string) => Promise<unknown>,
   ) {
     setBulkProgress({ open: true, kind, total: ids.length, done: 0, failed: 0 })
@@ -128,7 +130,7 @@ function Alerts() {
       setBulkProgress((p) => (p ? { ...p, done, failed } : null))
     }
     setBulkProgress((p) => (p ? { ...p, open: false } : null))
-    const label = kind === "ack" ? "确认" : "解决"
+    const label = kind === "ack" ? "确认" : kind === "resolve" ? "解决" : "标记误报"
     message.success(`批量${label}完成: 成功 ${done}, 失败 ${failed}`)
     setSelectedIds([])
     refetch()
@@ -149,6 +151,18 @@ function Alerts() {
       onError: () => {
         setBulkProgress(null)
         message.error("批量解决失败")
+      },
+    },
+  )
+
+  // M53: 批量标记误报 — 复用 runBulk 串行循环 (后端无 bulk endpoint).
+  const bulkFPMut = useApiMutation(
+    (ids: string[]) =>
+      runBulk(ids, "mark-fp", (id) => alertApi.markFalsePositive(id, true, "运维批量标记")),
+    {
+      onError: () => {
+        setBulkProgress(null)
+        message.error("批量标记误报失败")
       },
     },
   )
@@ -270,6 +284,24 @@ function Alerts() {
                     loading={bulkResolveMut.isPending}
                   >
                     批量解决
+                  </Button>
+                </Popconfirm>
+                {/* M53: 批量标记误报 — 复用 runBulk 串行循环. 防 race: 任一 bulk in-flight 时 disable. */}
+                <Popconfirm
+                  title={`批量标记已选的 ${selectedIds.length} 条告警为误报？`}
+                  okText="标记误报"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => bulkFPMut.mutate(selectedIds)}
+                >
+                  <Button
+                    icon={<StopOutlined />}
+                    loading={bulkFPMut.isPending}
+                    disabled={
+                      bulkAckMut.isPending || bulkResolveMut.isPending || bulkFPMut.isPending
+                    }
+                  >
+                    批量标记误报
                   </Button>
                 </Popconfirm>
               </>

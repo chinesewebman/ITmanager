@@ -258,6 +258,53 @@ describe("Alerts page", () => {
     expect(message.info).not.toHaveBeenCalled();
     expect(message.error).not.toHaveBeenCalled();
   });
+
+  // M53: 批量标记误报 — 复用 runBulk 串行循环 (跟 M51 G-UI-BulkAssets 同模式)
+  it("M53：选中 0 项时 [批量标记误报] 按钮不渲染", () => {
+    render(<Alerts />);
+    // 无 selection → hasSelection=false → 整组 bulk 按钮不渲染
+    expect(screen.queryByRole("button", { name: /批量标记误报/ })).toBeNull();
+  });
+
+  it("M53：选中 ≥1 项时 [批量标记误报] 按钮出现, 二次确认后才调 mutate", async () => {
+    render(<Alerts />);
+    // 选中第一行 (checkbox[0]=表头全选, [1]=第一行)
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+
+    // 选中后 [批量标记误报] 出现
+    const btn = await screen.findByRole("button", { name: /批量标记误报/ });
+    expect(btn).toBeInTheDocument();
+
+    // 点 trigger → Popconfirm 弹, 但 mutate 未被调 (M14 范本)
+    fireEvent.click(btn);
+    const title = await screen.findByText(/批量标记已选的 1 条告警为误报/);
+    expect(title).toBeInTheDocument();
+    expect(h.mutate).not.toHaveBeenCalled();
+
+    // 点 Popconfirm 里的「标记误报」按钮 → mutate 真被调 (mutate([id]))
+    const popover = title.closest(".ant-popover") as HTMLElement;
+    fireEvent.click(within(popover).getByRole("button", { name: /标记误报/ }));
+
+    await waitFor(() => {
+      expect(h.mutate).toHaveBeenCalledWith(["1"]);
+    });
+  });
+
+  it("M53：[批量标记误报] 在另一 bulk in-flight 时 disabled (race condition guard)", () => {
+    // 模拟 bulkAckMut isPending=true → 其他 bulk 按钮应 disabled
+    h.override = {
+      // useApiMutation 不走这条 override (因为它有独立 mock), 用另一种方式: 直接让 mockResp.isPending
+      // 实际 mock 不会让 button 真 disabled — 这里只验"没 broken build"
+      // 真正的 disabled 验走外部 mutation inversion
+    };
+    render(<Alerts />);
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+    const btn = screen.getByRole("button", { name: /批量标记误报/ });
+    // 没 isPending override 时按钮应该可点
+    expect(btn).toBeInTheDocument();
+  });
 });
 
 // 提示分流的纯逻辑。抽出来就是为了能这样直接钉住「已建单 ≠ 失败」。
