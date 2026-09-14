@@ -10,6 +10,8 @@ export interface AlertStats {
 export interface AlertStatsCardsProps {
   stats: AlertStats
   loading?: boolean
+  // M55: 统计卡可点击跳转 (C1 摩擦). 父传 key 决定跳哪; 不传则保持原状只读.
+  onCardClick?: (key: keyof AlertStats) => void
 }
 
 interface StatCard {
@@ -27,13 +29,19 @@ const CARDS: StatCard[] = [
 
 /**
  * AlertStatsCards - 告警状态统计 4 联。
+ * M55: 可选 onCardClick; 不传则纯展示, 传了 hover + cursor pointer + 跳转.
  */
-export function AlertStatsCards({ stats, loading }: AlertStatsCardsProps) {
+export function AlertStatsCards({ stats, loading, onCardClick }: AlertStatsCardsProps) {
   return (
     <Row gutter={16} style={{ marginBottom: 16 }}>
       {CARDS.map((c) => (
         <Col span={6} key={c.key}>
-          <Card loading={loading}>
+          <Card
+            loading={loading}
+            hoverable={!!onCardClick}
+            onClick={onCardClick ? () => onCardClick(c.key) : undefined}
+            style={{ cursor: onCardClick ? 'pointer' : 'default' }}
+          >
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 24, fontWeight: 'bold', color: c.color }}>{stats[c.key]}</div>
               <div style={{ color: '#999' }}>{c.label}</div>

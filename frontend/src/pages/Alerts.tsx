@@ -18,6 +18,7 @@ import {
 } from "../components/AlertStatsCards";
 import { useApiMutation, useApiQuery, queryKeys } from "../hooks/useApiQuery";
 import { useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 
@@ -247,6 +248,20 @@ function Alerts() {
     setPage(p);
     setPageSize(ps);
   }, []);
+  // M55: 统计卡点击 → setStatusFilter + 翻页回 1 (不走 URL, 简化 scope, 不破测试套).
+  // total 卡不响应 (跳无意义). 已存在状态 (problem/acknowledged/resolved) 才跳.
+  const navigate = useNavigate();
+  const handleCardClick = useCallback(
+    (key: keyof typeof stats) => {
+      if (key === "total") return;
+      // 用 setStatusFilter 替代 navigate("/alerts?status=..."), 避免引入 useSearchParams 测试套级联.
+      setStatusFilter(key);
+      setPage(1);
+      // 同时调 navigate 保持 URL 同步 (注: 实际是同一个 path /alerts, 只更新 query 不触发 location change).
+      navigate(`/alerts?status=${key}`, { replace: true });
+    },
+    [navigate],
+  );
 
   return (
     <div>
@@ -324,7 +339,7 @@ function Alerts() {
         <ErrorState error={error} onRetry={refetch} />
       ) : (
         <>
-          <AlertStatsCards stats={stats} loading={isLoading} />
+          <AlertStatsCards stats={stats} loading={isLoading} onCardClick={handleCardClick} />
 
           <div style={{ marginBottom: 16 }}>
             <Space>

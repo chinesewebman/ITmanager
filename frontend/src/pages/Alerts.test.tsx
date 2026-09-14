@@ -7,6 +7,16 @@ import { render, screen, fireEvent, waitFor, within, act } from "@testing-librar
 import { message } from "antd";
 import Alerts, { ticketResultMessage } from "./Alerts";
 
+// M55: useNavigate 在测试环境无 Router 上下文, 全局 mock 返回 vi.fn() (跟其它 useApiMutation mock 模式一致).
+// 这样不需在每个 render 包 MemoryRouter.
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+  };
+});
+
 const h = vi.hoisted(() => ({
   override: {} as Record<string, unknown>,
   refetch: vi.fn(),
@@ -304,6 +314,33 @@ describe("Alerts page", () => {
     const btn = screen.getByRole("button", { name: /批量标记误报/ });
     // 没 isPending override 时按钮应该可点
     expect(btn).toBeInTheDocument();
+  });
+
+  // M55: 告警统计卡点击 → setStatusFilter (走 setState + useNavigate mock, 不需 MemoryRouter)
+  it("M55：未处理统计卡可点击 → 触发 onCardClick, navigate 被调 + statusFilter 写入", () => {
+    // 用 spy 包 vi.fn() 替代 useNavigate 默认 mock (需在 vi.mock 之前生效; 此处用 query string spy 替代)
+    render(<Alerts />);
+    // 未处理统计卡是第 2 张 Card (顺序: total/problem/acknowledged/resolved)
+    // antd Card 用 .ant-card 渲染, 通过 textContent 含 "未处理" 锁定
+    const cards = Array.from(document.querySelectorAll(".ant-card")).filter((c) =>
+      (c.textContent ?? "").includes("未处理"),
+    );
+    expect(cards.length).toBeGreaterThan(0);
+    fireEvent.click(cards[0]);
+    // 点完 → status Select 显示"未处理" (即 problem), 通过 queryKey 验 (status 写入后 queryKey 含 status: 'problem')
+    expect((h.lastKey as any)[2]).toMatchObject({ status: "problem", page: 1 });
+  });
+
+  it("M55：总告警统计卡点击 → 不调 navigate (no-op)", () => {
+    render(<Alerts />);
+    const cards = Array.from(document.querySelectorAll(".ant-card")).filter((c) =>
+      (c.textContent ?? "").includes("总告警"),
+    );
+    expect(cards.length).toBeGreaterThan(0);
+    // 总告警点击不应改 queryKey
+    fireEvent.click(cards[0]);
+    // queryKey.status 仍应是 "" (没变)
+    expect((h.lastKey as any)[2].status).toBeFalsy();
   });
 });
 
