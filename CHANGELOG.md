@@ -323,6 +323,50 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M51 — G-UI-BulkAssets 资产批量操作（2026-09-14）
+
+**改了什么（frontend-only，后端零改动）：**
+
+运维要退役 50 台资产只能一行一行点 `[退役]` 按钮 + 50 次 Popconfirm + 50 次填原因，**完全不可用**
+（PM 自查 G-UI-BulkAssets = T99 摩擦表 B1）。`AssetTable` 自 v0 就有 `rowSelection?:` 接口（`AssetTable.tsx:55`），
+但 `Assets.tsx` 父组件**从未传** —— 接口摆在桌上没人用。
+
+- **`frontend/src/pages/Assets.tsx`** —
+  - 加 `useState<React.Key[]>([])` 持有 `selectedRowKeys`，
+    传给 `<AssetTable rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys, preserveSelectedRowKeys: true }} />`。
+  - **`preserveSelectedRowKeys: true`**：翻页不清空选中（antd v5 原生支持）。
+  - **桌面端渲染选中条**（`isMobile=false` 时）：
+    - `<div data-testid="asset-bulk-bar">`：左侧「已选 N 项」+ `[批量退役]`（Popconfirm 二次确认 + `danger`）+
+      条件渲染 `[批量恢复]`（仅当选中至少一项 `status='retired'`）+ `[清空选择]`。
+    - `[批量退役]` 原因统一记「批量退役」（不再弹填原因 modal —— 批量 50 项挨个弹不可用）。
+  - **批量 mutation**：`useApiMutation` 包一层，**串行循环**遍历 `selectedRowKeys` 调
+    `assetApi.retire(id, '批量退役')` / `assetApi.restore(id)`；任一失败计入 `failed` 数组，最终
+    `failed.length > 0` 抛 `Error`，onError toast；全成功 toast + 清 `selectedRowKeys` + `refetch()`。
+  - **`refetch()` 替代 `useQueryClient().invalidateQueries`**：保持跟老 `createMut / updateMut` 同模式，
+    避免引入 `useQueryClient` 导致老 `Assets.test.tsx`（无 QueryClientProvider wrapper）级联失败。
+    TODO: 后续若用 `useApiMutation` 内置 invalidate, 可一并换掉。
+- **`frontend/src/components/AssetTable.tsx`** —
+  - `rowSelection?:` 接口加 `[key: string]: any`（**TypeScript index signature**），
+    让父组件自由透传 antd 原生字段（如 `preserveSelectedRowKeys`、`getCheckboxProps`），
+    组件内部仍 spread 进 antd `<Table>`。**不破坏**老调用方（兼容既有 `selectedRowKeys / onChange`）。
+- **`frontend/src/pages/Assets.test.tsx`** — 新加 5 个用例（18 / 18 PASS）：
+  1. 选中 0 项时 `data-testid='asset-bulk-bar'` 不渲染。
+  2. 选中 ≥1 项时批量条出现且显示「已选 N 项」。
+  3. `[清空选择]` 清掉 `selectedRowKeys`，批量条隐藏。
+  4. 全是 `active` 资产时不显示「批量恢复」（`selectedHasRetired === false`）。
+  5. placeholder mutation 实证（注：受 `useApiMutation` 老 mock `{mutate: vi.fn()}` 限制，
+     真 mutation 路径通过 `refetch()` + `setSelectedRowKeys([])` 状态机验证；e2e 见 `db_smoke`）。
+
+**未做（intent 明确 out of scope，留 future round）**：
+- 批量改标签 / 批量转移 owner / 批量导出 / 服务端 `bulk_retire` 端点（前端循环 N 次即可，
+  N 大时慢留 note；并行化留给 backend round）。
+- Mobile (`MobileCardList`) 不支持 rowSelection（mobile 批量超出 ≤4h PM-direct scope，
+  留 round future）。
+
+**Trap 新增**：T-64 — `useApiMutation` 文档注释暗示 `onSuccess: qc.invalidateQueries`，
+但实现内**无 queryClient 引用**。调用方要么 `refetch()`、要么自行 `useQueryClient`。
+后者在测试套需 wrapper Provider，引入级联改动。
+
 ### M50 — G-UI-Tickets 工单工作流产品化（2026-09-14）
 
 **改了什么（frontend-only，后端零改动）：**
