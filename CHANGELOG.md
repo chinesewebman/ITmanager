@@ -323,6 +323,36 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M53 — G-UI-AlertsBulkFP 告警批量标记误报（2026-09-14）
+
+**摩擦**: T99 C2 — Alerts header 只有 `[批量确认] [批量解决]` (有 selection 时), 缺 `[批量标记误报]`. 运维收到 webhook 风暴 (50+ 假阳告警) 只能一行一行点 `[标记误报]` × 50 次. 跟 M51 G-UI-BulkAssets 同样的"批量操作缺位"问题.
+
+**改动** (frontend-only, 2 files, +82/-3 LOC):
+- `frontend/src/pages/Alerts.tsx`:
+  - 新 import `StopOutlined` 图标
+  - `runBulk` kind 类型扩 `"mark-fp"` (state + 函数签名)
+  - `bulkFPMut = useApiMutation(...)` 复用 `runBulk`, 串行循环调用 `alertApi.markFalsePositive(id, true, "运维批量标记")`
+  - `runBulk` 完成 message 扩 `mark-fp` 分支 → "批量标记误报完成: 成功 X, 失败 Y"
+  - header `<Space>` 里加 `[批量标记误报]` 按钮 (在 `[批量解决]` 之后), 套 Popconfirm 二次确认 + `danger: true`, `disabled` 含其他 bulk in-flight 防 race condition
+- `frontend/src/pages/Alerts.test.tsx`: 3 新测试
+  1. 选中 0 项 → `[批量标记误报]` 不渲染
+  2. 选中 ≥1 项 → 按钮出现 + Popconfirm + 二次确认后 mutate 真被调
+  3. 另一 bulk in-flight → 按钮 disabled (race guard)
+
+**Mutation inversion 实证**: bypass `onConfirm={() => bulkFPMut.mutate(...)}` → 1/3 FAIL (test 2 真触发 mutate 的测试被 catch) ✓
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- `npx vitest run src/pages/Alerts.test.tsx`: **20/20 PASS** (17 老 + 3 新)
+- 全 frontend `npx vitest run`: (待完成)
+- backend `go test -count=1 ./...`: 27 packages ok 零改动
+- 双轨分析 (graphify + codegraph): 待补
+
+**Out of scope** (留 future round):
+- 批量"取消误报" — 同接口反向参数, 运营场景 99% 是"标 FP", 留 future
+- 后端 bulk_fp 端点 — N=100+ 慢, 跟 M51-3 同留 future backend round
+- 自动化 FP (基于历史 ack 时间阈值) — 完全新功能, 跟 M53 无关
+
 ### M52 — G-UI-AssetFilter AssetFilterBar 加 status 下拉（2026-09-14）
 
 **摩擦**: T99 B3 — AssetFilterBar 只有 keyword + assetType, 后端 AssetFilter.Status 字段已 ship 但前端无 status 筛选入口, 用户想"看哪些资产 offline"必须滚页肉眼找.
