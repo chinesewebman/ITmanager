@@ -489,6 +489,51 @@ func TestUpdateGLPI_空Token_各自保留旧值(t *testing.T) {
 	assert.Equal(t, "preserved-user", cfg.Integrations.GLPI.UserToken, "空 user_token 必须保留旧值")
 }
 
+// ==================== M59: 集成 URL 的 `url` binding ====================
+
+// TestUpdateIntegrations_非URL_返400 M59: 三家集成的 URL 都带 `binding:"required,url"`，
+// scheme-less 的值（`not-a-url`）必须在进 handler 逻辑前被拒。M59 前只有 required ——
+// API 直连 / 脚本调用（不经前端表单）可以写入非法 URL。
+func TestUpdateIntegrations_非URL_返400(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{"zabbix", "/integrations/zabbix", `{"url":"not-a-url","user":"Admin"}`},
+		{"netbox", "/integrations/netbox", `{"url":"not-a-url","token":"t"}`},
+		{"glpi", "/integrations/glpi", `{"url":"not-a-url","app_token":"a","user_token":"b"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := minimalCfgForTest("", "", "")
+			r := newIntegrationTestRouter(cfg)
+			req := httptest.NewRequest(http.MethodPut, tc.path, bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+// TestUpdateIntegrations_内网URL_不被url标签拒 M59: go-playground/validator 的 `url` tag
+// 只要求「有 scheme + host」，**不**要求 TLD —— 集成目标常是内网主机名（`http://netbox:8000`）。
+// 这条钉住「内网地址必须放行」：若把它换成「必须有 TLD」的校验，合法配置会被挡在门外
+// （M59 brief 点名的风险，实测 v10.16 不成立，用断言固化）。
+func TestUpdateIntegrations_内网URL_不被url标签拒(t *testing.T) {
+	cfg := minimalCfgForTest("", "", "")
+	r := newIntegrationTestRouter(cfg)
+	// svc=nil：binding 通过后 handler 写 cfg 再 ReloadNetBox → panic → gin.Recovery 转 500。
+	// 断言「不是 400」即证明 `url` tag 放行了内网无 TLD 地址。
+	body := []byte(`{"url":"http://netbox:8000"}`)
+	req := httptest.NewRequest(http.MethodPut, "/integrations/netbox", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "http://netbox:8000", cfg.Integrations.Netbox.URL)
+}
+
 // ==================== v2.2: TestNetBox/TestGLPI 连通 ====================
 
 func TestTestNetBox_svcNil_返500(t *testing.T) {

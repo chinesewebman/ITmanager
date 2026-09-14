@@ -144,8 +144,13 @@ func (h *IntegrationHandler) TestZabbix(c *gin.Context) {
 
 // UpdateZabbixRequest v2.2: UI 保存按钮提交的三件套。
 // password 允许为空（"保持原值"语义）；URL/user 必填。
+//
+// M59: URL 加 `url` binding —— 前端已挡 `not-a-url`，后端也挡一层（API 直连/脚本调用
+// 不经过前端）。实测 go-playground/validator v10 的 `url` tag 接受内网地址
+// （`http://zabbix:8080`，见 integration_handler_test.go 的 M59 用例），
+// 但它只要求「有 scheme + host」—— `ftp://example.com` 也会通过，故它不是 http(s) 白名单。
 type UpdateZabbixRequest struct {
-	URL      string `json:"url" binding:"required"`
+	URL      string `json:"url" binding:"required,url"`
 	User     string `json:"user" binding:"required"`
 	Password string `json:"password"` // 空 = 不改；非空 = 覆盖
 }
@@ -197,7 +202,7 @@ func (h *IntegrationHandler) TestNetBox(c *gin.Context) {
 
 // UpdateNetBoxRequest v2.2: NetBox URL + Token。Token 空 = 保留旧值（避免 UI 误清空）。
 type UpdateNetBoxRequest struct {
-	URL   string `json:"url" binding:"required"`
+	URL   string `json:"url" binding:"required,url"`
 	Token string `json:"token"`
 }
 
@@ -236,7 +241,7 @@ func (h *IntegrationHandler) TestGLPI(c *gin.Context) {
 
 // UpdateGLPIRequest v2.2: GLPI URL + 两个 token。两个 token 各自允许空 = 保留旧值。
 type UpdateGLPIRequest struct {
-	URL       string `json:"url" binding:"required"`
+	URL       string `json:"url" binding:"required,url"`
 	AppToken  string `json:"app_token"`
 	UserToken string `json:"user_token"`
 }
