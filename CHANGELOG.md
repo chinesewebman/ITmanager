@@ -323,6 +323,27 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M55 — G-UI-AlertsStatsClick 告警统计卡可点击跳转（2026-09-14）
+
+**摩擦**: T99 C1 — AlertStatsCards 4 联 (`总告警 / 未处理 / 已确认 / 已解决`) 只显示数字, 不可点击. 用户想"看所有未处理告警"必须手填 status filter.
+
+**改动** (frontend-only, 3 files, +63/-3 LOC):
+- `frontend/src/components/AlertStatsCards.tsx`: 加 `onCardClick?: (key) => void` 可选 prop; Card 加 `hoverable` + `onClick` + cursor pointer (仅传了 onCardClick 时)
+- `frontend/src/pages/Alerts.tsx`: 加 `useNavigate` + `handleCardClick` (total 卡 no-op, 其他 3 卡 setStatusFilter + setPage(1) + navigate URL sync)
+- `frontend/src/pages/Alerts.test.tsx`: vi.mock `useNavigate` 全局返 vi.fn() (避免 17 个 render 包 MemoryRouter); 加 2 测试: 未处理卡 click → queryKey 含 status='problem' + page=1; 总告警卡 click → no-op
+
+**Mutation inversion 实证**: bypass handleCardClick body (注释掉 setStatusFilter / setPage / navigate) → **1/2 FAIL** ✓ (test "未处理统计卡点击" catch it, "总告警卡 no-op" 仍 pass)
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- `npx vitest run src/pages/Alerts.test.tsx src/components/AlertCard.test.tsx`: **31/31 PASS** (Alerts 22 + AlertCard 9)
+- backend 27 packages ok (零改动)
+- 双轨分析 (待 docs 后跑)
+
+**Out of scope** (留 future round):
+- URL sync → 反向 (URL `?status=...` → setStatusFilter on mount): 留 future, 现状已 ship navigate 后 queryKey 生效
+- 改 useState → useSearchParams: 引入测试套级联 (17 个 render 要改), 不值
+
 ### M54 — G-UI-AlertsHostHover 告警表主机列 ellipsis（2026-09-14）
 
 **摩擦**: T99 E2 — AlertTable 主机列 `width: 150` 但 host 字段无长度限制, 长主机名 (`web-server-01.prod.iad1.example.com` 38 chars) 在 150px 列宽下强制换行撑高整行, 表格行高不一致影响扫读.
