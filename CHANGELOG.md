@@ -323,6 +323,61 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M60 — G-Utils-ValidatorsShared + G-BE-HttpsWhitelist（T-56 / T-71 结案）（2026-09-15）
+
+**两项 M59 留的技术债**:
+
+1. **T-71（前端）**: URL / email / port 规则住在 `pages/Settings.tsx` module 顶层 —— 同页复用没问题，
+   但别的页（Oncall URL / Runbook webhook / AssetForm IP）要用只能「import 一个 **page** 文件里的常量」，
+   页面因此成为工具模块的依赖。
+2. **T-56（后端）**: M59 给 3 个集成 URL 挂的 `binding:"url"` 是**形状检查**，不是 http(s) 白名单 ——
+   go-playground/validator v10.16 对 `ftp://example.com` 照样放行，而前端 `URL_PATTERN` 只认 http(s)。
+   两侧同名不同集：API 直连 / 脚本调用（不经表单）能写进非 http(s) 的集成地址。
+
+**改动** (frontend 3 files + backend 2 files，commit `314d47b` → `a3867ff` → `64c9623` → `549ddb5`):
+
+- **新增 `frontend/src/utils/validators.ts`**: `URL_PATTERN` / `EMAIL_PATTERN`（字符**逐字照搬** M59，
+  不动语义 —— 内网无 TLD 地址必须继续放行）+ `urlRules` / `emailRules` / `portRules` +
+  `arrayOfPatternRules(pattern, label, requiredMessage?)` —— 把 M59 `toRules` 里的数组逐项校验抽出来
+  （antd 的 `pattern` 规则对数组**静默不生效**，必须自定义 `validator`）。可选第三参是为了保住
+  收件人字段的「请输入收件人」文案（该字段 label 是「收件人」而非「邮箱」）。
+- `frontend/src/pages/Settings.tsx`: 删除本文件顶层的全部 pattern / rules 定义，改 import；
+  `toRules` 由 `arrayOfPatternRules(EMAIL_PATTERN, '邮箱', '请输入收件人')` 在页面内构造。
+  **10 处 Form.Item 的 rules 引用与全部文案不变。**
+- `frontend/src/pages/Settings.test.tsx`: pattern import 从 `"./Settings"` → `"../utils/validators"`。
+- `backend/internal/api/handlers/integration_handler.go`: 新增 `isHTTPURL`（`url.Parse` 后要求
+  scheme ∈ {http, https} 且 Host 非空）+ 三个 `Update*` handler 入口显式一行校验；
+  三个 `URL` 字段的 `binding:"required,url"` 收敛为 `binding:"required"`（`required` 只挡空值）。
+  **不把两条语义不同的规则叠在一起** —— 并存的规则正是 T-56 的病根。拒绝发生在写内存 cfg 之前。
+- `backend/internal/api/handlers/integration_handler_test.go`: 新增
+  `TestUpdateIntegrations_非HTTPScheme_返400`（3 端点 × 3 scheme：`ftp://` / `file:///` / `ssh://`）——
+  每条断言 400 **且** 内存 cfg 未被写。
+
+**Hard pass**:
+
+- `npx tsc --noEmit`: 0 error
+- frontend `npx vitest run src/pages/Settings.test.tsx`: **58 tests PASS**（无退化）
+- frontend 全量 `npx vitest run`: **42 files / 409 tests 全 PASS**（与 M59 基线一致，零退化）
+- backend `go test -count=1 ./...`: **27 packages ok（0 fail）**
+- eslint（改动 3 文件，`--max-warnings 0`）+ `gofmt -l`（改动 2 文件）: 干净
+- **mutation inversion 实证**: 把 3 处 `if !isHTTPURL(req.URL)` 短路成恒假（等价于 M59 的
+  `url`-tag-only 行为）→ `TestUpdateIntegrations_非HTTPScheme_返400` **9/9 sub-case FAIL**，
+  且 M59 的 `TestUpdateIntegrations_非URL_返400` 3/3 也 FAIL（同一道闸）；还原后全绿
+- 双轨分析：graphify 6843 nodes / 13936 edges / 445 communities，diagnose 0 anomalies；
+  codegraph 已入图并给出 blast radius（见 `M60-graph-analysis.md`）
+
+**行为变更（运维可见）**: 集成配置（Zabbix / NetBox / GLPI）的 URL 现在**只接受 http(s)** ——
+API 直连 / 脚本调用提交 `ftp://…` / `file:///…` / `ssh://…` 会拿到 400
+`URL 必须以 http:// 或 https:// 开头`（前端表单此前已挡）。**内网无 TLD 地址
+（`http://zabbix:8080`）不受影响**，仍由两条测试钉住。
+
+**Out of scope**（留 future）:
+
+- 其他页面（Oncall / Runbook / AssetForm）import `utils/validators` —— 本轮只搬 Settings 一处
+- `ws://` / `wss://` scheme
+- 实时 URL 探活校验
+- SMTP user 强 email 校验对 SASL 非邮箱用户名（SendGrid `apikey`）的误伤
+
 ### M59 — G-UI-SettingsValidators 集成 / 通知 form 字段格式校验（F-1 结案）（2026-09-15）
 
 **摩擦**: `Settings.tsx` 里 10 个字段（3 集成 URL + 3 webhook URL + SMTP user/from/to + SMTP 端口）
