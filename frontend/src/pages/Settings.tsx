@@ -15,6 +15,40 @@ interface NotificationChannel {
   is_enabled: boolean
 }
 
+// ===== M59: 集成 / 通知表单的共享格式规则 =====
+// 放在 module 顶层 (不是组件内硬编码): 测试可 import 直接钉正/负样本, 且 10 处 form
+// item 引用同一份规则对象 —— 改一处不会漏掉另一处。
+//
+// URL_PATTERN 刻意允许**无 TLD 的内网地址**(`http://zabbix:8080`): 三家集成的目标
+// 通常是内网主机名/IP, 用「必须有 TLD」的写法会把合法配置挡在门外。
+export const URL_PATTERN = /^https?:\/\/[^\s/$.?#].[^\s]*$/
+export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+export const urlRules = [
+  { required: true, message: '请输入 URL' },
+  { pattern: URL_PATTERN, message: 'URL 必须以 http:// 或 https:// 开头' },
+]
+export const emailRules = [
+  { required: true, message: '请输入邮箱' },
+  { pattern: EMAIL_PATTERN, message: '邮箱格式不正确' },
+]
+export const portRules = [
+  { required: true, message: '请输入端口' },
+  { type: 'integer' as const, min: 1, max: 65535, message: '端口必须在 1-65535 之间' },
+]
+// 收件人是 tags 数组 (Select mode="tags") —— antd 的 pattern 规则只作用于字符串值,
+// 对数组不生效, 必须逐项校验。
+export const toRules = [
+  { required: true, message: '请输入收件人' },
+  {
+    validator: (_: unknown, value: unknown) => {
+      if (!Array.isArray(value)) return Promise.resolve()
+      return value.some((v) => !EMAIL_PATTERN.test(String(v).trim()))
+        ? Promise.reject(new Error('邮箱格式不正确'))
+        : Promise.resolve()
+    },
+  },
+]
+
 function Settings() {
   const navigate = useNavigate()
   // M57: Tabs 受控 URL sync. 刷新 / 分享链接保留 tab 状态, 后退键也能在 tab 间切换
@@ -629,7 +663,7 @@ function Settings() {
               <Form.Item
                 label="URL"
                 name="url"
-                rules={[{ required: true, message: '请输入 Zabbix URL' }]}
+                rules={urlRules}
               >
                 <Input placeholder="http://zabbix:8080" />
               </Form.Item>
@@ -689,7 +723,7 @@ function Settings() {
               <Form.Item
                 label="URL"
                 name="url"
-                rules={[{ required: true, message: '请输入 NetBox URL' }]}
+                rules={urlRules}
               >
                 <Input placeholder="http://netbox:8000" />
               </Form.Item>
@@ -745,7 +779,7 @@ function Settings() {
               <Form.Item
                 label="URL"
                 name="url"
-                rules={[{ required: true, message: '请输入 GLPI URL' }]}
+                rules={urlRules}
               >
                 <Input placeholder="http://glpi:80" />
               </Form.Item>
@@ -880,21 +914,21 @@ function Settings() {
                         <Form.Item name={['config', 'smtp_host']} label="SMTP服务器" rules={[{ required: true, message: '请输入SMTP服务器' }]}>
                           <Input />
                         </Form.Item>
-                        <Form.Item name={['config', 'smtp_port']} label="端口" rules={[{ required: true, message: '请输入端口' }]}>
+                        <Form.Item name={['config', 'smtp_port']} label="端口" rules={portRules}>
                           {/* 必须用 InputNumber：<Input type="number"> 的 value 是字符串，
                               后端 channelConfig.SMTPPort 是 int → 反序列化失败（G-33 B-1） */}
                           <InputNumber style={{ width: '100%' }} />
                         </Form.Item>
-                        <Form.Item name={['config', 'smtp_user']} label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
+                        <Form.Item name={['config', 'smtp_user']} label="用户名" rules={emailRules}>
                           <Input />
                         </Form.Item>
                         <Form.Item name={['config', 'smtp_password']} label="密码">
                           <Input.Password />
                         </Form.Item>
-                        <Form.Item name={['config', 'from']} label="发件人" rules={[{ required: true, message: '请输入发件人' }]}>
+                        <Form.Item name={['config', 'from']} label="发件人" rules={emailRules}>
                           <Input placeholder="nmp@example.com" />
                         </Form.Item>
-                        <Form.Item name={['config', 'to']} label="收件人" rules={[{ required: true, message: '请输入收件人' }]}>
+                        <Form.Item name={['config', 'to']} label="收件人" rules={toRules}>
                           <Select mode="tags" placeholder="输入邮箱后回车，可多个" tokenSeparators={[',', ' ']} />
                         </Form.Item>
                       </>
@@ -903,7 +937,7 @@ function Settings() {
                   if (type === 'dingtalk') {
                     return (
                       <>
-                        <Form.Item name={['config', 'webhook_url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
+                        <Form.Item name={['config', 'webhook_url']} label="Webhook URL" rules={urlRules}>
                           <Input />
                         </Form.Item>
                         <Form.Item name={['config', 'sign_secret']} label="加签密钥（可选）">
@@ -916,14 +950,14 @@ function Settings() {
                     // 只渲染 url：WeChatSender 的配置键是 url（群机器人 key 在 query 里），
                     // 它**忽略** secret —— 这里给 secret 输入框等于制造"配了不生效"的死键。
                     return (
-                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={urlRules}>
                         <Input placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx" />
                       </Form.Item>
                     )
                   }
                   return (
                     <>
-                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={[{ required: true, message: '请输入Webhook URL' }]}>
+                      <Form.Item name={['config', 'url']} label="Webhook URL" rules={urlRules}>
                         <Input />
                       </Form.Item>
                       <Form.Item name={['config', 'secret']} label="签名密钥（可选）">

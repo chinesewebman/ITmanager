@@ -7,7 +7,8 @@ import "@testing-library/jest-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import Settings from "./Settings";
+import Settings, { URL_PATTERN, EMAIL_PATTERN } from "./Settings";
+import type { AxiosResponse } from "axios";
 import { message } from "antd";
 // G-33 M1：跨语言配置契约样本（后端 internal/service/channel_service_test.go 读同一文件）
 import channelConfigSamples from "./__fixtures__/channelConfigSamples.json";
@@ -328,8 +329,8 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
 
     expect(await within(modal).findByText("请输入SMTP服务器")).toBeInTheDocument();
     expect(within(modal).getByText("请输入端口")).toBeInTheDocument();
-    expect(within(modal).getByText("请输入用户名")).toBeInTheDocument();
-    expect(within(modal).getByText("请输入发件人")).toBeInTheDocument();
+    // M59：用户名 / 发件人改用共享 emailRules —— required 文案统一成「请输入邮箱」
+    expect(within(modal).getAllByText("请输入邮箱")).toHaveLength(2);
     expect(within(modal).getByText("请输入收件人")).toBeInTheDocument();
   });
 
@@ -344,7 +345,8 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     const modal = (await screen.findByLabelText("渠道名称")).closest(".ant-modal") as HTMLElement;
     fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
 
-    expect(await within(modal).findByText("请输入Webhook URL")).toBeInTheDocument();
+    // M59：dingtalk / wechat / generic 的 Webhook URL 改用共享 urlRules
+    expect(await within(modal).findByText("请输入 URL")).toBeInTheDocument();
   });
 
   function savedConfig(): any {
