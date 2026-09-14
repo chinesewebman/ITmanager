@@ -341,6 +341,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/alert-rules/{id}/triggers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出某 rule 下的 triggerid 映射 (M38-B) */
+        get: operations["listAlertRuleTriggers"];
+        put?: never;
+        /** 创建 triggerid → rule_id 映射 (last-write-wins, 同 triggerid 多次 POST 后写覆盖前写) */
+        post: operations["createAlertRuleTrigger"];
+        /** 删除 triggerid → rule_id 映射 (幂等) */
+        delete: operations["deleteAlertRuleTrigger"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sites": {
         parameters: {
             query?: never;
@@ -1386,6 +1405,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/assets/bulk-retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量软退役资产（单请求替代 N 次单条退役）
+         * @description 对 `ids` 中每个资产执行与 `POST /assets/{id}/retire` 完全相同的退役动作
+         *     （IP 快照到 `last_known_ip4/ip6` → 清空网卡 IP → `status='retired'`）。
+         *
+         *     **部分成功语义**：单个 id 失败（不存在 / 已退役 / id 非法 / 该条 SQL 报错）
+         *     只影响它自己，其余照常提交，结果以 `succeeded` + `failed` 两个字段返回，
+         *     HTTP 状态仍是 **200** —— 用 4xx 表达「其中一条不存在」会让调用方丢掉成功的那部分。
+         *     整体失败（事务无法开启/提交）才返回 500。
+         *
+         *     审计由中间件按**请求**落一行（`path=/api/assets/bulk-retire`），
+         *     不按 id 拆成 N 行。
+         *
+         *     本端点不做重试与熔断：失败如实进 `failed`。`ids` 上限 1000（超出 400）。
+         */
+        post: operations["bulkRetireAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/assets/{id}/retire": {
         parameters: {
             query?: never;
@@ -1832,6 +1882,13 @@ export interface components {
             severity?: number;
             is_enabled?: boolean;
             notification_channels?: string[];
+        };
+        AlertRuleTriggerMap: {
+            triggerid?: string;
+            /** Format: uuid */
+            rule_id?: string;
+            /** Format: date-time */
+            created_at?: string;
         };
         AlertRuleInput: {
             name: string;
@@ -2304,6 +2361,17 @@ export interface components {
                 /** Format: date-time */
                 retired_at?: string | null;
                 retired_reason?: string | null;
+            };
+        };
+        AssetBulkRetireResult: {
+            code?: number;
+            data?: {
+                /** @description 成功退役的资产 id（顺序同入参） */
+                succeeded?: string[];
+                /** @description 失败的 id → 原因文案。JSON object 键顺序不定，调用方不要依赖顺序。 */
+                failed?: {
+                    [key: string]: string;
+                };
             };
         };
         AssetRestoreResult: {
@@ -2958,6 +3026,92 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description 删除成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listAlertRuleTriggers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRuleTriggerMap"][];
+                };
+            };
+        };
+    };
+    createAlertRuleTrigger: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    triggerid: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 创建成功 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRuleTriggerMap"];
+                };
+            };
+            /** @description 参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 规则不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deleteAlertRuleTrigger: {
+        parameters: {
+            query: {
+                triggerid: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 删除成功 (或不存在, 幂等返 200) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4826,6 +4980,52 @@ export interface operations {
                 };
             };
             /** @description 查询失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    bulkRetireAssets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    ids: string[];
+                    /** @description 统一退役原因（写入各资产的 retired_reason），截断到 500 字符 */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 已处理（逐条结果见 `succeeded` / `failed`，`failed` 的键顺序不定） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetBulkRetireResult"];
+                };
+            };
+            /** @description ids 为空 / 非法 JSON / 超过 1000 条 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 批量退役整体失败（事务未能提交） */
             500: {
                 headers: {
                     [name: string]: unknown;

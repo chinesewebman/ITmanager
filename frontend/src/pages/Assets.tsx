@@ -32,6 +32,28 @@ const STATUS_OPTIONS = [
 
 // W1：假数据兜底已删除（原 MOCK_DATA 让 React Query 的 isError 恒为 false，接口失败渲染一屏假资产）。
 
+// M58：批量退役响应的形状收敛。
+//
+// 后端是部分成功语义（200 + { succeeded: string[], failed: { id: msg } }），
+// 这里只关心两个计数。响应体来自网络 → 按 `in` / `typeof` 逐步收窄（不 inline-cast、
+// 不用 any）：字段缺失或改名时退化成 0，而不是把 undefined 当数组 `.length`（那会
+// 抛异常炸掉整棵组件树）。
+function parseBulkRetireResult(res: unknown): { ok: number; failed: number } {
+  if (!res || typeof res !== 'object' || !('data' in res)) return { ok: 0, failed: 0 }
+  const outer = res.data
+  if (!outer || typeof outer !== 'object' || !('data' in outer)) return { ok: 0, failed: 0 }
+  const envelope = outer.data
+  if (!envelope || typeof envelope !== 'object') return { ok: 0, failed: 0 }
+
+  const ok = 'succeeded' in envelope && Array.isArray(envelope.succeeded) ? envelope.succeeded.length : 0
+  // failed 是 JSON object（map）：键顺序不定，只取数量。
+  const failed =
+    'failed' in envelope && envelope.failed && typeof envelope.failed === 'object'
+      ? Object.keys(envelope.failed).length
+      : 0
+  return { ok, failed }
+}
+
 function Assets() {
   const [editing, setEditing] = useState<Asset | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
@@ -251,26 +273,28 @@ function Assets() {
   // 原因填「批量退役 / 批量恢复」单值, 不弹 modal (批量 50 项挨个弹不可用)。
   // 列表刷新用 refetch() (跟 create/update 同模式), 避免引入 useQueryClient → 测试套
   // 必须套 QueryClientProvider wrapper 的级联改动。
+  // M58: 批量退役改走单端点（原 N 次串行 POST /assets/:id/retire，100 项 = 100 RTT）。
+  // 端点是**部分成功**语义：200 响应体里 succeeded / failed 分别承载结果 ——
+  // 所以「全成功 / 部分成功 / 全失败」三种结局都在 onSuccess 分流，onError 只留给 4xx/5xx
+  // （网络错、超 1000 条、无权限）。用 throw 表达部分失败是错的：那会把已经退役成功的那批
+  // 说成「批量退役失败」，用户会去重试、把已退役的再报一次错。
   const bulkRetireMut = useApiMutation(
-    async (ids: React.Key[]) => {
-      const failed: string[] = []
-      for (const id of ids) {
-        try {
-          await assetApi.retire(String(id), '批量退役')
-        } catch {
-          failed.push(String(id))
-        }
-      }
-      if (failed.length) throw new Error(`failed ${failed.length}/${ids.length}`)
-      return { ok: ids.length, failed }
-    },
+    (ids: React.Key[]) => assetApi.bulkRetire(ids.map(String), '批量退役'),
     {
-      onSuccess: ({ ok }) => {
-        message.success(`批量退役成功 ${ok} 项`)
+      onSuccess: (res: unknown) => {
+        const { ok, failed } = parseBulkRetireResult(res)
+        if (failed === 0) {
+          message.success(`批量退役成功 ${ok} 项`)
+        } else if (ok === 0) {
+          message.error(`批量退役失败 ${failed} 项`)
+        } else {
+          message.warning(`批量退役成功 ${ok} 项，失败 ${failed} 项`)
+        }
         setSelectedRowKeys([])
         refetch()
       },
-      onError: (e: any) => message.error(`批量退役失败：${e?.message || '未知错误'}`),
+      onError: (e: unknown) =>
+        message.error(`批量退役失败：${e instanceof Error ? e.message : '未知错误'}`),
     },
   )
   const bulkRestoreMut = useApiMutation(

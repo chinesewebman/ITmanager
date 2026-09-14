@@ -122,6 +122,11 @@ export const assetApi = {
   // B4: 软退役 + 恢复 (主人 7/01 insight: 软删除的 IP 必须能被新设备继承)
   retire: (id: string, reason: string) =>
     api.post(`/assets/${id}/retire`, { reason }),
+  // M58: 批量退役 —— 单请求替代 N 次串行 retire（100 项 = 100 RTT → 1 RTT）。
+  // 响应是**部分成功**语义：200 + { succeeded: string[], failed: { [id]: msg } }，
+  // 失败的 id 是 JSON object 的键 → 顺序不定，调用方只取数量、不依赖顺序。
+  bulkRetire: (ids: string[], reason: string) =>
+    api.post("/assets/bulk-retire", { ids, reason }),
   restore: (id: string) => api.post(`/assets/${id}/restore`),
 };
 
