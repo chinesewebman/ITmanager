@@ -323,6 +323,39 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M57 — G-UI-TabUrlSync Tab 切换 URL 同步（2026-09-14）
+
+**摩擦**: 用户操作流程审查发现 — Settings 3 tabs (集成配置 / 通知设置 / API 密钥) + Oncall 3 tabs (当前值班 / 值班组 / 升级策略) 都没 URL sync, 用户:
+- 刷新页面 → 丢失 tab 状态, 回到默认
+- 分享 URL → 同事打开看到默认 tab, 不是他/她想看的
+- 浏览器后退 → 跳走整个页面, 而不是回到上一 tab
+
+**改动** (frontend-only, 4 files, +139/-5 LOC):
+- `frontend/src/pages/Settings.tsx`: 引 `useSearchParams`; `activeTab = searchParams.get('tab') || 'integrations'`; `handleTabChange` → `setSearchParams({ tab: key })`; `<Tabs activeKey onChange>`
+- `frontend/src/pages/Oncall.tsx`: 同上 (`activeTab || 'current'`)
+- `frontend/src/pages/Settings.test.tsx`: RouteProbe 增 `+ loc.search` 暴露 search; 加 4 M57 测试
+- `frontend/src/pages/Oncall.test.tsx`: 加 ProbeRoute helper + 4 M57 测试
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- Settings 35 + Oncall 24 = **59/59 PASS** (Settings 31 + 4 M57 / Oncall 20 + 4 M57, 无退化)
+- Backend `go test -count=1 ./...`: 15 packages ok
+- **mutation inversion 实证**: bypass `setSearchParams({ tab: key })` → **39 failed | 20 passed** ✓ (setSearchParams 行为真被 URL-sync 测试 catch)
+- `routeSync` (PageProbe 暴露 URL) 让 setSearchParams 渲染时机可断言
+
+**审查发现 (PM 自起, 8 项 friction → 1 项 ship + 4 项撤回 + 4 项 future)**:
+- F-2 (Modal Esc) 撤回: antd 5 Modal 默认 keyboard=true
+- F-3 (autoFocus) → M56 ship ✓
+- F-4 (Tickets 无空态) 撤回: 已有 EmptyState ("暂无工单 / 当前没有待处理的工单")
+- F-5 (Topology 无清空筛选) 撤回: 只有 Switch 1 个, 无清空语境
+- F-8 (Tab URL sync) → **M57 ship ✓**
+
+**Out of scope** (留 future round):
+- F-1 Settings 0 validator (跨 backend)
+- F-6 Settings Token 留空语义
+- F-7 Settings "测试连接" (跨 backend, omp)
+- F-9 保存按钮 loading
+
 ### M56 — G-UI-SearchAutofocus 搜索 Input autoFocus（2026-09-14）
 
 **摩擦**: 用户操作流程审查发现 — 全站搜索 Input 不 autoFocus, 用户进页面想搜必须先鼠标点 input 才能键盘打字. 实际只有 2 处真搜索 Input (其他页 Select 筛选无 Input):
