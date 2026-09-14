@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Popconfirm, Spin, Alert } from 'antd'
-import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled } from '@ant-design/icons'
-import { notificationApi, integrationApi, apiKeyApi, type APIKey } from '../services/api'
+import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Popconfirm, Spin, Alert, Menu } from 'antd'
+import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled, AuditOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
+import { notificationApi, integrationApi, apiKeyApi, authApi, type APIKey } from '../services/api'
 import { formatDateTime } from '../utils/time'
 import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -15,6 +16,7 @@ interface NotificationChannel {
 }
 
 function Settings() {
+  const navigate = useNavigate()
   const [channels, setChannels] = useState<NotificationChannel[]>([])
   const [loading, setLoading] = useState(false)
   const [channelModal, setChannelModal] = useState<{ open: boolean; data?: NotificationChannel }>({ open: false })
@@ -413,6 +415,32 @@ function Settings() {
 
   useEffect(() => {
     fetchApiKeys()
+  }, [])
+
+  // M49 审计入口：能力集由后端 /auth/me 从**鉴权上下文**下发（JWT claim / API Key 关联用户），
+  // 前端只读不复制矩阵。取不到（403/网络错）就当作无权限 → 不显示入口（fail-closed：
+  // 入口缺失只是少个链接，而误显示会让人点进 403）。
+  //
+  // 用本文件固有的手写 fetch + useState（Settings 全页不引 react-query），不为一处查询
+  // 把整页改成 react-query。
+  const [canAudit, setCanAudit] = useState(false)
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const res = (await authApi.me()) as { data?: { data?: { capabilities?: unknown } } }
+        const caps = res?.data?.data?.capabilities
+        if (alive) {
+          setCanAudit(Array.isArray(caps) && caps.includes('audit'))
+        }
+      } catch {
+        if (alive) setCanAudit(false)
+      }
+    })()
+    // 卸载后 setState 无意义（React 18 不再警告，但会白跑一次渲染）
+    return () => {
+      alive = false
+    }
   }, [])
 
   // Form 的 initialValues 只在挂载时自动应用一次；resetFields() 会把 store 重置到
@@ -1078,6 +1106,20 @@ function Settings() {
               </Space>
             </Form>
           </Modal>
+
+          {/* M49 G-UI-Audit：admin 区只做**导航**，不给 Settings 加新 tab —— 审计页是
+              独立路由（/audit，懒加载 chunk），入口放这里是因为它跟密钥管理同属
+              「管理员做的事」。无 audit 能力（readonly/ops_user 等）时整块不渲染。 */}
+          {canAudit && (
+            <Card title="管理" size="small" style={{ marginTop: 24 }}>
+              <Menu
+                mode="inline"
+                style={{ border: 'none', background: 'transparent' }}
+                items={[{ key: '/audit', icon: <AuditOutlined />, label: '审计日志' }]}
+                onClick={({ key }) => navigate(key)}
+              />
+            </Card>
+          )}
         </div>
       ),
     },
