@@ -323,6 +323,57 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M58 — G-Asset-BulkRetireEndpoint 批量退役单端点（M51-3 结案）（2026-09-15）
+
+**摩擦**: M51 ship 的资产批量退役是前端 `bulkRetireMut` 里的**串行循环** —— 100 台资产 = 100 次
+`POST /api/assets/:id/retire`。弱网/远端场景下这是 100 个 RTT 串起来（还没有并发），后端从未有批量端点
+（M51-3 🟡 登记留 future round）。同一摩擦在告警批量标记误报上也存在（M53 留 future）。
+
+**改动** (backend 4 files + frontend 4 files):
+
+- `backend/internal/service/asset_service.go`: 单条退役体抽成**事务内核** `retireCore(ctx, db, …)`，
+  新增 `BulkRetire(ctx, ids, reason, userID) (succeeded []string, failed map[string]string, err error)`。
+  外层一个 tx + **每条 id 一个 SAVEPOINT** —— 这是「失败一个不影响其它」在 PG 里唯一成立的做法：
+  没有 savepoint 时一条语句报错会让整个事务进入 aborted 态，后续每条语句都 `25P02`，
+  于是「其中一条不存在」会静默升级成「整批失败」。`reason` 截断 500 runes（同审计口径）。
+  不做 retry / 熔断（YAGNI）：失败如实进 `failed`。
+- **事务边界变化（行为变更，已记）**：`Retire` 原先「读在事务外、写包事务」，本轮把读也纳入事务
+  （`listNetworks` 改为接受调用方传入的 `*gorm.DB`）。理由：网卡 IP 快照与随后的清空 IP 必须在同一
+  快照里，否则并发改网卡会丢 `last_known_ip*`；且两条路径共用同一内核后只能有一种次序。
+  既有 5 条 `Retire` sqlmock 用例相应调整 SQL 期望**次序**，语义断言（快照 / 拒绝重复退役 / `ErrNotFound`）一字未动。
+- `backend/internal/api/handlers/asset_handler.go`: `BulkRetireAssets` —— 200 +
+  `{succeeded, failed}`（**部分成功**语义；用 4xx 表达「其中一条不存在」会让调用方丢掉成功的那部分）；
+  空 ids / 非法 JSON → 400，>1000 条 → 400（对齐 `/alerts/bulk-*` 防 DoS），`user_id` 非 uuid → 401。
+  审计由 AuditLog 中间件**按请求**落一行（`path=/api/assets/bulk-retire`），不按 id 拆成 N 行。
+- `backend/internal/api/routes.go`: `POST /assets/bulk-retire` 注册在 `/assets/:id/retire` **之前**
+  （静态段先于 `:id`，同 `/export` 的理由）。
+- `backend/internal/api/openapi.yaml`: 补 `/assets/bulk-retire` + `AssetBulkRetireResult`
+  （契约门禁 `TestRoutes_OpenAPI契约集合相等` 是集合相等，漏补即红）。
+- `frontend/src/services/api.ts` + `Assets.tsx`: `assetApi.bulkRetire(ids, reason)`；
+  `bulkRetireMut` 改单请求，并按端点语义在 `onSuccess` 分流三种结局 —— 全成功 `success` /
+  部分成功 `warning`（成功 N 项，失败 M 项）/ 全失败 `error`。旧实现用 `throw` 表达「有一条失败」→
+  把已退役成功的那批也说成失败，用户会重试（重试又会把已退役的再报一次 400）。`onError` 只留给 4xx/5xx。
+  响应形状按 `unknown` + `in`/`typeof` 收窄（不 `any`、不 inline-cast）。
+- `frontend/src/services/api.types.ts`: `npm run gen:api` 重生成。**顺带修掉既存漂移** ——
+  M38-B 的 `/alert-rules/{id}/triggers` 一直没重生成，CI 的「OpenAPI 生成物漂移检查」
+  自 M38-B 起就是红的（`.github/workflows/ci.yml:197-198`）。
+
+**Hard pass**:
+- backend `go test -count=1 ./...`: 全绿（27 packages ok，零失败）
+- `npx tsc --noEmit`: 0 error
+- frontend `npx vitest run`: **42 files / 386 tests 全 PASS**（Assets 26 条含 M58 新 6 条）
+- **mutation inversion 实证**（两处，各自打回原实现）：
+  - 前端 bypass：批量路径退回 `assetApi.retire(ids[0])` → **5 failed | 1 passed**
+  - 后端 bypass：去掉 per-id SAVEPOINT（直接 `retireCore(ctx, tx, …)`）→ **3 failed**（BulkRetire 全组）
+- 路由顺序实证：`POST /api/assets/bulk-retire` 带回合法 body 仍落 `BulkRetireAssets`
+  （若被 `/:id/retire` 吞掉，`id="bulk-retire"` → uuid 解析失败 → 400 且无 `failed` 字段）
+- 双轨分析：graphify + codegraph 0 anomalies（见 `M58-graph-analysis.md`）
+
+**Out of scope**（留 future）:
+- bulk restore 端点（同形，但恢复用得少）
+- bulk update metadata
+- 告警侧 `bulk_fp` 端点（M53 留的同族摩擦，本轮只做资产）
+
 ### M57 — G-UI-TabUrlSync Tab 切换 URL 同步（2026-09-14）
 
 **摩擦**: 用户操作流程审查发现 — Settings 3 tabs (集成配置 / 通知设置 / API 密钥) + Oncall 3 tabs (当前值班 / 值班组 / 升级策略) 都没 URL sync, 用户:
