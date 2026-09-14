@@ -21,14 +21,15 @@ import (
 
 // mockAssetService 手写 mock（避免引入 sqlmock / testify/mock）
 type mockAssetService struct {
-	listFunc    func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
-	listAllFunc func(ctx context.Context) ([]models.Asset, error)
-	getFunc     func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
-	createFunc  func(ctx context.Context, a *models.Asset) error
-	updateFunc  func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
-	deleteFunc  func(ctx context.Context, id string) error
-	retireFunc  func(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
-	restoreFunc func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
+	listFunc       func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
+	listAllFunc    func(ctx context.Context) ([]models.Asset, error)
+	getFunc        func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
+	createFunc     func(ctx context.Context, a *models.Asset) error
+	updateFunc     func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
+	deleteFunc     func(ctx context.Context, id string) error
+	retireFunc     func(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
+	bulkRetireFunc func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error)
+	restoreFunc    func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 }
 
 func (m *mockAssetService) List(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error) {
@@ -52,15 +53,30 @@ func (m *mockAssetService) Delete(ctx context.Context, id string) error {
 func (m *mockAssetService) Retire(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error) {
 	return m.retireFunc(ctx, id, reason, userID)
 }
+func (m *mockAssetService) BulkRetire(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+	return m.bulkRetireFunc(ctx, ids, reason, userID)
+}
 func (m *mockAssetService) Restore(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error) {
 	return m.restoreFunc(ctx, id)
 }
+
+// testUserID newTestRouter 注入的请求身份（AuthMiddleware 的替身）。BulkRetireAssets
+// 从 c.GetString("user_id") 取操作者（写进 retired_by），必须有值。
+var testUserID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 // newTestRouter 把 handler 挂到 /assets 路由上
 func newTestRouter(svc service.AssetService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(gin.Recovery()) // T-15: handler svc=nil panic 不穿透 testing.tRunner
+	// AuthMiddleware 替身：X-Test-User-ID 可覆盖（测非法 uuid → 401 分支），默认合法用户。
+	r.Use(func(c *gin.Context) {
+		uid := c.GetHeader("X-Test-User-ID")
+		if uid == "" {
+			uid = testUserID.String()
+		}
+		c.Set("user_id", uid)
+	})
 	h := handlers.NewAssetHandler(svc)
 	g := r.Group("/assets")
 	g.GET("", h.ListAssets)
@@ -69,6 +85,8 @@ func newTestRouter(svc service.AssetService) *gin.Engine {
 	g.PUT("/:id", h.UpdateAsset)
 	g.DELETE("/:id", h.DeleteAsset)
 	g.GET("/export", h.ExportAssets)
+	// M58: 与 routes.go 同序 —— 静态段 /bulk-retire 先于 /:id/retire 注册。
+	g.POST("/bulk-retire", h.BulkRetireAssets)
 	g.POST("/:id/retire", h.RetireAsset)
 	g.POST("/:id/restore", h.RestoreAsset)
 	return r
@@ -250,4 +268,172 @@ func TestM32_ExportAssets_取数失败不带CSV头(t *testing.T) {
 	assert.Empty(t, w.Header().Get("X-Total-Count"), "取数失败时不应声明条数")
 	// service 错误路径才打 internal_error；panic 路径（Recovery）body 为空 —— 两者形状不同
 	assert.Contains(t, w.Body.String(), "internal_error", "必须是 service 错误路径，而不是 panic")
+}
+
+// ==================== M58: BulkRetireAssets ====================
+
+// M58 批量退役：全部成功 → 200 + succeeded 含全部 id
+func TestM58_BulkRetireAssets_全部成功(t *testing.T) {
+	id1, id2 := uuid.New().String(), uuid.New().String()
+	var gotIDs []string
+	svc := &mockAssetService{
+		bulkRetireFunc: func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			gotIDs = ids
+			// reason 直达 service（写进 retired_reason），userID 来自认证上下文
+			assert.Equal(t, "批量退役", reason)
+			assert.Equal(t, testUserID, userID)
+			return ids, map[string]string{}, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{id1, id2}, "reason": "批量退役"})
+	req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, []string{id1, id2}, gotIDs)
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Succeeded []string          `json:"succeeded"`
+			Failed    map[string]string `json:"failed"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, []string{id1, id2}, resp.Data.Succeeded)
+	assert.Empty(t, resp.Data.Failed)
+}
+
+// M58 批量退役：部分失败仍是 200 —— succeeded / failed 两个字段各自承载结果，
+// 不能用 4xx 表达「有一条不存在」（那会让前端丢掉成功的那部分）。
+func TestM58_BulkRetireAssets_部分失败_仍返200(t *testing.T) {
+	okID, badID := uuid.New().String(), uuid.New().String()
+	svc := &mockAssetService{
+		bulkRetireFunc: func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			return []string{okID}, map[string]string{badID: "资产不存在"}, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{okID, badID}, "reason": ""})
+	req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp struct {
+		Data struct {
+			Succeeded []string          `json:"succeeded"`
+			Failed    map[string]string `json:"failed"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, []string{okID}, resp.Data.Succeeded)
+	assert.Equal(t, map[string]string{badID: "资产不存在"}, resp.Data.Failed)
+}
+
+// M58 批量退役：ids 缺失 / 空 → 400（不进 service）
+func TestM58_BulkRetireAssets_空ids_返400(t *testing.T) {
+	called := false
+	svc := &mockAssetService{
+		bulkRetireFunc: func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			called = true
+			return nil, nil, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	for _, body := range []string{`{}`, `{"ids":[]}`, `{"reason":"x"}`} {
+		t.Run(body, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "ids 不能为空")
+			assert.False(t, called, "空 ids 不得进 service")
+		})
+	}
+}
+
+// M58 批量退役：ids 超 1000 → 400（防 DoS，对齐 /alerts/bulk-*）
+func TestM58_BulkRetireAssets_超过1000条_返400(t *testing.T) {
+	ids := make([]string, 1001)
+	for i := range ids {
+		ids[i] = uuid.New().String()
+	}
+	svc := &mockAssetService{
+		bulkRetireFunc: func(ctx context.Context, list []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			t.Error("超限请求不得进 service")
+			return nil, nil, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"ids": ids})
+	req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "最多 1000 条")
+}
+
+// M58 批量退役：user_id 非 uuid → 401（retired_by 必须是合法操作者）
+func TestM58_BulkRetireAssets_非法userID_返401(t *testing.T) {
+	svc := &mockAssetService{
+		bulkRetireFunc: func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			t.Error("非法凭证不得进 service")
+			return nil, nil, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{uuid.New().String()}})
+	req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User-ID", "not-a-uuid")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// M58 路由顺序：POST /assets/bulk-retire 不被 /assets/:id/retire 当成 id="bulk-retire"。
+//
+// 判别必须落在**调用面**上：两条路径对空 body 都返 400，只看状态码分不出来。
+// 这里给合法 body，若被 /:id/retire 收走 → retireFunc 被调（用例失败）；被 bulk handler
+// 收走 → bulkRetireFunc 收到 ids。
+func TestM58_批量退役路由_不被id_retire吞(t *testing.T) {
+	id := uuid.New().String()
+	retireCalled := false
+	bulkCalled := false
+	svc := &mockAssetService{
+		retireFunc: func(ctx context.Context, got string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error) {
+			retireCalled = true
+			return &models.Asset{ID: testUserID}, nil, nil
+		},
+		bulkRetireFunc: func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+			bulkCalled = true
+			return ids, map[string]string{}, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{id}, "reason": ""})
+	req := httptest.NewRequest(http.MethodPost, "/assets/bulk-retire", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.True(t, bulkCalled, "bulk-retire 必须落到 BulkRetireAssets")
+	assert.False(t, retireCalled, "bulk-retire 不得被 /:id/retire 吞掉（id=bulk-retire）")
 }

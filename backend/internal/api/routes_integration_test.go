@@ -348,6 +348,23 @@ func TestRoutes_CP6_alerts_bulk_不返回路由不匹配(t *testing.T) {
 	}
 }
 
+// M58: /assets/bulk-retire 是静态段，必须先于 /assets/:id/retire 注册。
+//
+// 判别不能只看状态码：两条路径对空 body 都返 400。这里给合法 body，
+// 被 /:id/retire 收走时 id="bulk-retire" → service 层 uuid.Parse 失败 → 400「无法退役」；
+// 被 bulk handler 收走 → 200（ids 里的 uuid 在空库里逐条 failed，仍是 200 部分成功）。
+func TestRoutes_M58_assets_bulk_retire不被id_retire吞(t *testing.T) {
+	r := setupTestRouter(t)
+	tok := genValidToken(t)
+
+	w := doJSONAs(t, r, http.MethodPost, "/api/assets/bulk-retire", tok,
+		map[string]any{"ids": []string{genUUID()}, "reason": "批量退役"})
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	// 200 + failed 字段 = 批量 handler；若被 /:id/retire 吞掉会是 400 且无 data.failed
+	assert.Contains(t, w.Body.String(), "failed")
+}
+
 // ==================== Public /api/auth/* ====================
 
 func TestRoutes_Login_未带body返400或401(t *testing.T) {
@@ -729,6 +746,8 @@ var gatedRoutes = []struct {
 	{middleware.CapWrite, http.MethodPost, "/api/assets", false},
 	{middleware.CapWrite, http.MethodPut, "/api/assets/:id", false},
 	{middleware.CapWrite, http.MethodPost, "/api/assets/:id/retire", false},
+	// M58: 批量退役与单条退役同档（可逆：POST /:id/restore 可恢复）
+	{middleware.CapWrite, http.MethodPost, "/api/assets/bulk-retire", false},
 	{middleware.CapWrite, http.MethodPost, "/api/assets/:id/restore", false},
 	{middleware.CapWrite, http.MethodPost, "/api/alert-rules", false},
 	{middleware.CapWrite, http.MethodPut, "/api/alert-rules/:id", false},

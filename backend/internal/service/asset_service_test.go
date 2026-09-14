@@ -424,6 +424,9 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 	userID := uuid.New()
 	netID := uuid.New()
 
+	// M58: 事务边界从「只包写」扩到「读+写」—— 网卡快照与随后的清空 IP 必须在同一快照里
+	// （否则并发改网卡会丢 last_known），且 Retire 与 BulkRetire 共用同一内核后只能有一种次序。
+	mock.ExpectBegin()
 	// 1) First 拿 asset (active) — First(id, ?) gorm 发 SELECT * WHERE id = $1 ORDER BY id LIMIT $2, 2 args (uid + 1)
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id, 1).
@@ -433,20 +436,18 @@ func TestAssetService_Retire_成功_IP转移到last_known(t *testing.T) {
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, id, "eth0", "192.168.3.50", ""))
-	// 3) Transaction Begin
-	mock.ExpectBegin()
 	// 3a) UPDATE asset (Model.Updates 走 Exec, 走 Update 0 行也返 nil)
 	mock.ExpectExec(`UPDATE "assets" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// 3b) UPDATE asset_networks (清空 IP)
 	mock.ExpectExec(`UPDATE "asset_networks" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-	// 4) 重读 networks (查最终态)
+	// 4) 重读 networks (查最终态, 仍在事务内)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv6_address"}).
 			AddRow(netID, "", ""))
+	mock.ExpectCommit()
 
 	asset, networks, err := svc.Retire(context.Background(), id.String(), "设备下架", userID)
 	require.NoError(t, err)
@@ -472,9 +473,11 @@ func TestAssetService_Retire_重复退役返ErrInvalidInput(t *testing.T) {
 	rows := sqlmock.NewRows([]string{
 		"id", "name", "status", "asset_type", "created_at", "updated_at",
 	}).AddRow(id, "web-01", "retired", "server", time.Now(), time.Now())
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id, 1).
 		WillReturnRows(rows)
+	mock.ExpectRollback()
 
 	_, _, err := svc.Retire(context.Background(), id.String(), "再来一次", uuid.New())
 	assert.ErrorIs(t, err, ErrInvalidInput)
@@ -486,21 +489,28 @@ func TestAssetService_Retire_不存在返ErrNotFound(t *testing.T) {
 	svc := NewAssetService(gormDB)
 
 	id := uuid.New()
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id, 1).
 		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
 
 	_, _, err := svc.Retire(context.Background(), id.String(), "x", uuid.New())
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+// 非法 uuid 在读表之前就返回 → 事务开了又立刻回滚，不产生任何业务 SQL。
 func TestAssetService_Retire_非法UUID返ErrInvalidInput(t *testing.T) {
-	gormDB, _ := newMockDB(t)
+	gormDB, mock := newMockDB(t)
 	svc := NewAssetService(gormDB)
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
 
 	_, _, err := svc.Retire(context.Background(), "not-a-uuid", "x", uuid.New())
 	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestAssetService_Restore_成功_IP写回网卡(t *testing.T) {
@@ -658,6 +668,7 @@ func TestAssetService_Retire_无网卡时last_known为空(t *testing.T) {
 	id := uuid.New()
 	userID := uuid.New()
 
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id, 1).
 		WillReturnRows(activeAssetSampleRows(id.String()))
@@ -665,20 +676,111 @@ func TestAssetService_Retire_无网卡时last_known为空(t *testing.T) {
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "assets" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE "asset_networks" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectCommit()
 
 	asset, _, err := svc.Retire(context.Background(), id.String(), "无网卡", userID)
 	require.NoError(t, err)
 	assert.Equal(t, "retired", asset.Status)
 	assert.Nil(t, asset.LastKnownIP4)
 	assert.Nil(t, asset.LastKnownIP6)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M58: BulkRetire ====================
+
+// expectRetireCoreOnTx 铺一条「单个 id 在事务内核里退役成功」的 SQL 期望序列。
+// 顺序 = retireCore 的读写序：SAVEPOINT → 读 asset → 读网卡 → 更新 asset → 清网卡 IP → 重读网卡。
+//
+// savepoint 名形如 `sp<random>`（gorm 用 maphash 生成，每个事务不同）→ 只能按前缀匹配。
+func expectRetireCoreOnTx(mock sqlmock.Sqlmock, id, netID uuid.UUID, ip4 string) {
+	mock.ExpectExec(`SAVEPOINT sp[0-9]+`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id, 1).
+		WillReturnRows(activeAssetSampleRows(id.String()))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "interface_name", "ipv4_address", "ipv6_address"}).
+			AddRow(netID, id, "eth0", ip4, ""))
+	mock.ExpectExec(`UPDATE "assets" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "asset_networks" SET`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1 ORDER BY created_at ASC, id ASC`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "ipv4_address", "ipv6_address"}).AddRow(netID, "", ""))
+}
+
+func TestAssetService_BulkRetire_全部成功(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id1, id2 := uuid.New(), uuid.New()
+	net1, net2 := uuid.New(), uuid.New()
+
+	mock.ExpectBegin()
+	expectRetireCoreOnTx(mock, id1, net1, "192.168.3.50")
+	expectRetireCoreOnTx(mock, id2, net2, "192.168.3.51")
+	mock.ExpectCommit()
+
+	ok, failed, err := svc.BulkRetire(context.Background(),
+		[]string{id1.String(), id2.String()}, "批量退役", uuid.New())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{id1.String(), id2.String()}, ok)
+	assert.Empty(t, failed)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 部分失败：一条不存在 → 该条进 failed，其它照常提交。
+//
+// 这里同时钉住「失败只回滚自己那一格」：id2 的失败必须走 ROLLBACK TO SAVEPOINT（而不是
+// 把整个事务打回），且外层仍是 COMMIT —— 没有 savepoint 时 PG 会让整个 tx 进入 aborted
+// 态，后续每条语句都 25P02，即「一条不存在 ⇒ 全批失败」。
+func TestAssetService_BulkRetire_部分失败_其它仍提交(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id1, id2 := uuid.New(), uuid.New()
+	net1 := uuid.New()
+
+	mock.ExpectBegin()
+	expectRetireCoreOnTx(mock, id1, net1, "192.168.3.50")
+	// id2: savepoint 后读 asset 就 not found → 回滚该 savepoint
+	mock.ExpectExec(`SAVEPOINT sp[0-9]+`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id2, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectExec(`ROLLBACK TO SAVEPOINT sp[0-9]+`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	ok, failed, err := svc.BulkRetire(context.Background(),
+		[]string{id1.String(), id2.String()}, "批量退役", uuid.New())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{id1.String()}, ok)
+	assert.Equal(t, map[string]string{id2.String(): "资产不存在"}, failed)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 非法 uuid：不碰 DB（除 savepoint 骨架），错误进 failed 而非整体 500。
+func TestAssetService_BulkRetire_非法UUID进failed(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SAVEPOINT sp[0-9]+`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ROLLBACK TO SAVEPOINT sp[0-9]+`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	ok, failed, err := svc.BulkRetire(context.Background(), []string{"not-a-uuid"}, "x", uuid.New())
+
+	require.NoError(t, err)
+	assert.Empty(t, ok)
+	assert.Equal(t, map[string]string{"not-a-uuid": "无法退役（资产已退役或参数无效）"}, failed)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
