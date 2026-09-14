@@ -1,12 +1,14 @@
-import { Button, Space, Table } from 'antd'
+import { Button, Dropdown, Space, Table } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { StatusTag } from './StatusTag'
 import { EmptyState } from './EmptyState'
-import { formatDateTime } from '../utils/time'
+import { formatDateTime, formatRelativeTime } from '../utils/time'
 
 export interface Ticket {
   id: string
   title: string
+  /** M50：工单上唯一的自由文本列。「加评论」追加到这里（见 TicketDetailModal.tsx 文件头 §1）。 */
+  description?: string
   priority: 'critical' | 'high' | 'normal' | 'low' | string
   status: 'open' | 'in_progress' | 'pending' | 'resolved' | 'closed' | string
   requester: string
@@ -41,6 +43,12 @@ export interface TicketTableProps {
   data: Ticket[]
   loading: boolean
   onView: (ticket: Ticket) => void
+  // M50：行内 [更多操作] 的三条入口。**都只是「打开票面」**，真正的写入在
+  // TicketDetailModal 里（后端只有一个写入口，mutation 不该有第二处）。
+  // 注意 onClose 是「关闭工单」（status=closed），与弹窗的 onClose（收起弹窗）不是一回事。
+  onAssign?: (ticket: Ticket) => void
+  onChangePriority?: (ticket: Ticket) => void
+  onClose?: (ticket: Ticket) => void
   // M3/P5: 服务端分页受控。total 传入时启用受控分页（current/pageSize/onChange 由父组件持有），
   // 否则回落到 antd 内部分页（前端假分页，仅兼容旧调用方）。
   total?: number
@@ -49,7 +57,7 @@ export interface TicketTableProps {
   onPageChange?: (page: number, pageSize: number) => void
 }
 
-export function TicketTable({ data, loading, onView, total, page, pageSize, onPageChange }: TicketTableProps) {
+export function TicketTable({ data, loading, onView, onAssign, onChangePriority, onClose, total, page, pageSize, onPageChange }: TicketTableProps) {
   const columns: ColumnsType<Ticket> = [
     // M2：加前端本地排序。优先级按严重度权重；创建时间按 Date 解析（RFC3339 字符串
     // 字典序会因时区偏移错序）；其余字符串列 localeCompare（assignee 可能为空）。
@@ -91,14 +99,51 @@ export function TicketTable({ data, loading, onView, total, page, pageSize, onPa
       render: (iso: string) => formatDateTime(iso),
     },
     {
+      // M50：运维要从列表一眼分出「老问题」与「活跃工单」——创建时间答不了这件事。
+      // 用相对时间（"3 天前"）而不是绝对时间：这一列回答的是「多久没动了」，
+      // 绝对时间还得读者拿当下时间去减，那正是它想省掉的计算。
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      width: 120,
+      sorter: (a, b) => new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime(),
+      render: (iso: string) => formatRelativeTime(iso),
+    },
+    {
       title: '操作',
       key: 'action',
-      width: 100,
+      width: 170,
       render: (_, record) => (
         <Space>
           <Button type="link" size="small" onClick={() => onView(record)}>
             详情
           </Button>
+          <Dropdown
+            // M50：显式 click 触发。antd 默认是 hover —— 一个写着「更多操作」的按钮
+            // 悬停即弹菜单，触屏与键盘用户够不着，误触也比点开多。
+            trigger={['click']}
+            menu={{
+              items: [
+                { key: 'view', label: '查看详情' },
+                { key: 'assign', label: '改派' },
+                { key: 'priority', label: '改优先级' },
+                { key: 'close', label: '关单' },
+              ],
+              // M50：四项都只是「打开这张票的操作面」，写入统一在 TicketDetailModal 里做
+              // （后端只有一个写入口，mutation 不该有第二处）。「查看详情」留在菜单里是
+              // 为了四项同形，点它与点左边的 [详情] 等价。
+              onClick: ({ key }) => {
+                if (key === 'view') onView(record)
+                else if (key === 'assign') onAssign?.(record)
+                else if (key === 'priority') onChangePriority?.(record)
+                else if (key === 'close') onClose?.(record)
+              },
+            }}
+          >
+            <Button type="link" size="small">
+              更多操作
+            </Button>
+          </Dropdown>
         </Space>
       ),
     },
