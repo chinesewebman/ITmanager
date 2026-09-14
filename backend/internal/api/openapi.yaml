@@ -2276,6 +2276,58 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /assets/bulk-retire:
+    post:
+      tags: [资产管理]
+      summary: 批量软退役资产（单请求替代 N 次单条退役）
+      description: |
+        对 `ids` 中每个资产执行与 `POST /assets/{id}/retire` 完全相同的退役动作
+        （IP 快照到 `last_known_ip4/ip6` → 清空网卡 IP → `status='retired'`）。
+
+        **部分成功语义**：单个 id 失败（不存在 / 已退役 / id 非法 / 该条 SQL 报错）
+        只影响它自己，其余照常提交，结果以 `succeeded` + `failed` 两个字段返回，
+        HTTP 状态仍是 **200** —— 用 4xx 表达「其中一条不存在」会让调用方丢掉成功的那部分。
+        整体失败（事务无法开启/提交）才返回 500。
+
+        审计由中间件按**请求**落一行（`path=/api/assets/bulk-retire`），
+        不按 id 拆成 N 行。
+
+        本端点不做重试与熔断：失败如实进 `failed`。`ids` 上限 1000（超出 400）。
+      operationId: bulkRetireAssets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { type: string, format: uuid }
+                reason: { type: string, description: 统一退役原因（写入各资产的 retired_reason），截断到 500 字符 }
+      responses:
+        '200':
+          description: 已处理（逐条结果见 `succeeded` / `failed`，`failed` 的键顺序不定）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetBulkRetireResult'
+        '400':
+          description: ids 为空 / 非法 JSON / 超过 1000 条
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 批量退役整体失败（事务未能提交）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /assets/{id}/retire:
     post:
       tags: [资产管理]
@@ -3808,6 +3860,22 @@ components:
             released_ip6: { type: string, nullable: true }
             retired_at: { type: string, format: date-time, nullable: true }
             retired_reason: { type: string, nullable: true }
+
+    AssetBulkRetireResult:
+      type: object
+      properties:
+        code: { type: integer }
+        data:
+          type: object
+          properties:
+            succeeded:
+              type: array
+              description: 成功退役的资产 id（顺序同入参）
+              items: { type: string, format: uuid }
+            failed:
+              type: object
+              description: 失败的 id → 原因文案。JSON object 键顺序不定，调用方不要依赖顺序。
+              additionalProperties: { type: string }
 
     AssetRestoreResult:
       type: object

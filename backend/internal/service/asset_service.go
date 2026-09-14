@@ -46,6 +46,9 @@ type AssetService interface {
 	Delete(ctx context.Context, id string) error
 	// B4: 软退役 — 把 AssetNetwork.IP* 清空, 存档到 Asset.LastKnownIP*, 释放 IP 给新设备用
 	Retire(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
+	// M58: 批量退役 — 单请求替代前端原本的 N 次串行 Retire（100 项 100 RTT → 1 RTT）。
+	// 每条 id 走与 Retire 相同的内核；部分失败进 failed，不影响已成功的条目。
+	BulkRetire(ctx context.Context, ids []string, reason string, userID uuid.UUID) (succeeded []string, failed map[string]string, err error)
 	// B4: 恢复 — 反向: last_known_ip* 写回 AssetNetwork.IP*, 清空 retired_*
 	Restore(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 }
@@ -128,7 +131,7 @@ func (s *assetService) Get(ctx context.Context, id string) (*models.Asset, []mod
 		return nil, nil, err
 	}
 
-	networks, err := s.listNetworks(ctx, asset.ID)
+	networks, err := s.listNetworks(ctx, s.db, asset.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -145,9 +148,11 @@ func (s *assetService) Get(ctx context.Context, id string) (*models.Asset, []mod
 //
 // `id` 只是决胜列（同一批插入的 created_at 可能相同），与 alert/ticket 的
 // `created_at DESC, id DESC` 二元组排序同一套约定。
-func (s *assetService) listNetworks(ctx context.Context, assetID uuid.UUID) ([]models.AssetNetwork, error) {
+// db 由调用方指定：Get/Restore 传 s.db，Retire/BulkRetire 传事务句柄 ——
+// 网卡快照的读必须和后续清空 IP 的写落在同一事务/快照里。
+func (s *assetService) listNetworks(ctx context.Context, db *gorm.DB, assetID uuid.UUID) ([]models.AssetNetwork, error) {
 	var networks []models.AssetNetwork
-	err := s.db.WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where("asset_id = ?", assetID).
 		Order("created_at ASC, id ASC").
 		Find(&networks).Error
@@ -200,6 +205,29 @@ func (s *assetService) Delete(ctx context.Context, id string) error {
 // - asset.status = 'retired', retired_at = now, retired_by = userID, retired_reason
 // - 整段包事务: 任一步失败回滚 (避免半退役状态)
 func (s *assetService) Retire(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error) {
+	var asset *models.Asset
+	var networks []models.AssetNetwork
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		a, n, e := s.retireCore(ctx, tx, id, reason, userID)
+		if e != nil {
+			return e
+		}
+		asset, networks = a, n
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return asset, networks, nil
+}
+
+// retireCore 单条退役的**事务内核**：全部读写都走传入的 db。
+//
+// Retire 传外层 tx；BulkRetire 传每个 id 各自的 SAVEPOINT。两条路径共用同一实现，
+// 退役语义（last_known_ip* 快照、清空网卡 IP、拒绝重复退役）不会分叉。
+//
+// 读也进事务是刻意的：网卡快照与随后的清空 IP 必须在同一快照里，否则并发改网卡会丢 last_known。
+func (s *assetService) retireCore(ctx context.Context, db *gorm.DB, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error) {
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return nil, nil, ErrInvalidInput
@@ -207,7 +235,7 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 
 	var asset models.Asset
 	// First(uid) 走纯 PK, 不带 "id = ?" 条件避免 gorm 重复 bind (uuid PK 字段)
-	if err := s.db.WithContext(ctx).First(&asset, uid).Error; err != nil {
+	if err := db.WithContext(ctx).First(&asset, uid).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, ErrNotFound
 		}
@@ -219,7 +247,7 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 		return nil, nil, ErrInvalidInput
 	}
 
-	networks, err := s.listNetworks(ctx, uid)
+	networks, err := s.listNetworks(ctx, db, uid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -249,38 +277,84 @@ func (s *assetService) Retire(ctx context.Context, id string, reason string, use
 	asset.RetiredBy = &userID
 	asset.RetiredReason = &trimmedReason
 
-	// 事务: 1) 写 asset 更新 2) 清空所有 AssetNetwork.IP*
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&asset).Updates(map[string]interface{}{
-			"status":         asset.Status,
-			"last_known_ip4": asset.LastKnownIP4,
-			"last_known_ip6": asset.LastKnownIP6,
-			"retired_at":     asset.RetiredAt,
-			"retired_by":     asset.RetiredBy,
-			"retired_reason": asset.RetiredReason,
+	// 写 asset 更新 (事务由调用方持有)
+	if err := db.WithContext(ctx).Model(&asset).Updates(map[string]interface{}{
+		"status":         asset.Status,
+		"last_known_ip4": asset.LastKnownIP4,
+		"last_known_ip6": asset.LastKnownIP6,
+		"retired_at":     asset.RetiredAt,
+		"retired_by":     asset.RetiredBy,
+		"retired_reason": asset.RetiredReason,
+	}).Error; err != nil {
+		return nil, nil, err
+	}
+	// 清空 networks 的 IP 字段 (其他字段保留: mac / interface_name / connected_to 等)
+	if err := db.WithContext(ctx).Model(&models.AssetNetwork{}).
+		Where("asset_id = ?", uid).
+		Updates(map[string]interface{}{
+			"ipv4_address": "",
+			"ipv6_address": "", // 列名由字段名 IPv6Address 推导: ipv6_address（`ip_v address` 只是 JSON tag，不是列）
 		}).Error; err != nil {
-			return err
-		}
-		// 清空 networks 的 IP 字段 (其他字段保留: mac / interface_name / connected_to 等)
-		if err := tx.Model(&models.AssetNetwork{}).
-			Where("asset_id = ?", uid).
-			Updates(map[string]interface{}{
-				"ipv4_address": "",
-				"ipv6_address": "", // 列名由字段名 IPv6Address 推导: ipv6_address（`ipv_address` 只是 JSON tag，不是列）
-			}).Error; err != nil {
-			return err
+		return nil, nil, err
+	}
+
+	// 重读 networks 返给 handler (gorm.Model.Updates 不会刷新内存 struct)
+	if networks, err = s.listNetworks(ctx, db, uid); err != nil {
+		return nil, nil, err
+	}
+	return &asset, networks, nil
+}
+
+// M58: bulkRetireReasonMax 批量退役 reason 的截断上限（runes）。
+//
+// retired_reason 是 TEXT 不会超长，但批量入参是外部输入：上限对齐审计 path 的 500 口径，
+// 免得一条请求把 500KB 的"原因"塞进每一行。
+const bulkRetireReasonMax = 500
+
+// M58: BulkRetire 批量软退役 (G-Asset-BulkRetireEndpoint)
+//   - 复用 retireCore，每条 id 的语义与单条 Retire 完全一致；
+//   - 单次调用 = 一个外层 DB tx，每个 id 再各自套一个 SAVEPOINT → 单条失败（含真实 DB 错误）
+//     只回滚该 savepoint，其余 id 照常提交。这是"失败一个不影响其它"在 PG 里唯一成立的做法：
+//     没有 savepoint 时，一条语句报错会让整个 tx 进入 aborted 态，后续语句全部 25P02。
+//   - 返回 succeeded（按入参顺序）+ failed（id → 文案）。只有外层 tx 自身（Begin/Commit）
+//     失败才返回 err != nil —— 那种情况下不能谎报"部分成功"（票面上成功了实际全被回滚）。
+//   - 不做 retry / 熔断（YAGNI）：失败如实进 failed 报告。
+func (s *assetService) BulkRetire(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error) {
+	reason = truncateRunes(strings.TrimSpace(reason), bulkRetireReasonMax)
+
+	succeeded := make([]string, 0, len(ids))
+	failed := make(map[string]string)
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			err := tx.Transaction(func(itx *gorm.DB) error {
+				_, _, e := s.retireCore(ctx, itx, id, reason, userID)
+				return e
+			})
+			if err != nil {
+				failed[id] = bulkRetireErrMsg(err)
+				continue
+			}
+			succeeded = append(succeeded, id)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, nil, err
 	}
+	return succeeded, failed, nil
+}
 
-	// 重读 networks 返给 handler (gorm.Model.Updates 不会刷新内存 struct)
-	if networks, err = s.listNetworks(ctx, uid); err != nil {
-		return nil, nil, err
+// bulkRetireErrMsg 把内部错误翻成可直接展示的文案：业务错给中文，未知错保留原文便于排查。
+func bulkRetireErrMsg(err error) string {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return "资产不存在"
+	case errors.Is(err, ErrInvalidInput):
+		return "无法退役（资产已退役或参数无效）"
+	default:
+		return err.Error()
 	}
-	return &asset, networks, nil
 }
 
 // B4: Restore 反向
@@ -305,7 +379,7 @@ func (s *assetService) Restore(ctx context.Context, id string) (*models.Asset, [
 		return nil, nil, ErrInvalidInput // 非退役状态不能恢复
 	}
 
-	networks, err := s.listNetworks(ctx, uid)
+	networks, err := s.listNetworks(ctx, s.db, uid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,7 +430,7 @@ func (s *assetService) Restore(ctx context.Context, id string) (*models.Asset, [
 	}
 
 	// 重读
-	if networks, err = s.listNetworks(ctx, uid); err != nil {
+	if networks, err = s.listNetworks(ctx, s.db, uid); err != nil {
 		return nil, nil, err
 	}
 	// 重新读 asset 拿最终状态 — 用新 struct 实例, 避免事务 Model.Updates 把 asset.ID 写回后再 First 触发重复 bind

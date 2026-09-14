@@ -27,6 +27,9 @@ func safeCSV(s string) string {
 	return s
 }
 
+// maxBulkRetireIDs 单次批量退役的 id 上限（与 /alerts/bulk-* 同一防 DoS 口径）。
+const maxBulkRetireIDs = 1000
+
 // AssetHandler 资产相关 HTTP handler
 type AssetHandler struct {
 	svc service.AssetService
@@ -193,6 +196,46 @@ func (h *AssetHandler) RetireAsset(c *gin.Context) {
 			"released_ip6":   asset.LastKnownIP6,
 			"retired_at":     asset.RetiredAt,
 			"retired_reason": asset.RetiredReason,
+		},
+	})
+}
+
+// M58: BulkRetireAssets 批量软退役
+// POST /api/assets/bulk-retire
+// body: { "ids": ["<uuid>", ...], "reason": "..." }
+//   - 单请求替代前端原本的 N 次串行 POST /assets/:id/retire（100 项 100 RTT → 1 RTT）
+//   - 部分成功语义：succeeded 为成功 id 列表，failed 为 id → 失败文案；两者都是 200 正常响应
+//   - 审计由 AuditLog 中间件按**请求**落一行（Path=/api/assets/bulk-retire 即 bulk 动作标记），
+//     不会按 id 拆成 N 行 —— 这正是批量端点相对 N 次单条调用在审计侧的意义。
+func (h *AssetHandler) BulkRetireAssets(c *gin.Context) {
+	var req struct {
+		IDs    []string `json:"ids"`
+		Reason string   `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.IDs) == 0 {
+		apierr.BadRequest(c, "ids 不能为空")
+		return
+	}
+	// 上限对齐 /alerts/bulk-*：单次批量防 DoS。
+	if len(req.IDs) > maxBulkRetireIDs {
+		apierr.BadRequest(c, "单次批量最多 1000 条")
+		return
+	}
+	userID, err := uuid.Parse(c.GetString("user_id"))
+	if err != nil {
+		apierr.Unauthorized(c, "无效的用户凭证")
+		return
+	}
+	succeeded, failed, err := h.svc.BulkRetire(c.Request.Context(), req.IDs, req.Reason, userID)
+	if err != nil {
+		apierr.Internal(c, "批量退役失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"succeeded": succeeded,
+			"failed":    failed,
 		},
 	})
 }

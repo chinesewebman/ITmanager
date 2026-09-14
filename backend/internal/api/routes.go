@@ -298,6 +298,10 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 					middleware.RateLimit(middleware.DefaultRateLimitConfig(10)),
 					assetH.ExportAssets)
 				assets.GET("/:id", assetH.GetAsset)
+				// M58: 批量退役 — 静态段必须早于 /:id（同 /export 的理由），
+				// 否则 POST /assets/bulk-retire 会被 /assets/:id/retire 当成 id="bulk-retire"。
+				// 单请求替代前端原本的 N 次串行 POST /assets/:id/retire。
+				assets.POST("/bulk-retire", canWrite, assetH.BulkRetireAssets)
 				assets.POST("", canWrite, assetH.CreateAsset)
 				assets.PUT("/:id", canWrite, assetH.UpdateAsset)
 				assets.DELETE("/:id", canManage, assetH.DeleteAsset) // 硬删不可逆
