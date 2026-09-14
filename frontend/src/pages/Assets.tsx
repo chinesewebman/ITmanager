@@ -371,7 +371,8 @@ function Assets() {
                   >
                     <Button
                       danger
-                      loading={bulkRetireMut.isPending}
+                      loading={bulkRetireMut.isPending || bulkRestoreMut.isPending}
+                      disabled={bulkRetireMut.isPending || bulkRestoreMut.isPending}
                       data-testid="asset-bulk-retire"
                     >
                       批量退役
@@ -384,7 +385,11 @@ function Assets() {
                       cancelText="取消"
                       onConfirm={() => bulkRestoreMut.mutate(selectedRowKeys)}
                     >
-                      <Button loading={bulkRestoreMut.isPending} data-testid="asset-bulk-restore">
+                      <Button
+                        loading={bulkRetireMut.isPending || bulkRestoreMut.isPending}
+                        disabled={bulkRetireMut.isPending || bulkRestoreMut.isPending}
+                        data-testid="asset-bulk-restore"
+                      >
                         批量恢复
                       </Button>
                     </Popconfirm>
@@ -392,6 +397,7 @@ function Assets() {
                   <Button
                     type="link"
                     onClick={() => setSelectedRowKeys([])}
+                    disabled={bulkRetireMut.isPending || bulkRestoreMut.isPending}
                     data-testid="asset-bulk-clear"
                   >
                     清空选择

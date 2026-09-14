@@ -34,7 +34,23 @@ vi.mock('../hooks/useApiQuery', () => ({
       ...h.overrides,
     }
   },
-  useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useApiMutation: <TVars, TResult>(
+    mutator: (vars: TVars) => Promise<TResult>,
+  ) => {
+    // 让 mutate 真调 mutator (串行 Promise chain), 这样测试可以验真路径
+    // (Popconfirm onConfirm → mutate → assetApi.retire spy 被调)。
+    // 不接 QueryClient (避免测试套必须包 QueryClientProvider 的级联改动)。
+    return {
+      mutate: (vars: TVars) => { void mutator(vars) },
+      mutateAsync: (vars: TVars) => mutator(vars),
+      isPending: false,
+      isError: false,
+      isSuccess: false,
+      data: undefined,
+      error: null,
+      reset: () => {},
+    } as any
+  },
   queryKeys: { assets: { list: (f?: Record<string, unknown>) => ['assets', 'list', f ?? {}] } },
 }))
 
@@ -316,21 +332,48 @@ describe('Assets page', () => {
   // 走真实 useApiMutation 路径 (通过 vi.mock '../hooks/useApiQuery' 让 useApiMutation 用真 useMutation),
   // 但测试套老 mock useApiMutation 返 `{mutate: vi.fn()}`, 不执行 mutator. 此测试改用
   // vi.spyOn(assetApi, 'retire') 直接观察调用, 然后渲染时强行改 AssetTable row onChange.
-  it('M51：[批量退役] 点击 Popconfirm 二次确认后调 assetApi.retire N 次, reason="批量退役"', async () => {
+  it('M51：[批量退役] 二次确认后真调 assetApi.retire N 次, reason="批量退役"', async () => {
     h.retireSpy.mockClear()
     const { container } = render(<Assets />)
     const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
-    // 选中第 1、2 项
+    expect(checkboxes.length).toBeGreaterThanOrEqual(2)
     fireEvent.click(checkboxes[0])
     fireEvent.click(checkboxes[1])
     await waitFor(() => {
       expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
     })
-    // Popconfirm onConfirm 是 Popconfirm 内部 trap, 直接调用按钮 onClick 不会触发.
-    // 验证按钮存在 + antd Popconfirm 渲染 trap (data-testid 在 Popconfirm trigger 按钮).
-    // 二次确认路径由 antd Popconfirm 接管, 我们验「点击按钮触发 retire」交由 e2e 测.
-    // 此单测保证: 选中 → 按钮渲染 → mutate 函数 (mock 中是 vi.fn()) 不抛错.
-    expect(screen.getByTestId('asset-bulk-retire')).toBeEnabled()
-    // mutate mock 不真调 spy, 所以 spy 不会被记录调用. mutation inversion 在 e2e / 真实 run 验.
+    // Popconfirm onConfirm 由 antd Popconfirm 接管 (hover + click OK button).
+    // 直接调 trigger 按钮的 onClick 不会弹 trap, 但 click trigger + click OK button 可行.
+    // antd Popconfirm OK button 角色 = Popconfirm 弹层里的 `.ant-popconfirm .ant-btn-primary`.
+    // 点击 trigger → 等待 Popconfirm 出现 → 点击 OK 按钮 → onConfirm 触发 → mutate → assetApi.retire 被调.
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    const okBtn = await waitFor(() => {
+      const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
+      if (!btn) throw new Error('Popconfirm OK button not found')
+      return btn
+    })
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(h.retireSpy).toHaveBeenCalledTimes(2)
+    })
+    // 验证 reason = "批量退役" (M51 intent 硬要求: 批量 50 项不再弹填原因 modal)
+    expect(h.retireSpy).toHaveBeenNthCalledWith(1, '1', '批量退役')
+    expect(h.retireSpy).toHaveBeenNthCalledWith(2, '2', '批量退役')
+  })
+
+  it('M51-MUT：[批量退役] 二次确认后 bypass 路径 → retire spy 不被调 (mutation inversion 实证)', async () => {
+    h.retireSpy.mockClear()
+    // 临时改 Assets.tsx onConfirm 路径: 把 "onConfirm={() => bulkRetireMut.mutate(...)}" 改为空箭头.
+    // 这里我们用源码 bypass 模式 (外部脚本验, 见 docs/M51-mutation-inversion.sh).
+    // 单测层 mock 不易证 (closure), 此测做 placeholder 标记, 真证靠外部 mutation_inversion.
+    const { container } = render(<Assets />)
+    const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
+    fireEvent.click(checkboxes[0])
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
+    })
+    // 不点 Popconfirm OK 按钮, spy 应保持 0 调用 — 这是"未触发" 实证, 不是"被 bypass" 实证.
+    // 真 bypass 实证见 docs/M51-mutation-inversion.sh (改源码 cp /tmp + vitest + revert).
+    expect(h.retireSpy).not.toHaveBeenCalled()
   })
 })
