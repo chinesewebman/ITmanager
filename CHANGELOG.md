@@ -323,6 +323,39 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M52 — G-UI-AssetFilter AssetFilterBar 加 status 下拉（2026-09-14）
+
+**摩擦**: T99 B3 — AssetFilterBar 只有 keyword + assetType, 后端 AssetFilter.Status 字段已 ship 但前端无 status 筛选入口, 用户想"看哪些资产 offline"必须滚页肉眼找.
+
+**改动** (frontend-only, 3 files, +102/-5 LOC):
+- `frontend/src/components/AssetFilterBar.tsx`:
+  - `AssetFilterValues.status: string` (新增字段)
+  - `statusOptions?: { value, label }[]` (新 prop, 父传, 不传则不渲染 status Select)
+  - 新增 status Select (allowClear / placeholder="状态")
+- `frontend/src/pages/Assets.tsx`:
+  - `STATUS_OPTIONS` (active/在线, offline/离线, maintenance/维护, retired/已退役) — 跟 StatusTag.tsx 同一值域
+  - `filter` state 加 `status: ''`
+  - `assetApi.list` 调用传 `status: filter.status || undefined` (后端契约)
+  - `<AssetFilterBar>` 传 `statusOptions={STATUS_OPTIONS}`
+  - `hasFilter` 判定加 status 字段 (副标题"已筛选"逻辑)
+- `frontend/src/pages/Assets.test.tsx`: 3 新测试
+  1. status Select 渲染 (`.ant-select-selection-placeholder` 含"状态")
+  2. 选 status=active → queryKey 含 `status='active'`, page 重置回 1
+  3. 选 status=retired → queryKey 含 `status='retired'`, 副标题出现"已筛选"
+
+**Mutation inversion 实证**: bypass `status:` in queryKey (`status: undefined as unknown as string`) → 2/3 FAIL ✓ (不是"placeholder 错误", 是真触发"用户改了 status 但 queryKey 没带"这条路径)
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- `npx vitest run src/pages/Assets.test.tsx src/components/AssetTable.memo.test.tsx`: 23/23 PASS (19 老 + 3 新 + 1 memo)
+- 全 frontend `npx vitest run`: **42 files / 369 tests PASS** (基线 362 + 3 M52 + 4 真 mutation / 实证相关, 无 FAIL)
+- backend `go test -count=1 ./...`: 27 packages ok
+- 双轨分析 (graphify update + diagnose + codegraph index + callers + path) — M52 互不污染
+
+**Out of scope** (留 future round):
+- 机房 (site_id) / 机柜 (rack_name) / 时间范围 — 后端无字段, 需 backend round
+- 保存筛选为视图 / URL 同步 — 留 future
+
 ### M51 — G-UI-BulkAssets 资产批量操作（2026-09-14）
 
 **改了什么（frontend-only，后端零改动）：**
