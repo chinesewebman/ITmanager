@@ -5,7 +5,7 @@ import { PageHeader } from '../components/PageHeader'
 import { ErrorState } from '../components/ErrorState'
 import { TicketTable, type Ticket } from '../components/TicketTable'
 import { TicketFormModal, type TicketFormValues } from '../components/TicketFormModal'
-import { TicketDetailModal } from '../components/TicketDetailModal'
+import { TicketDetailModal, type TicketPanel } from '../components/TicketDetailModal'
 import { TicketStatsCards, type TicketStats } from '../components/TicketStatsCards'
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
 import { useState, useMemo } from 'react'
@@ -49,6 +49,8 @@ function Tickets() {
   const [priorityFilter, setPriorityFilter] = useState<string>('')
   const [createOpen, setCreateOpen] = useState(false)
   const [viewTicket, setViewTicket] = useState<Ticket | null>(null)
+  // M50：从表格 [更多操作] 进来时要展开哪块面板（改派/改优先级）。null = 只是看票。
+  const [viewPanel, setViewPanel] = useState<TicketPanel | null>(null)
   // M3/P5：服务端分页——page/pageSize 由父组件持有；筛选变化时重置回第 1 页
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -106,6 +108,16 @@ function Tickets() {
   const total = data?.total ?? 0
   // M10：副标题原本用未过滤总数，与表格行数不符
   const hasFilter = Boolean(statusFilter || priorityFilter)
+
+  /**
+   * 打开票面。[更多操作] 的四个入口都走这里 —— 写入动作收在 TicketDetailModal 内部
+   * （后端只有一个写入口 PUT /tickets/:id），这一层只决定「打开哪张票、展开哪块面板」。
+   * 行内 [关单] 传 null：关单是 Popconfirm 二次确认的动作，不做成「行内一点即关」。
+   */
+  const openTicket = (ticket: Ticket, panel: TicketPanel | null) => {
+    setViewTicket(ticket)
+    setViewPanel(panel)
+  }
 
   return (
     <div>
@@ -176,7 +188,10 @@ function Tickets() {
             page={page}
             pageSize={pageSize}
             onPageChange={(p, ps) => { setPage(p); setPageSize(ps) }}
-            onView={setViewTicket}
+            onView={(t) => openTicket(t, null)}
+            onAssign={(t) => openTicket(t, 'assign')}
+            onChangePriority={(t) => openTicket(t, 'priority')}
+            onClose={(t) => openTicket(t, null)}
           />
         </>
       )}
@@ -187,7 +202,11 @@ function Tickets() {
         onCancel={() => setCreateOpen(false)}
         onSubmit={(v) => createMut.mutate(v)}
       />
-      <TicketDetailModal ticket={viewTicket} onClose={() => setViewTicket(null)} />
+      <TicketDetailModal
+        ticket={viewTicket}
+        initialAction={viewPanel}
+        onClose={() => { setViewTicket(null); setViewPanel(null) }}
+      />
     </div>
   )
 }
