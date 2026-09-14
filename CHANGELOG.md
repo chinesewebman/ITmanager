@@ -323,6 +323,116 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M61 — G-User-AdminManagement 用户管理（admin 端启用/禁用/改角色）（2026-09-15）
+
+**G-4 摩擦（AUTHZ-CLOSURE §2 D-A 登记的那条）**: `users.status` / `users.role` 只能改库 ——
+`/users` **只有 GET**（`routes.go` 的 users 组）、`UserService` 只有 `List`/`Get`、
+前端 `userApi` 只有 `list`/`get`、全站没有任何用户管理页。后果是**离职员工的账号禁不掉**：
+JWT 拿到手就能用满 24h（G-5 的 M40 修复把「禁用即失效」做进了鉴权侧，但没人能触发禁用）；
+角色调整只有 `cmd/set-role` 这条直连 DB 的路径。
+
+**改动** (backend 5 files + frontend 7 files，commit `4d7092c` → `1c85490` → `5012582` → `4a7f407` → `969db3e` → `5249fd9`):
+
+- **`backend/internal/service/user_service.go`**: 新增 `Update(ctx, id, UpdateUserInput, actor)` /
+  `UpdateStatus` / `UpdateRole`。`UpdateUserInput` 三个字段全是**指针**（nil = 本次不动该列：
+  `false` 与「未提供」必须可区分，否则永远关不掉强制改密）。`Update` 先校验后进事务，
+  守卫与写入在**同一事务**内、旧值用 `FOR UPDATE` 持锁读 —— 两道守卫都是读-判-写：
+  - **v-1 自我禁用 / 自我降级**：identity 路由只有 admin 进得来，admin 点错一次就把自己锁在
+    门外，自助恢复路径不存在（只能进库改）。
+  - **v-2 最后一名可登录的管理员**：判定是「更新后的角色/状态」，且只数 `status='active'` 的
+    admin —— 已被禁用的 admin **登不进来**，不算「能自救的那个人」（漏这个条件会让守卫在
+    最需要它的场景静默失效）。
+  - `role` 先走 `middleware.CanonicalRole` 折叠遗留别名（`operator`→`ops_user`、
+    `viewer`→`readonly`）再按权威词表校验：直接存原始串会让 `role == "ops_user"` 这类字面量
+    比较静默失配（S-1a 同族）。**落库的永远是词表值。**
+  - `status` 只收 `active` / `inactive`。**没有 `locked`** —— 鉴权侧（`auth.go` 的 JWT 与
+    API Key 两条路径 + 登录 handler）只拦 `inactive`，写 `locked` 不拦住任何请求（真正的锁定走
+    `locked_until`），收它等于给管理员一个静默无效的开关。
+  - 新增哨兵 `ErrForbidden`（`asset_service.go` 的错误块）：请求合法、调用方也有权限，但
+    **服务端策略**不允许 → 403。与 `ErrInvalidInput`（400）分开的判据是「调用方该做什么」：
+    自我禁用改参数重试无用，报 400 会让人去改请求体。
+- **`backend/internal/api/handlers/user_handler.go`**: 新增 `UpdateUser`（PUT）/`UpdateUserStatus`
+  （PATCH .../status）/`UpdateUserRole`（PATCH .../role），共用 `writeUser` 收口
+  （404/400/403/500 分类）与 `userPathID`（`:id` 必须是 UUID —— 裸串进 UUID 列比较会 PG 22P02
+  被报成 500，同 `alertPathID` 的口径）。请求体走**严格解码**
+  （`DisallowUnknownFields` + 尾随内容检查）：`ShouldBindJSON` 静默忽略未知键，写
+  `{"email": …}` 会拿到 200 而邮箱一字未改（「写了不生效」的静默失败，工单 M17 同口径）。
+  空 `{}` 返 400（不是「改了零个字段」）。400 文案静态，不回显调用方可控的字段名。
+  **不做 DELETE**：账号走 `status=inactive`，硬删会让 `audit_logs` 里的操作人再也查不到是谁。
+- **`backend/internal/api/routes.go`**: 三条写端点挂 `canIdentity` **+ `RejectAPIKeyAuth`** ——
+  长期凭据不得改账号：admin 名下 write scope 的 Key 原本能把任意账号提成 admin（权限持久化，
+  吊销 Key 撤不掉）或禁用掉真正的管理员（自锁），与 `/auth/api-keys`、通知渠道、集成 PUT 同源
+  （`FIX-PLAN-AUTHZ-LEFTOVER.md` S-2 同族）。
+- **`backend/internal/middleware/audit.go`**: 默认 `ActionFunc` 改为「context 键 `audit_action`
+  优先，回落 HTTP method」；`Action` 字段补 `sanitizeField(50)`（handler 可覆盖它，而此前那条
+  路径进来的字符串完全不截断 → 超宽即 22001 → **整行**审计丢失，G-44 同族）。三个 handler 各自
+  `c.Set("audit_action", "update_user_status" | "update_user_role" | "update_user")`，
+  于是审计页的「动作」列能读出改的是状态还是角色（默认取 HTTP method 会让三条全变成 PATCH/PUT）；
+  单个 `c.Set` 而不给每条路由单独挂 `AuditLog` 实例 —— 后者会让每个请求**写两行**审计。
+- **`backend/internal/api/openapi.yaml`**: 新增 `/users/{id}` 的 `put`（`updateUser`）与
+  `/users/{id}/status`、`/users/{id}/role` 两条 path + `UserUpdateRequest` schema；
+  `User` 补 `status`（enum 三值，如实描述库列无 CHECK）/`last_login`。
+  **顺带修正既存漂移**：`UserList.data` 原声明成裸数组，而 handler 返回
+  `{items, total, page, page_size}`（M61 的页面是这个信封的第一个真实消费者，照错的契约写
+  消费方就是制造下一个缺陷）。`gen:api` 重生成随提交（CI 有漂移门禁）。
+- **`backend/internal/api/routes_integration_test.go`**: `gatedRoutes` 登记三条（矩阵/路由分类
+  门禁会红在「未分类」上）+ 11 条 M61 用例。
+- **`frontend/src/services/api.ts`**: `userApi.update` / `updateStatus` / `updateRole` +
+  `UserStatus` / `ASSIGNABLE_ROLES` 词表。三条写端点逐字段显式传（严格请求体不能透传整行）。
+- **新增 `frontend/src/pages/Users.tsx`**: PageHeader + Table（用户名/昵称/邮箱/角色 Select/
+  状态 Switch + Popconfirm/最后登录/操作）。**乐观更新 + 失败回滚**：按字段记 override，
+  失败恢复「这次改动前」的值（不是无脑清空 —— 行上可能还有上一笔已成功但列表尚未重取的改动）；
+  成功以**服务端回执**校正乐观值并 invalidate 列表。403/400 显示**服务端原因**（
+  「不能禁用自己的账号」比拦截器的通用「没有权限访问」更能说清为什么）。词表外的存量角色
+  出现在选项里且禁用（不假装它是可选项）；`locked` 等状态值只展示不假装可切。
+  **不做删除**；**不做创建账号**（后端没有 `POST /users`，点了没反应的按钮正是 B1-1 那类缺陷）；
+  「强制改密」按钮走 PUT 的 `must_change_password` —— **不叫**「重置密码」，因为全仓没有
+  「admin 给他人设新密码」的端点，按做不到的名字做按钮就是骗运维。
+- **`frontend/src/App.tsx`**: 菜单抽成导出的纯函数 `buildMenuItems(hasIdentity)`，`/users` 入口
+  按 `/auth/me` 下发的 `capabilities` 是否含 `identity` 条件渲染（**不**比较 role 字面量、
+  不复制角色→能力矩阵 —— `roles.go` 明确警告过漂移）；取不到即不显示（fail-closed）。
+  注册 `/users` 路由（路由本身不做前端门禁：非 admin 手输会看到 403 错误态，比静默跳回首页
+  更让人理解发生了什么）。`AppBreadcrumb` 认 `/users`。
+
+**Hard pass**:
+
+- backend `go test -count=1 ./...`: **27 packages ok**（0 fail，与 M60 同基线）✓
+- backend `gofmt -l internal cmd`: 仅 3 个 **M61 未触碰**的既存文件（`database/gorm_logger_redact.go`、
+  `middleware/auth_status_cache.go`、`notification/sender.go`）；M61 改动的 5 个 Go 文件全部干净 ✓
+- backend `go vet ./...`: 干净 ✓
+- frontend `npx tsc --noEmit`: **0 error** ✓
+- frontend `npm run lint`（全量，`--max-warnings 0`）: 干净 ✓
+- frontend `src/pages/Users.test.tsx`: **14 tests PASS**（M61 新增）✓
+- frontend `src/App.menu.test.tsx`: **5 tests PASS**（M61 新增）✓
+- frontend 全量 `npx vitest run`: **44 files / 428 tests PASS**（M60 基线 42/409 → +2 文件 +19 测试，零退化）✓
+- **mutation inversion 实证（5 处，全部红在断言上）**:
+  ① 短路自我守卫（`self := false`）→ `TestUserService_Update_自我禁用返回ErrForbidden` /
+  `_自我降级admin返回ErrForbidden` / `_还有另一名启用admin时可禁用` FAIL + 集成
+  `TestRoutes_用户处置_自我禁用返403` FAIL；
+  ② 守卫的 count 去掉 `AND status='active'` → `TestUserService_Update_被禁用的管理员不算能自救` FAIL；
+  ③ `Update` 去掉 `CanonicalRole` 折叠 → `_role首尾空白与大小写归一` / `_role遗留别名折叠后才落库` FAIL；
+  ④ 前端 bypass `statusMut.mutate`（只改本地状态）→ `禁用账号…PATCH /users/:id/status` FAIL；
+  ⑤ 全部还原后逐个复跑全绿 ✓
+- 双轨分析: graphify + codegraph，见 `M61-graph-analysis.md` ✓
+
+**行为突变告知（运维需知）**:
+
+- **管理员现在能被 UI 禁用**了 —— 这是本功能的目的，但由此**两个 admin 互禁**是可能的（守卫只拦
+  「最后一个可登录的 admin」）。两个 admin 互相禁用需要两次操作、第二次会被守卫挡下；若确实
+  需要「全锁死」的运维动作，走 `cmd/set-role` 直连 DB。
+- **禁用最长 30s 生效**（`middleware/auth_status_cache.go` 的 per-process TTL 取舍，M40 已记）：
+  多副本部署下每个副本各自到期。UI 的确认文案如实写了这一点。
+- **`PUT /users/:id` 是严格请求体**：多传一个字段即 400（此前没有任何写端点，故非兼容性问题）。
+
+**未随本轮落地（留 future round，逐项有理由）**:
+
+- **创建账号**：后端没有 `POST /users`（账号由 `admin-bootstrap` / `seed` 建），页面不放假按钮。
+- **admin 给他人设新密码**（真正的「重置密码」）：需要新端点 + 复杂度/审计设计，M49 的强改密流程
+  已覆盖「让本人改」这条路径。
+- **批量禁用**：单账号处置已够用；批量需要部分成功语义与逐条审计（同 M58 的设计面）。
+- **PII 脱敏**：不做硬删就需要「离职后邮箱/手机脱敏」这条独立设计（TODO 已登记）。
+- **部门树管理**：`User.DepartmentID` 一直在，但 department API 不存在，属另一件事。
+
 ### M60 — G-Utils-ValidatorsShared + G-BE-HttpsWhitelist（T-56 / T-71 结案）（2026-09-15）
 
 **两项 M59 留的技术债**:
