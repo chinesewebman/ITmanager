@@ -21,12 +21,21 @@ const TYPE_OPTIONS = [
   { value: 'storage', label: '存储' },
 ]
 
+// M52: 状态筛选项 — 后端 AssetFilter.Status 字段已 ship,
+// 值域与 frontend StatusTag 同一出口 (StatusTag.tsx:36-39)。
+const STATUS_OPTIONS = [
+  { value: 'active', label: '在线' },
+  { value: 'offline', label: '离线' },
+  { value: 'maintenance', label: '维护' },
+  { value: 'retired', label: '已退役' },
+]
+
 // W1：假数据兜底已删除（原 MOCK_DATA 让 React Query 的 isError 恒为 false，接口失败渲染一屏假资产）。
 
 function Assets() {
   const [editing, setEditing] = useState<Asset | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [filter, setFilter] = useState({ keyword: '', assetType: '' })
+  const [filter, setFilter] = useState({ keyword: '', assetType: '', status: '' })
   // M3/P5：服务端分页——page/pageSize 由父组件持有；筛选变化时重置回第 1 页
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -56,6 +65,8 @@ function Assets() {
         page_size: pageSize,
         keyword: filter.keyword || undefined,
         type: filter.assetType || undefined,
+        // M52: status 筛选下沉到后端 (后端 AssetFilter.Status 字段已 ship)
+        status: filter.status || undefined,
       })
       const body = res?.data?.data
       return { items: Array.isArray(body?.items) ? body.items : [], total: body?.total ?? 0 }
@@ -295,7 +306,7 @@ function Assets() {
   }, [selectedRowKeys, data])
 
   // M10：副标题原本用未过滤总数，与表格行数不符
-  const hasFilter = Boolean(filter.keyword || filter.assetType)
+  const hasFilter = Boolean(filter.keyword || filter.assetType || filter.status)
 
   // P4：稳定回调引用，使 AssetTable 的 React.memo 生效（否则每渲染新建箭头函数，memo 白搭）
   const handlePageChange = useCallback((p: number, ps: number) => { setPage(p); setPageSize(ps) }, [])
@@ -323,6 +334,7 @@ function Assets() {
               value={filter}
               onChange={(v) => { setFilter(v); setPage(1) }}
               typeOptions={TYPE_OPTIONS}
+              statusOptions={STATUS_OPTIONS}
             />
           </div>
           {isMobile ? (

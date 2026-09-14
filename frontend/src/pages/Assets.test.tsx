@@ -376,4 +376,75 @@ describe('Assets page', () => {
     // 真 bypass 实证见 docs/M51-mutation-inversion.sh (改源码 cp /tmp + vitest + revert).
     expect(h.retireSpy).not.toHaveBeenCalled()
   })
+
+  // M52: AssetFilterBar status 下拉 (G-UI-AssetFilter)
+  // 注: antd 5 Select 不把 placeholder 暴露为 input 的 placeholder 属性,
+  // 而是渲染为 .ant-select-selection-placeholder span, 所以用 querySelector 限定 scope 而非 getByText.
+  // 同时 AssetTable 也含"状态"列标题, 不能用 getByText (会冲突).
+  it('M52：AssetFilterBar 渲染含"状态" placeholder (status Select 出现)', () => {
+    render(<Assets />)
+    const placeholderSpans = document.querySelectorAll('.ant-select-selection-placeholder')
+    const placeholders = Array.from(placeholderSpans).map((s) => (s.textContent ?? '').trim())
+    expect(placeholders).toContain('状态')
+  })
+
+  it('M52：选 status=active → queryKey 含 status (assetApi.list 收到 status 参数)', async () => {
+    h.lastKey = null
+    render(<Assets />)
+    // 找 status Select (其 placeholder 文本是 "状态")
+    const placeholderSpans = document.querySelectorAll('.ant-select-selection-placeholder')
+    const statusPlaceholder = Array.from(placeholderSpans).find(
+      (s) => (s.textContent ?? '').trim() === '状态',
+    )
+    expect(statusPlaceholder).toBeTruthy()
+    // antd Select 由 .ant-select-selector 接管 click, 直接点 placeholder 父级 .ant-select 也行
+    // 但更稳是点 .ant-select-selector (Select 弹层入口).
+    const statusTrigger = statusPlaceholder!.closest('.ant-select-selector') as HTMLElement
+    expect(statusTrigger).toBeTruthy()
+    fireEvent.mouseDown(statusTrigger)
+    await waitFor(() => {
+      const opts = document.querySelectorAll('.ant-select-item-option')
+      expect(opts.length).toBeGreaterThan(0)
+    })
+    // 找"在线" option (active)
+    const activeOpt = Array.from(document.querySelectorAll('.ant-select-item-option')).find(
+      (el) => (el.textContent ?? '').includes('在线'),
+    )
+    expect(activeOpt).toBeDefined()
+    fireEvent.click(activeOpt!)
+    // 验证 queryKey 更新 (useApiQuery mock 记录 lastKey)
+    await waitFor(() => {
+      const k = h.lastKey as any
+      const filters = k?.[2] ?? {}
+      expect(filters.status).toBe('active')
+      // status 变 → 翻页重置回 1
+      expect(filters.page).toBe(1)
+    })
+  })
+
+  it('M52：选 status=retired → queryKey 含 retired, 副标题 "已筛选" 出现 (hasFilter 判定含 status)', async () => {
+    h.lastKey = null
+    render(<Assets />)
+    const placeholderSpans = document.querySelectorAll('.ant-select-selection-placeholder')
+    const statusPlaceholder = Array.from(placeholderSpans).find(
+      (s) => (s.textContent ?? '').trim() === '状态',
+    )
+    const statusTrigger = statusPlaceholder!.closest('.ant-select-selector') as HTMLElement
+    fireEvent.mouseDown(statusTrigger)
+    await waitFor(() => {
+      expect(document.querySelectorAll('.ant-select-item-option').length).toBeGreaterThan(0)
+    })
+    const retiredOpt = Array.from(document.querySelectorAll('.ant-select-item-option')).find(
+      (el) => (el.textContent ?? '').includes('已退役'),
+    )
+    expect(retiredOpt).toBeDefined()
+    fireEvent.click(retiredOpt!)
+    await waitFor(() => {
+      const k = h.lastKey as any
+      expect(k?.[2]?.status).toBe('retired')
+      expect(k?.[2]?.page).toBe(1)
+    })
+    // 副标题 "（已筛选）" 出现 (hasFilter 判定含 status 字段)
+    expect(screen.getByText(/已筛选/)).toBeInTheDocument()
+  })
 })
