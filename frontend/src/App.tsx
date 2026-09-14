@@ -45,6 +45,7 @@ const Topology = lazy(() => import("./pages/Topology"));
 const Oncall = lazy(() => import("./pages/Oncall"));
 const Runbook = lazy(() => import("./pages/Runbook"));
 const MetricSnapshot = lazy(() => import("./pages/MetricSnapshot"));
+const Audit = lazy(() => import("./pages/Audit"));
 import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
 // C7: 改密页 — 跟 Login 一样不走 AppLayout (无侧边栏, 满屏卡片)
 import ChangePassword from "./pages/ChangePassword";
@@ -314,6 +315,14 @@ function AppLayout() {
                   element={
                     <ErrorBoundary pageName="系统设置">
                       <Settings />
+                    </ErrorBoundary>
+                  }
+                />
+                <Route
+                  path="/audit"
+                  element={
+                    <ErrorBoundary pageName="审计日志">
+                      <Audit />
                     </ErrorBoundary>
                   }
                 />

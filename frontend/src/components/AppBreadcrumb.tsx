@@ -39,6 +39,8 @@ const TOP_LABELS: Record<string, string> = {
   '/metric-snapshots': '指标快照',
   '/tickets': '工单管理',
   '/settings': '系统设置',
+  // M49：审计页由 Settings「管理」区链接进入（不在侧边栏），但面包屑要认得它
+  '/audit': '审计日志',
 }
 
 const TOP_ORDER: Array<{ path: string; label: string }> = [
