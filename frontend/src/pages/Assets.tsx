@@ -1,5 +1,5 @@
 import { useApiMutation, useApiQuery, queryKeys } from '../hooks/useApiQuery'
-import { Alert, Button, Form, Input, message, Modal, Table, Tag } from 'antd'
+import { Alert, Button, Form, Input, message, Modal, Popconfirm, Table, Tag } from 'antd'
 import { SyncOutlined, ApiOutlined, AimOutlined } from '@ant-design/icons'
 import { assetApi, diagnosticApi, postmortemApi, type PingResult, type TracerouteResult, type TracerouteHop } from '../services/api'
 import { AssetTable, type Asset } from '../components/AssetTable'
@@ -9,7 +9,7 @@ import { useResponsiveTable, MobileCardList } from '../hooks/useResponsiveTable'
 import { AssetFilterBar } from '../components/AssetFilterBar'
 import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // 资产类型筛选项
@@ -66,6 +66,8 @@ function Assets() {
   const [retireModal, setRetireModal] = useState<{ open: boolean; asset: Asset | null }>({ open: false, asset: null })
   const [retireForm] = Form.useForm<{ reason: string }>()
   const [retireSubmitting, setRetireSubmitting] = useState(false)
+  // M51: 批量操作状态 (G-UI-BulkAssets)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   // 写操作：创建/更新/删除统一 invalidate 列表
   const createMut = useApiMutation((v: AssetFormValues) => assetApi.create(v), {
@@ -233,6 +235,65 @@ function Assets() {
     })
   }, [refetch])
 
+  // M51: 批量退役/恢复 (G-UI-BulkAssets)
+  // 仅当前页数据可见 → 批量只影响当前已选行; preserveSelectedRowKeys 让翻页不丢选中。
+  // 原因填「批量退役 / 批量恢复」单值, 不弹 modal (批量 50 项挨个弹不可用)。
+  // 列表刷新用 refetch() (跟 create/update 同模式), 避免引入 useQueryClient → 测试套
+  // 必须套 QueryClientProvider wrapper 的级联改动。
+  const bulkRetireMut = useApiMutation(
+    async (ids: React.Key[]) => {
+      const failed: string[] = []
+      for (const id of ids) {
+        try {
+          await assetApi.retire(String(id), '批量退役')
+        } catch {
+          failed.push(String(id))
+        }
+      }
+      if (failed.length) throw new Error(`failed ${failed.length}/${ids.length}`)
+      return { ok: ids.length, failed }
+    },
+    {
+      onSuccess: ({ ok }) => {
+        message.success(`批量退役成功 ${ok} 项`)
+        setSelectedRowKeys([])
+        refetch()
+      },
+      onError: (e: any) => message.error(`批量退役失败：${e?.message || '未知错误'}`),
+    },
+  )
+  const bulkRestoreMut = useApiMutation(
+    async (ids: React.Key[]) => {
+      const failed: string[] = []
+      for (const id of ids) {
+        try {
+          await assetApi.restore(String(id))
+        } catch {
+          failed.push(String(id))
+        }
+      }
+      if (failed.length) throw new Error(`failed ${failed.length}/${ids.length}`)
+      return { ok: ids.length }
+    },
+    {
+      onSuccess: ({ ok }) => {
+        message.success(`批量恢复成功 ${ok} 项`)
+        setSelectedRowKeys([])
+        refetch()
+      },
+      onError: (e: any) => message.error(`批量恢复失败：${e?.message || '未知错误'}`),
+    },
+  )
+  // 当前选中项里至少有一个 retired 才显示「批量恢复」
+  const selectedHasRetired = useMemo(() => {
+    if (!selectedRowKeys.length || !data?.items) return false
+    const items = data.items
+    return selectedRowKeys.some((k) => {
+      const a = items.find((x) => x.id === String(k))
+      return a?.status === 'retired'
+    })
+  }, [selectedRowKeys, data])
+
   // M10：副标题原本用未过滤总数，与表格行数不符
   const hasFilter = Boolean(filter.keyword || filter.assetType)
 
@@ -285,6 +346,58 @@ function Assets() {
               )}
             />
           ) : (
+            <>
+              {selectedRowKeys.length > 0 && (
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: '8px 12px',
+                    background: 'var(--ant-color-fill-tertiary)',
+                    borderRadius: 4,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                  }}
+                  data-testid="asset-bulk-bar"
+                >
+                  <span>已选 <strong>{selectedRowKeys.length}</strong> 项</span>
+                  <Popconfirm
+                    title={`批量退役已选的 ${selectedRowKeys.length} 项？`}
+                    description="原因统一记为「批量退役」，不再弹窗填原因。"
+                    okText="确认"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => bulkRetireMut.mutate(selectedRowKeys)}
+                  >
+                    <Button
+                      danger
+                      loading={bulkRetireMut.isPending}
+                      data-testid="asset-bulk-retire"
+                    >
+                      批量退役
+                    </Button>
+                  </Popconfirm>
+                  {selectedHasRetired && (
+                    <Popconfirm
+                      title={`批量恢复已选的 ${selectedRowKeys.length} 项？`}
+                      okText="确认"
+                      cancelText="取消"
+                      onConfirm={() => bulkRestoreMut.mutate(selectedRowKeys)}
+                    >
+                      <Button loading={bulkRestoreMut.isPending} data-testid="asset-bulk-restore">
+                        批量恢复
+                      </Button>
+                    </Popconfirm>
+                  )}
+                  <Button
+                    type="link"
+                    onClick={() => setSelectedRowKeys([])}
+                    data-testid="asset-bulk-clear"
+                  >
+                    清空选择
+                  </Button>
+                </div>
+              )}
             <AssetTable
               data={items}
               loading={isLoading}
@@ -298,7 +411,13 @@ function Assets() {
               onPostmortem={handlePostmortem}
               onRetire={handleRetire}
               onRestore={handleRestore}
+              rowSelection={{
+                selectedRowKeys,
+                onChange: setSelectedRowKeys,
+                preserveSelectedRowKeys: true,
+              }}
             />
+            </>
           )}
         </>
       )}

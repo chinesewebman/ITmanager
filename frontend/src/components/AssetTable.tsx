@@ -55,6 +55,9 @@ export interface AssetTableProps {
   rowSelection?: {
     selectedRowKeys: React.Key[]
     onChange: (keys: React.Key[]) => void
+    // antd 原生字段透传 (preserveSelectedRowKeys 等); 用 [k: string]: any 让父组件
+    // 调用方自由传, AssetTable 内部再 spread 进 Table。
+    [key: string]: any
   }
   // M3/P5: 服务端分页受控。total 传入时启用受控分页（current/pageSize/onChange 由父组件持有），
   // 否则回落到 antd 内部分页（前端假分页，仅兼容旧调用方）。
