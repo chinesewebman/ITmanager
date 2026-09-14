@@ -197,8 +197,9 @@ func TestDashboardHandler_Trends_默认7天(t *testing.T) {
 // ==================== User Handler 测试 ====================
 
 type mockUserService struct {
-	listFunc func(ctx context.Context, page, pageSize int) ([]models.User, int64, error)
-	getFunc  func(ctx context.Context, id string) (*models.User, error)
+	listFunc   func(ctx context.Context, page, pageSize int) ([]models.User, int64, error)
+	getFunc    func(ctx context.Context, id string) (*models.User, error)
+	updateFunc func(ctx context.Context, id string, in service.UpdateUserInput, actor service.Actor) (*models.User, error)
 }
 
 func (m *mockUserService) List(ctx context.Context, page, pageSize int) ([]models.User, int64, error) {
@@ -212,6 +213,22 @@ func (m *mockUserService) Get(ctx context.Context, id string) (*models.User, err
 		return m.getFunc(ctx, id)
 	}
 	return nil, service.ErrNotFound
+}
+
+// M61：窄端点复用 Update 的实现（与 service.userService 同形），故 mock 只需记录
+// 收到的 UpdateUserInput —— 「UpdateStatus 精确只改 status」这条契约由 service 层
+// 单测钉住，这里只需保证 handler 把字段正确翻译过去。
+func (m *mockUserService) Update(ctx context.Context, id string, in service.UpdateUserInput, actor service.Actor) (*models.User, error) {
+	if m.updateFunc != nil {
+		return m.updateFunc(ctx, id, in, actor)
+	}
+	return nil, service.ErrNotFound
+}
+func (m *mockUserService) UpdateStatus(ctx context.Context, id, status string, actor service.Actor) (*models.User, error) {
+	return m.Update(ctx, id, service.UpdateUserInput{Status: &status}, actor)
+}
+func (m *mockUserService) UpdateRole(ctx context.Context, id, role string, actor service.Actor) (*models.User, error) {
+	return m.Update(ctx, id, service.UpdateUserInput{Role: &role}, actor)
 }
 
 func newUserTestRouter(svc service.UserService) *gin.Engine {

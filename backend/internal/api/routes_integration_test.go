@@ -706,6 +706,14 @@ var gatedRoutes = []struct {
 	// identity：用户与凭据（仅 admin）
 	{middleware.CapIdentity, http.MethodGet, "/api/users", false},
 	{middleware.CapIdentity, http.MethodGet, "/api/users/:id", false},
+	// M61 账号处置：启用/禁用、改角色、置强改密。三条都收在 identity（与读同一档：
+	// 「能看账号清单」与「能处置账号」是同一类权限，不分两档 —— 分开会让 admin 之外
+	// 出现一个「能禁用别人但不能列出账号」的角色，没有需求支撑）。
+	// 三条额外挂 RejectAPIKeyAuth，那是**认证方式**限制而非能力限制，矩阵测试看不见
+	//（它只发 JWT）—— 由 TestRoutes_APIKey不能处置账号 单独钉住。
+	{middleware.CapIdentity, http.MethodPut, "/api/users/:id", false},
+	{middleware.CapIdentity, http.MethodPatch, "/api/users/:id/status", false},
+	{middleware.CapIdentity, http.MethodPatch, "/api/users/:id/role", false},
 	{middleware.CapIdentity, http.MethodGet, "/api/auth/api-keys", false},
 	// 注：本表用随机 user_id（库里不存在），F-1 守卫会让 handler 返 404 ——
 	// 因此这里只证明「identity 门禁放行 admin」，**不**证明「admin 能铸造成功」。
@@ -1757,4 +1765,381 @@ func TestM32_列表500硬顶保留(t *testing.T) {
 	assert.EqualValues(t, 1001, resp.Data.Total)
 	// size 回显的是原始 query，既有语义不承诺被钳制 —— 钉住，免得将来被「顺手修正」
 	assert.Equal(t, 600, resp.Data.Size)
+}
+
+// ==================== M61 账号处置（G-4 摩擦） ====================
+//
+// 这一组在**路由层**验证：能力门禁（canIdentity）、认证方式限制（RejectAPIKeyAuth）、
+// 审计留痕（中间件按请求落一行，Action 取自 handler 放进 context 的业务动作名）、
+// 以及「禁用后 JWT 立即失效」这条**功能本身**的端到端效果。
+//
+// 业务规则（守卫 / 词表 / 部分更新语义）在 service 单测里验，这里不重复；
+// 这里验的是「接线对不对」：少了 canIdentity 就是越权，少了 RejectAPIKeyAuth
+// 就是长期凭据提权，漏了 c.Set("audit_action") 审计就退化成 PUT/PATCH 分不清。
+
+// seedUserForDispose 插一个可被处置的账号，返回 id。
+// must_change_password 显式为 0：默认值 TRUE 会让登录路径之外的断言带噪音。
+func seedUserForDispose(t *testing.T, username, role, status string) string {
+	t.Helper()
+	id := uuid.NewString()
+	require.NoError(t, database.GetDB().Exec(`INSERT INTO users
+		(id, username, password_hash, role, status, failed_login, must_change_password, created_at, updated_at)
+		VALUES (?, ?, 'x', ?, ?, 0, 0, datetime('now'), datetime('now'))`,
+		id, username, role, status).Error)
+	return id
+}
+
+// userRow 回库读一行（断言落库结果，不复用响应体）。
+func userRow(t *testing.T, id string) (role, status string) {
+	t.Helper()
+	var row struct {
+		Role   string
+		Status string
+	}
+	require.NoError(t, database.GetDB().Raw("SELECT role, status FROM users WHERE id = ?", id).Scan(&row).Error)
+	return row.Role, row.Status
+}
+
+// TestRoutes_用户处置_禁用与改角色_成功 端到端正控：admin 会话能禁用账号、能改角色，
+// 且两件事都留了审计（Action 是业务动作名，不是 PUT/PATCH）。
+func TestRoutes_用户处置_禁用与改角色_成功(t *testing.T) {
+	r := setupTestRouter(t)
+	db := database.GetDB()
+	adminID := seedUserForDispose(t, "dispose-admin", "admin", "active")
+	token := genTokenForUser(t, adminID, "admin")
+	// 第二个 admin：否则处置目标若不是 admin 不影响守卫，但把 adminID 自己卷进
+	// 「最后一名管理员」判定会让下面的断言依赖用例外的行数。多插一行隔离掉。
+	seedUserForDispose(t, "dispose-admin-2", "admin", "active")
+
+	target := seedUserForDispose(t, "leaver", "ops_user", "active")
+
+	// ① 禁用离职员工
+	w := doJSONAs(t, r, http.MethodPatch, "/api/users/"+target+"/status", token,
+		map[string]any{"status": "inactive"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	_, status := userRow(t, target)
+	assert.Equal(t, "inactive", status, "落库状态必须是 inactive（响应体不算证据）")
+
+	// ② 改角色（含遗留别名折叠：operator 必须落成 ops_user）
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+target+"/role", token,
+		map[string]any{"role": "operator"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	role, _ := userRow(t, target)
+	assert.Equal(t, "ops_user", role, "遗留别名必须在写入前折叠（S-1a 同族）")
+
+	// ③ PUT 局部更新：只给 must_change_password，不得顺带改写刚设好的 role/status
+	w = doJSONAs(t, r, http.MethodPut, "/api/users/"+target, token,
+		map[string]any{"must_change_password": true})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	role, status = userRow(t, target)
+	assert.Equal(t, "ops_user", role, "未在请求里出现的列不得被改写")
+	assert.Equal(t, "inactive", status, "未在请求里出现的列不得被改写")
+
+	// ④ 三条请求各留一行审计，Action 是业务动作名，resource_id 指向被处置的账号
+	var logs []models.AuditLog
+	require.NoError(t, db.Where("path LIKE ? AND resource_id = ?", "/api/users/%", target).
+		Order("created_at").Find(&logs).Error)
+	require.Len(t, logs, 3, "三次处置各留一行审计（中间件按请求落行）")
+	assert.Equal(t, []string{"update_user_status", "update_user_role", "update_user"},
+		[]string{logs[0].Action, logs[1].Action, logs[2].Action},
+		"Action 必须能区分改的是状态还是角色（默认取 HTTP method 会让三条全变成 PATCH/PUT）")
+	for _, l := range logs {
+		assert.Equal(t, "users", l.Resource)
+		assert.Equal(t, http.StatusOK, l.Status)
+		// 审计字段是取证材料：不知道是谁下的手，这行等于没有
+		require.NotNil(t, l.UserID)
+		assert.Equal(t, adminID, l.UserID.String(), "审计必须记下操作者")
+	}
+}
+
+// TestRoutes_用户处置_自我禁用返403 守护的**端到端**效果：service 层返 ErrForbidden，
+// handler 必须映射成 403 而不是 400/500 —— 报 400 会让调用方去改请求体。
+func TestRoutes_用户处置_自我禁用返403(t *testing.T) {
+	r := setupTestRouter(t)
+	self := seedUserForDispose(t, "self-admin", "admin", "active")
+	seedUserForDispose(t, "self-admin-2", "admin", "active")
+	token := genTokenForUser(t, self, "admin")
+
+	w := doJSONAs(t, r, http.MethodPatch, "/api/users/"+self+"/status", token,
+		map[string]any{"status": "inactive"})
+	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+	_, status := userRow(t, self)
+	assert.Equal(t, "active", status, "拒绝时不得落库")
+
+	// 自我降级同理（另一个 admin 存在，故拒绝只能来自 self 守卫）
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+self+"/role", token,
+		map[string]any{"role": "readonly"})
+	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+	role, _ := userRow(t, self)
+	assert.Equal(t, "admin", role)
+}
+
+// TestRoutes_用户处置_降级最后一名管理员返403 同一个守卫的另一条腿：
+// 操作者不是目标本人，但目标是没有可替代者的 admin。
+func TestRoutes_用户处置_降级最后一名管理员返403(t *testing.T) {
+	r := setupTestRouter(t)
+	only := seedUserForDispose(t, "last-admin", "admin", "active")
+	actor := seedUserForDispose(t, "ops-actor", "admin", "active")
+	// actor 换成非本人：先把 actor 的角色降走会让它失去 identity 能力，
+	// 故这里用 admin 会话操作**另一个** admin，且只有 target 一个 active admin
+	// （actor 也是 admin → 有两个 active admin…）。为让「最后一名」成立，
+	// 把 actor 的 role 直接写成 ops_admin（绕过守卫直插，模拟历史数据）。
+	require.NoError(t, database.GetDB().Exec("UPDATE users SET role = 'ops_admin' WHERE id = ?", actor).Error)
+	// 但 ops_admin 没有 identity 能力 → 用另一个 admin 会话发请求，目标仍是 only
+	session := seedUserForDispose(t, "session-admin", "admin", "active")
+	token := genTokenForUser(t, session, "admin")
+
+	// 此刻 active admin = {only, session} → 降级 only 应当成功（session 仍在）
+	w := doJSONAs(t, r, http.MethodPatch, "/api/users/"+only+"/role", token,
+		map[string]any{"role": "readonly"})
+	require.Equal(t, http.StatusOK, w.Code, "还有另一名可登录 admin 时应允许降级: %s", w.Body.String())
+
+	// 现在 active admin = {session} → 降级 session 必须被拒
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+session+"/role", token,
+		map[string]any{"role": "readonly"})
+	assert.Equal(t, http.StatusForbidden, w.Code, "body=%s", w.Body.String())
+	role, _ := userRow(t, session)
+	assert.Equal(t, "admin", role, "拒绝时不得落库")
+}
+
+// TestRoutes_用户处置_角色词表外返400 / 状态枚举外返400：请求写错 → 400（不是 403：
+// 调用方改参数重试有用）。两者都带得出**原因**，否则运维不知道该填什么。
+func TestRoutes_用户处置_词表外返400(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "vocab-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+	target := seedUserForDispose(t, "vocab-target", "ops_user", "active")
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               map[string]any
+		wantReason         string
+	}{
+		{"角色词表外", http.MethodPatch, "/api/users/" + target + "/role",
+			map[string]any{"role": "superuser"}, "未知角色"},
+		{"状态枚举外", http.MethodPatch, "/api/users/" + target + "/status",
+			map[string]any{"status": "locked"}, "status 只能是"},
+		{"PUT 状态枚举外", http.MethodPut, "/api/users/" + target,
+			map[string]any{"status": "deleted"}, "status 只能是"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := doJSONAs(t, r, tc.method, tc.path, token, tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+			assert.Contains(t, w.Body.String(), tc.wantReason, "400 必须带得出原因")
+			role, status := userRow(t, target)
+			assert.Equal(t, "ops_user", role, "拒绝时不得写库")
+			assert.Equal(t, "active", status)
+		})
+	}
+}
+
+// TestRoutes_用户处置_路径id非UUID返400：裸字符串进 gorm 的 UUID 列比较 → PG 22P02
+// → 被 apierr.Internal 报成 500，把「调用方 id 写错」报成服务端故障。
+func TestRoutes_用户处置_路径id非UUID返400(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "uuid-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPut, "/api/users/not-a-uuid"},
+		{http.MethodPatch, "/api/users/not-a-uuid/status"},
+		{http.MethodPatch, "/api/users/not-a-uuid/role"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			w := doJSONAs(t, r, tc.method, tc.path, token, map[string]any{"status": "inactive"})
+			assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+		})
+	}
+}
+
+// TestRoutes_用户处置_不存在的用户返404（不是 500，也不是「静默成功」）
+func TestRoutes_用户处置_不存在的用户返404(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "404-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+
+	w := doJSONAs(t, r, http.MethodPatch, "/api/users/"+uuid.NewString()+"/status", token,
+		map[string]any{"status": "inactive"})
+	assert.Equal(t, http.StatusNotFound, w.Code, "body=%s", w.Body.String())
+}
+
+// TestRoutes_用户处置_未知字段返400 "写了不生效"的静默失败：ShouldBindJSON 会忽略未知键，
+// 于是 {"email": …} 拿到 200 而邮箱一字未改。严格解码把「带了不可改的列」变成显式 400。
+func TestRoutes_用户处置_未知字段返400(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "strict-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+	target := seedUserForDispose(t, "strict-target", "ops_user", "active")
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               map[string]any
+	}{
+		{"PUT 改邮箱", http.MethodPut, "/api/users/" + target, map[string]any{"email": "x@y.z"}},
+		{"PUT 改 Go 字段名", http.MethodPut, "/api/users/" + target,
+			map[string]any{"PasswordHash": "$2a$10$attacker"}},
+		{"PUT 空对象", http.MethodPut, "/api/users/" + target, map[string]any{}},
+		{"PATCH 状态带多余键", http.MethodPatch, "/api/users/" + target + "/status",
+			map[string]any{"status": "inactive", "role": "admin"}},
+		{"PATCH 角色带多余键", http.MethodPatch, "/api/users/" + target + "/role",
+			map[string]any{"role": "readonly", "status": "active"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := doJSONAs(t, r, tc.method, tc.path, token, tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+			// 不回显调用方可控的字段名（反射面）
+			assert.NotContains(t, w.Body.String(), "PasswordHash")
+			assert.NotContains(t, w.Body.String(), "x@y.z")
+
+			role, status := userRow(t, target)
+			assert.Equal(t, "ops_user", role)
+			assert.Equal(t, "active", status)
+		})
+	}
+}
+
+// TestRoutes_用户处置_换一种方式改状态要显式（PATCH /status 只认 status 键）
+func TestRoutes_用户处置_PATCH状态缺status字段返400(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "missing-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+	target := seedUserForDispose(t, "missing-target", "ops_user", "active")
+
+	w := doJSONAs(t, r, http.MethodPatch, "/api/users/"+target+"/status", token, map[string]any{})
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
+	_, status := userRow(t, target)
+	assert.Equal(t, "active", status)
+}
+
+// TestRoutes_用户处置_非admin禁止 能力门禁：ops_admin / ops_user / auditor / readonly
+// 一律 403（矩阵用例已枚举，这里显式钉住最像「管理员」的 ops_admin —— 它是唯一
+// 可能被误认为够用的角色）。
+func TestRoutes_用户处置_非admin禁止(t *testing.T) {
+	r := setupTestRouter(t)
+	target := seedUserForDispose(t, "gate-target", "ops_user", "active")
+
+	for _, role := range []string{
+		middleware.RoleOpsAdmin, middleware.RoleOpsUser,
+		middleware.RoleAuditor, middleware.RoleReadonly, middleware.RoleUser,
+	} {
+		t.Run(role, func(t *testing.T) {
+			for _, c := range []struct{ method, path string }{
+				{http.MethodPut, "/api/users/" + target},
+				{http.MethodPatch, "/api/users/" + target + "/status"},
+				{http.MethodPatch, "/api/users/" + target + "/role"},
+			} {
+				w := requestAs(t, r, c.method, c.path, role)
+				assert.Equal(t, http.StatusForbidden, w.Code,
+					"角色 %q 不得处置账号: %s", role, w.Body.String())
+			}
+		})
+	}
+	role, status := userRow(t, target)
+	assert.Equal(t, "ops_user", role)
+	assert.Equal(t, "active", status)
+}
+
+// TestRoutes_APIKey不能处置账号 — 长期凭据不得改账号（S-2 同族）。
+//
+// 攻击面：admin 名下 write scope 的 Key 原本能调 PATCH /users/:id/role 把任意账号
+// 提成 admin（权限持久化，吊销 Key 撤不掉），或禁用掉真正的管理员（自锁）。
+// 故三条写端点与 /auth/api-keys、通知渠道、集成 PUT 一样挂 RejectAPIKeyAuth。
+func TestRoutes_APIKey不能处置账号(t *testing.T) {
+	r := setupTestRouter(t)
+	uid := seedAPIKeyOwner(t, "dispose-key-owner")
+	keyAuth := mintWriteKeyViaSession(t, r, genTokenForUser(t, uid, "admin"), "dispose-key")
+	target := seedUserForDispose(t, "key-target", "ops_user", "active")
+
+	for _, c := range []struct {
+		name, method, path string
+		body               any
+	}{
+		{"PUT 局部更新", http.MethodPut, "/api/users/" + target,
+			map[string]any{"must_change_password": true}},
+		{"PATCH 状态", http.MethodPatch, "/api/users/" + target + "/status",
+			map[string]any{"status": "inactive"}},
+		{"PATCH 角色", http.MethodPatch, "/api/users/" + target + "/role",
+			map[string]any{"role": "admin"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res := doJSONAsRaw(t, r, c.method, c.path, keyAuth, c.body)
+			assert.Equal(t, http.StatusForbidden, res.Code, "API Key 不得处置账号")
+			assert.Contains(t, res.Body.String(), "登录会话",
+				"应命中 RejectAPIKeyAuth 的文案，而不是能力矩阵的「权限不足」")
+		})
+	}
+
+	// 防过度收紧：**读**端点不拦（自动化脚本列账号是既有能力），且不是 404/405 空转。
+	res := doJSONAsRaw(t, r, http.MethodGet, "/api/users", keyAuth, nil)
+	assert.Equal(t, http.StatusOK, res.Code, "API Key 读用户列表应放行: %s", res.Body.String())
+
+	role, status := userRow(t, target)
+	assert.Equal(t, "ops_user", role, "被拒的请求不得落库")
+	assert.Equal(t, "active", status)
+}
+
+// TestRoutes_禁用账号后JWT立即失效 这是 M61 的**功能目的**本身：
+// 「禁用离职员工」若只在 UI 上打勾而对方手里的 JWT 照用 24h，这个功能就是装饰。
+// 端到端：B 的 token 可用 → admin 禁用 B → B 的 token 被拒。
+//
+// 30s 的状态缓存（middleware/auth_status_cache.go）是设计取舍，运维封禁允许 ≤30s
+// 滞后；测试用 InvalidateAuthStatusCacheForUser 模拟「缓存自然过期」，不 sleep 31s。
+func TestRoutes_禁用账号后JWT立即失效(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "revoke-admin", "admin", "active")
+	adminToken := genTokenForUser(t, admin, "admin")
+
+	victim := seedUserForDispose(t, "revoke-victim", "ops_user", "active")
+	victimToken := genTokenForUser(t, victim, "ops_user")
+
+	// 前置：B 的 token 此刻有效（否则下面的 401 无法归因于禁用）
+	w := doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, "前置：受害者会话应有效: %s", w.Body.String())
+
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+victim+"/status", adminToken,
+		map[string]any{"status": "inactive"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	// 模拟缓存自然过期（真 PG 冒烟里不能 sleep 31s，见该 helper 的注释）
+	middleware.InvalidateAuthStatusCacheForUser(victim)
+
+	w = doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code,
+		"禁用后 JWT 必须立即失效（auth.go 的 lookupUserStatus 门禁），body=%s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "禁用")
+
+	// 反向：重新启用后 token 又能用（证明上一条拒绝来自状态而非 token 过期/黑名单）
+	middleware.InvalidateAuthStatusCacheForUser(victim)
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+victim+"/status", adminToken,
+		map[string]any{"status": "active"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	middleware.InvalidateAuthStatusCacheForUser(victim)
+	w = doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "重新启用后应恢复: %s", w.Body.String())
+}
+
+// TestRoutes_用户处置_强改密标志可置位 第三个字段的端到端：置 must_change_password
+// 后该账号的登录响应会带 must_change_password=true（前端据此强制跳改密页）。
+func TestRoutes_用户处置_强改密标志可置位(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "mcp-admin", "admin", "active")
+	token := genTokenForUser(t, admin, "admin")
+	target := seedUserForDispose(t, "mcp-target", "ops_user", "active")
+
+	w := doJSONAs(t, r, http.MethodPut, "/api/users/"+target, token,
+		map[string]any{"must_change_password": true})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var got bool
+	require.NoError(t, database.GetDB().Raw(
+		"SELECT must_change_password FROM users WHERE id = ?", target).Scan(&got).Error)
+	assert.True(t, got, "置位必须落库（响应体不算证据）")
+
+	// 复位（前端「重置密码」按钮之后会用到同一条路径）
+	w = doJSONAs(t, r, http.MethodPut, "/api/users/"+target, token,
+		map[string]any{"must_change_password": false})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NoError(t, database.GetDB().Raw(
+		"SELECT must_change_password FROM users WHERE id = ?", target).Scan(&got).Error)
+	assert.False(t, got)
 }
