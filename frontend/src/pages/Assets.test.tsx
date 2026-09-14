@@ -3,6 +3,8 @@
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import type * as Antd from 'antd'
+import { message } from 'antd'
 import Assets from './Assets'
 
 // vi.hoisted：mock 工厂在 import 期就会被调用，共享状态必须在提升块里创建
@@ -11,6 +13,7 @@ const h = vi.hoisted(() => ({
   refetch: vi.fn(),
   lastKey: null as unknown,
   retireSpy: vi.fn().mockResolvedValue({ data: { code: 0 } }),
+  bulkRetireSpy: vi.fn(),
   restoreSpy: vi.fn().mockResolvedValue({ data: { code: 0 } }),
 }))
 
@@ -19,6 +22,19 @@ const mockAssets = [
   { id: '2', name: 'db-server-01', asset_type: 'server', ip_address: '192.168.1.11', status: 'active', site_name: '机房A', rack_name: 'Rack-02' },
   { id: '3', name: 'no-ip-asset', asset_type: 'server', ip_address: '', status: 'active', site_name: '机房A', rack_name: 'Rack-03' },
 ]
+
+// M58：批量操作 handler 依赖 useApiMutation 的回调（成功/失败分流、成功后清空选择），
+// 探针只暴露被测组件真正消费的那几个成员，避免为测试引入 react-query 的 UseMutationResult 全量类型。
+type MutationProbe<TVars> = {
+  mutate: (vars: TVars) => void
+  mutateAsync: (vars: TVars) => Promise<unknown>
+  isPending: boolean
+  isError: boolean
+  isSuccess: boolean
+  data: undefined
+  error: null
+  reset: () => void
+}
 
 // M3/P5：data 结构改为 {items, total}（服务端分页契约）。useApiQuery mock 记录 queryKey，
 // 供分页/筛选变化断言（原 filtered 前端过滤已删除，筛选下沉到后端，仅触发 queryKey 更新）。
@@ -36,12 +52,25 @@ vi.mock('../hooks/useApiQuery', () => ({
   },
   useApiMutation: <TVars, TResult>(
     mutator: (vars: TVars) => Promise<TResult>,
-  ) => {
+    options?: {
+      onSuccess?: (result: TResult, vars: TVars) => void
+      onError?: (error: unknown, vars: TVars) => void
+    },
+  ): MutationProbe<TVars> => {
     // 让 mutate 真调 mutator (串行 Promise chain), 这样测试可以验真路径
-    // (Popconfirm onConfirm → mutate → assetApi.retire spy 被调)。
+    // (Popconfirm onConfirm → mutate → assetApi.bulkRetire spy 被调)。
+    // M58: 同时按 useApiMutation 的真实语义回调 onSuccess / onError —— 否则
+    // 「部分成功分流到哪个后缀的消息」「成功后清空选择」这些行为在测试里不可观测。
     // 不接 QueryClient (避免测试套必须包 QueryClientProvider 的级联改动)。
     return {
-      mutate: (vars: TVars) => { void mutator(vars) },
+      mutate: (vars: TVars) => {
+        void Promise.resolve()
+          .then(() => mutator(vars))
+          .then(
+            (r) => options?.onSuccess?.(r, vars),
+            (e: unknown) => options?.onError?.(e, vars),
+          )
+      },
       mutateAsync: (vars: TVars) => mutator(vars),
       isPending: false,
       isError: false,
@@ -49,10 +78,19 @@ vi.mock('../hooks/useApiQuery', () => ({
       data: undefined,
       error: null,
       reset: () => {},
-    } as any
+    }
   },
   queryKeys: { assets: { list: (f?: Record<string, unknown>) => ['assets', 'list', f ?? {}] } },
 }))
+
+// Mock antd message（避免 jsdom 副作用 + 让「部分成功走哪个后缀的消息」可断言）
+vi.mock('antd', async () => {
+  const actual = await vi.importActual<typeof Antd>('antd')
+  return {
+    ...actual,
+    message: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  }
+})
 
 // mock diagnosticApi（ping/traceroute）
 const mockPing = vi.fn().mockResolvedValue({
@@ -96,8 +134,9 @@ vi.mock('../services/api', () => ({
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
-    // M51: 批量操作 spy
+    // M51: 批量操作 spy；M58: 批量退役改走 bulkRetire 单端点
     retire: (...args: any[]) => h.retireSpy(...args),
+    bulkRetire: (ids: string[], reason: string) => h.bulkRetireSpy(ids, reason),
     restore: (...args: any[]) => h.restoreSpy(...args),
   },
   diagnosticApi: {
@@ -328,12 +367,12 @@ describe('Assets page', () => {
     expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
   })
 
-  // M51 mutation 实证: bypass onConfirm → retire API 不被调
-  // 走真实 useApiMutation 路径 (通过 vi.mock '../hooks/useApiQuery' 让 useApiMutation 用真 useMutation),
-  // 但测试套老 mock useApiMutation 返 `{mutate: vi.fn()}`, 不执行 mutator. 此测试改用
-  // vi.spyOn(assetApi, 'retire') 直接观察调用, 然后渲染时强行改 AssetTable row onChange.
-  it('M51：[批量退役] 二次确认后真调 assetApi.retire N 次, reason="批量退役"', async () => {
-    h.retireSpy.mockClear()
+  // M58: 批量退役改走单端点 POST /assets/bulk-retire（原 N 次串行 /:id/retire）。
+  // 断言落在**调用面**上：bulkRetire 被调一次且带全部 id（N 次单条调用 = 回归）。
+  it('M58：[批量退役] 二次确认后调 assetApi.bulkRetire 1 次, 带全部 id + reason="批量退役"', async () => {
+    h.bulkRetireSpy.mockResolvedValue({
+      data: { code: 0, data: { succeeded: ['1', '2'], failed: {} } },
+    })
     const { container } = render(<Assets />)
     const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
     expect(checkboxes.length).toBeGreaterThanOrEqual(2)
@@ -342,10 +381,7 @@ describe('Assets page', () => {
     await waitFor(() => {
       expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
     })
-    // Popconfirm onConfirm 由 antd Popconfirm 接管 (hover + click OK button).
-    // 直接调 trigger 按钮的 onClick 不会弹 trap, 但 click trigger + click OK button 可行.
-    // antd Popconfirm OK button 角色 = Popconfirm 弹层里的 `.ant-popconfirm .ant-btn-primary`.
-    // 点击 trigger → 等待 Popconfirm 出现 → 点击 OK 按钮 → onConfirm 触发 → mutate → assetApi.retire 被调.
+    // Popconfirm onConfirm 由 antd Popconfirm 接管：click trigger → click OK 按钮 → onConfirm。
     fireEvent.click(screen.getByTestId('asset-bulk-retire'))
     const okBtn = await waitFor(() => {
       const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
@@ -354,27 +390,133 @@ describe('Assets page', () => {
     })
     fireEvent.click(okBtn)
     await waitFor(() => {
-      expect(h.retireSpy).toHaveBeenCalledTimes(2)
+      expect(h.bulkRetireSpy).toHaveBeenCalledTimes(1)
     })
-    // 验证 reason = "批量退役" (M51 intent 硬要求: 批量 50 项不再弹填原因 modal)
-    expect(h.retireSpy).toHaveBeenNthCalledWith(1, '1', '批量退役')
-    expect(h.retireSpy).toHaveBeenNthCalledWith(2, '2', '批量退役')
+    expect(h.bulkRetireSpy).toHaveBeenCalledWith(['1', '2'], '批量退役')
+    // 单条端点不再被批量路径调用（回归护栏：留着串行循环的旧实现会在这里红）
+    expect(h.retireSpy).not.toHaveBeenCalled()
   })
 
-  it('M51-MUT：[批量退役] 二次确认后 bypass 路径 → retire spy 不被调 (mutation inversion 实证)', async () => {
-    h.retireSpy.mockClear()
-    // 临时改 Assets.tsx onConfirm 路径: 把 "onConfirm={() => bulkRetireMut.mutate(...)}" 改为空箭头.
-    // 这里我们用源码 bypass 模式 (外部脚本验, 见 docs/M51-mutation-inversion.sh).
-    // 单测层 mock 不易证 (closure), 此测做 placeholder 标记, 真证靠外部 mutation_inversion.
+  it('M58：[批量退役] 全部成功 → success 消息含项数 + 清空选择 + refetch', async () => {
+    vi.mocked(message.success).mockClear()
+    h.bulkRetireSpy.mockResolvedValue({
+      data: { code: 0, data: { succeeded: ['1', '2'], failed: {} } },
+    })
+    const { container } = render(<Assets />)
+    const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
+    fireEvent.click(checkboxes[0])
+    fireEvent.click(checkboxes[1])
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    const okBtn = await waitFor(() => {
+      const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
+      if (!btn) throw new Error('Popconfirm OK button not found')
+      return btn
+    })
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(vi.mocked(message.success)).toHaveBeenCalledWith('批量退役成功 2 项')
+    })
+    // 成功即清空选择 → 批量条消失（不必手动点「清空选择」）
+    await waitFor(() => {
+      expect(screen.queryByTestId('asset-bulk-bar')).toBeNull()
+    })
+    expect(h.refetch).toHaveBeenCalled()
+  })
+
+  it('M58：[批量退役] 部分失败 → warning 报成功/失败两侧计数, 不谎报全失败', async () => {
+    vi.mocked(message.warning).mockClear()
+    vi.mocked(message.error).mockClear()
+    // failed 是 map：一个 id 不存在（后端返 200 + failed）
+    h.bulkRetireSpy.mockResolvedValue({
+      data: { code: 0, data: { succeeded: ['1'], failed: { 2: '资产不存在' } } },
+    })
+    const { container } = render(<Assets />)
+    const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
+    fireEvent.click(checkboxes[0])
+    fireEvent.click(checkboxes[1])
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    const okBtn = await waitFor(() => {
+      const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
+      if (!btn) throw new Error('Popconfirm OK button not found')
+      return btn
+    })
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(vi.mocked(message.warning)).toHaveBeenCalledWith('批量退役成功 1 项，失败 1 项')
+    })
+    // 部分成功不是失败：不得走 error 后缀（旧实现用 throw 表达部分失败，会落在这里）
+    expect(vi.mocked(message.error)).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(screen.queryByTestId('asset-bulk-bar')).toBeNull()
+    })
+  })
+
+  it('M58：[批量退役] 全部失败 → error 报失败项数（不能报「成功 0 项」）', async () => {
+    vi.mocked(message.error).mockClear()
+    vi.mocked(message.success).mockClear()
+    h.bulkRetireSpy.mockResolvedValue({
+      data: { code: 0, data: { succeeded: [], failed: { 1: '无法退役（资产已退役或参数无效）', 2: '资产不存在' } } },
+    })
+    const { container } = render(<Assets />)
+    const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
+    fireEvent.click(checkboxes[0])
+    fireEvent.click(checkboxes[1])
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    const okBtn = await waitFor(() => {
+      const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
+      if (!btn) throw new Error('Popconfirm OK button not found')
+      return btn
+    })
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(vi.mocked(message.error)).toHaveBeenCalledWith('批量退役失败 2 项')
+    })
+    expect(vi.mocked(message.success)).not.toHaveBeenCalled()
+  })
+
+  it('M58：[批量退役] 请求整体失败（网络/4xx）→ onError 报错，不退化成成功文案', async () => {
+    vi.mocked(message.error).mockClear()
+    h.bulkRetireSpy.mockRejectedValue(new Error('Request failed with status code 400'))
     const { container } = render(<Assets />)
     const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
     fireEvent.click(checkboxes[0])
     await waitFor(() => {
       expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
     })
-    // 不点 Popconfirm OK 按钮, spy 应保持 0 调用 — 这是"未触发" 实证, 不是"被 bypass" 实证.
-    // 真 bypass 实证见 docs/M51-mutation-inversion.sh (改源码 cp /tmp + vitest + revert).
-    expect(h.retireSpy).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    const okBtn = await waitFor(() => {
+      const btn = document.querySelector('.ant-popconfirm .ant-btn-primary') as HTMLButtonElement | null
+      if (!btn) throw new Error('Popconfirm OK button not found')
+      return btn
+    })
+    fireEvent.click(okBtn)
+    await waitFor(() => {
+      expect(vi.mocked(message.error)).toHaveBeenCalledWith(
+        '批量退役失败：Request failed with status code 400',
+      )
+    })
+  })
+
+  it('M58-MUT：[批量退役] 不点二次确认 → bulkRetire 不被调（mutation inversion 对照）', async () => {
+    h.bulkRetireSpy.mockClear()
+    const { container } = render(<Assets />)
+    const checkboxes = container.querySelectorAll('tbody tr[data-row-key] .ant-checkbox-input')
+    fireEvent.click(checkboxes[0])
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-bulk-retire')).toBeInTheDocument()
+    })
+    // 只点开 Popconfirm, 不点 OK → mutator 不得执行。
+    fireEvent.click(screen.getByTestId('asset-bulk-retire'))
+    expect(h.bulkRetireSpy).not.toHaveBeenCalled()
   })
 
   // M52: AssetFilterBar status 下拉 (G-UI-AssetFilter)
