@@ -6,6 +6,7 @@
 import "@testing-library/jest-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import Settings from "./Settings";
 import { message } from "antd";
 // G-33 M1：跨语言配置契约样本（后端 internal/service/channel_service_test.go 读同一文件）
@@ -47,14 +48,34 @@ vi.mock("../services/api", () => ({
     revoke: vi.fn(),
     delete: vi.fn(),
   },
+  // M49：Settings 拉 /auth/me 的能力集，据此决定是否渲染「审计日志」入口
+  authApi: { me: vi.fn() },
 }));
 
-import { apiKeyApi, notificationApi, integrationApi } from "../services/api";
+import { apiKeyApi, notificationApi, integrationApi, authApi } from "../services/api";
+
+// M49：Settings 现在内含 useNavigate（审计入口 onClick 走 navigate('/audit')），
+// 组件必须在 Router 上下文里渲染 —— 直接 renderSettings() 会抛
+// 「useNavigate() may be used only in the context of a <Router> component」。
+// RouteProbe 把「点击是否真的发生了路由跳转」变成可断言的事实：只断言入口渲染出来
+// 无法区分「navigate('/audit')」与「onClick 根本没接上」（后者正是 B1-1 死表单那类缺陷）。
+function RouteProbe() {
+  return <div data-testid="current-path">{useLocation().pathname}</div>;
+}
+
+function renderSettings() {
+  return render(
+    <MemoryRouter initialEntries={["/settings"]}>
+      <Settings />
+      <RouteProbe />
+    </MemoryRouter>,
+  );
+}
 
 // 密钥管理在第三个 tab（integrations / notifications / api），antd 默认只渲染
 // 激活面板，所以必须先点开该 tab 才能断言其内容
 async function renderApiKeyTab() {
-  render(<Settings />);
+  renderSettings();
   fireEvent.click(await screen.findByRole("tab", { name: /API 密钥/ }));
 }
 
@@ -74,7 +95,7 @@ describe("Settings M1 标题体系", () => {
   });
 
   it("M1：页面标题统一到 PageHeader（h4「系统设置」）", async () => {
-    render(<Settings />);
+    renderSettings();
     expect(
       await screen.findByRole("heading", { level: 4, name: "系统设置" }),
     ).toBeInTheDocument();
@@ -264,7 +285,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
 
   // 页面里还有 Zabbix 表单的「用户名」等同名 label → 所有字段查询都限定在渠道弹窗内
   async function openChannelForm(typeLabel: string) {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
 
@@ -280,7 +301,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
   // M6：required 无 message → 统一「请输入/请选择 XXX」（本文件 10 处）。
   // 无 message 时 antd 默认英文「${label} is required」，语气不一致。
   it("M6：渠道表单顶层必填项带中文提示", async () => {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
 
@@ -293,7 +314,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
   });
 
   it("M6：email 渠道条件字段带中文提示", async () => {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
 
@@ -311,7 +332,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
   });
 
   it("M6：dingtalk 渠道 Webhook URL 带中文提示", async () => {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
 
@@ -427,7 +448,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
       data: { code: 0, data: {} },
     } as any);
 
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     const editButtons = await screen.findAllByRole("button", { name: "编辑" });
 
@@ -460,7 +481,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
     vi.mocked(notificationApi.listChannels).mockRejectedValue(new Error("500"));
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click((await screen.findAllByRole("button", { name: "编辑" }))[0]);
 
@@ -525,7 +546,7 @@ describe("通知渠道配置契约 (G-33 M1)", () => {
       },
     } as any);
 
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
 
@@ -592,7 +613,7 @@ describe("H8 删除渠道二次确认", () => {
   });
 
   it("点删除先弹确认框（不立即调 deleteChannel），确认后才调用", async () => {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
 
     // 列表删除按钮（antd 两个汉字自动插空格 → "删 除"）
@@ -634,7 +655,7 @@ describe("W4-M4 渠道保存按钮 loading 防连点", () => {
       () => new Promise((resolve) => { resolveSend = resolve; }) as any,
     );
 
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
 
@@ -692,7 +713,7 @@ describe("Settings M27 Zabbix 同步截断透出", () => {
   });
 
   async function renderIntegrationsTab() {
-    render(<Settings />);
+    renderSettings();
     fireEvent.click(await screen.findByRole("tab", { name: /第三方集成|集成/ }));
   }
 
@@ -837,5 +858,76 @@ describe("Settings M27 Zabbix 同步截断透出", () => {
     expect(msg).toContain("另有 3 个字段被截断");
     // 不能把 truncated 当条数写
     expect(msg).not.toMatch(/另有\s*1\s*条/);
+  });
+});
+
+// ==================== M49 G-UI-Audit：admin「管理」区审计入口 ====================
+//
+// 入口按**后端下发的能力集**显示：不复制一份角色→能力矩阵（backend/internal/middleware/roles.go
+// 的注释明确警告过复制会漂移），也不再只看 role 字面量 —— auditor 角色读得到审计日志，
+// 按 role 判会把它的入口藏掉，按 manage 能力判同样会（auditor 没有 manage）。
+// 反向也要钉住：readonly 进去必须看不到入口，点进去只会 403。
+describe("M49 审计入口（能力门禁）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  async function renderApiKeyTab() {
+    renderSettings();
+    fireEvent.click(await screen.findByRole("tab", { name: /API 密钥/ }));
+  }
+
+  it("具备 audit 能力（auditor）→ 显示「审计日志」入口，点击跳 /audit", async () => {
+    vi.mocked(authApi.me).mockResolvedValue({
+      data: { code: 0, data: { role: "auditor", capabilities: ["read", "audit"] } },
+    } as any);
+
+    await renderApiKeyTab();
+    expect(screen.getByTestId("current-path")).toHaveTextContent("/settings");
+
+    const link = await screen.findByText("审计日志");
+    // Menu.Item 的 label 在 <li role="menuitem"> 里 —— 点击后交给 navigate(key)
+    fireEvent.click(link);
+
+    // 真跳转：路径变成 /audit（不是「点了没反应」）
+    await waitFor(() => {
+      expect(screen.getByTestId("current-path")).toHaveTextContent("/audit");
+    });
+  });
+
+  it("无 audit 能力（readonly）→ 整块「管理」区不渲染", async () => {
+    vi.mocked(authApi.me).mockResolvedValue({
+      data: { code: 0, data: { role: "readonly", capabilities: ["read"] } },
+    } as any);
+
+    await renderApiKeyTab();
+    // 等一次取数完成再断言（否则是「还没回来」而不是「确认没有」）
+    await waitFor(() => {
+      expect(authApi.me).toHaveBeenCalled();
+    });
+    expect(screen.queryByText("审计日志")).toBeNull();
+    expect(screen.queryByText("管理")).toBeNull();
+  });
+
+  it("/auth/me 取不到能力（403/网络错）→ fail-closed，不渲染入口", async () => {
+    // 后端 403 / 断网时若默认放行，用户会点进一个必然 403 的页面
+    vi.mocked(authApi.me).mockRejectedValue(
+      Object.assign(new Error("forbidden"), { response: { status: 403 } }),
+    );
+
+    await renderApiKeyTab();
+    await waitFor(() => {
+      expect(authApi.me).toHaveBeenCalled();
+    });
+    expect(screen.queryByText("审计日志")).toBeNull();
   });
 });
