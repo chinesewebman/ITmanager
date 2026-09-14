@@ -323,6 +323,30 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M56 — G-UI-SearchAutofocus 搜索 Input autoFocus（2026-09-14）
+
+**摩擦**: 用户操作流程审查发现 — 全站搜索 Input 不 autoFocus, 用户进页面想搜必须先鼠标点 input 才能键盘打字. 实际只有 2 处真搜索 Input (其他页 Select 筛选无 Input):
+- `AssetFilterBar` — "搜索名称 / IP"
+- `Audit` — "路径前缀, 如 /api/assets"
+
+**改动** (frontend-only, 2 files, +4/-0 LOC):
+- `frontend/src/components/AssetFilterBar.tsx`: 搜索 Input 加 `autoFocus`
+- `frontend/src/pages/Audit.tsx`: 路径前缀 Input 加 `autoFocus`
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- `npx vitest run src/pages/Assets.test.tsx src/pages/Audit.test.tsx src/components/AssetTable.memo.test.tsx`: **29/29 PASS** (Assets 22 + Audit 6 + memo 1, 无退化)
+
+**审查发现 (PM 自起)**:
+- F-2 (Modal Esc) 撤回: antd 5 Modal 默认 keyboard=true, Esc 已工作 — 不是 friction
+- F-3 (autoFocus) 真实证 ship
+- F-4 (Tickets 空态) / F-5 (Topology 清空筛选) 留 future round
+
+**Out of scope** (留 future round):
+- Modal 内表单 Input 不加 autoFocus (模态聚焦习惯不同)
+- Select 筛选 (Alerts / Runbook 等) 不支持 autoFocus
+- 屏幕阅读器友好度 — 接受, 搜索框是用户进页面的常见第一动作
+
 ### M55 — G-UI-AlertsStatsClick 告警统计卡可点击跳转（2026-09-14）
 
 **摩擦**: T99 C1 — AlertStatsCards 4 联 (`总告警 / 未处理 / 已确认 / 已解决`) 只显示数字, 不可点击. 用户想"看所有未处理告警"必须手填 status filter.
