@@ -25,6 +25,8 @@ export function AssetFilterBar({ value, onChange, typeOptions, statusOptions }: 
     <Space wrap>
       <Input
         allowClear
+        // M56: 键盘流用户进页即能打字, 不用先鼠标点 input
+        autoFocus
         prefix={<SearchOutlined />}
         placeholder="搜索名称 / IP"
         value={value.keyword}

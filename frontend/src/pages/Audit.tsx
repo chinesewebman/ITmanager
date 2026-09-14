@@ -242,6 +242,8 @@ function Audit() {
           <Input
             placeholder="路径前缀，如 /api/assets（回车）"
             allowClear
+            // M56: 键盘流用户进页即能打字
+            autoFocus
             defaultValue={pathPrefix}
             style={{ width: 260 }}
             onPressEnter={(e) => {
