@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"time"
 
 	"network-monitor-platform/internal/apierr"
@@ -32,6 +33,24 @@ type SyncRequest struct {
 
 // syncTimeout C-P7: 同步 API 总超时 5min（集成调用链 + 批量写 DB）。
 const syncTimeout = 5 * time.Minute
+
+// isHTTPURL 报告 raw 是否是 http(s) URL —— scheme ∈ {http, https} 且 host 非空。
+//
+// M60/T-56：此前三个 Update*Request.URL 挂的是 `binding:"url"`，但 go-playground/validator 的
+// `url` 只要求「有 scheme + 有 host」（RFC 3986 §3.1 意义上的泛 URI），**`ftp://example.com` 也会通过** ——
+// 它是「URL 形状」检查，不是 http(s) 白名单。前端 URL_PATTERN 只认 http(s)，两侧强度不同集：
+// API 直连 / 脚本调用（不经前端表单）能往集成配置写进 `ftp://` 值，运维下次同步才发现连不上。
+//
+// 故收敛成这一条规则：替换 `url` tag，而不是与它叠加 —— 两条语义不同的规则并存正是 T-56 的病根。
+// `url.Parse` 按 RFC 3986 §3.1 把 scheme 规范成小写（scheme 大小写不敏感），`HTTP://host` 也接受；
+// host 非空是保留原 `url` tag 的判据（`http://` 这种无 host 的串不是可用的集成地址）。
+func isHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
 
 // Sync 同步数据
 func (h *IntegrationHandler) Sync(c *gin.Context) {
@@ -145,12 +164,10 @@ func (h *IntegrationHandler) TestZabbix(c *gin.Context) {
 // UpdateZabbixRequest v2.2: UI 保存按钮提交的三件套。
 // password 允许为空（"保持原值"语义）；URL/user 必填。
 //
-// M59: URL 加 `url` binding —— 前端已挡 `not-a-url`，后端也挡一层（API 直连/脚本调用
-// 不经过前端）。实测 go-playground/validator v10 的 `url` tag 接受内网地址
-// （`http://zabbix:8080`，见 integration_handler_test.go 的 M59 用例），
-// 但它只要求「有 scheme + host」—— `ftp://example.com` 也会通过，故它不是 http(s) 白名单。
+// M59 加过 `binding:"url"`，M60/T-56 换成自定义 http(s) 白名单（见 isHTTPURL 注释）：
+// `required` 只负责挡空值（错误文案仍走「url 必填」），scheme 判定在 handler 里显式一行。
 type UpdateZabbixRequest struct {
-	URL      string `json:"url" binding:"required,url"`
+	URL      string `json:"url" binding:"required"`
 	User     string `json:"user" binding:"required"`
 	Password string `json:"password"` // 空 = 不改；非空 = 覆盖
 }
@@ -161,6 +178,11 @@ func (h *IntegrationHandler) UpdateZabbix(c *gin.Context) {
 	var req UpdateZabbixRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		apierr.BadRequest(c, "url/user 必填: "+err.Error())
+		return
+	}
+	// T-56: 只放行 http(s)。`ftp://` / `file://` / 无 scheme 的值到这里就 400，不写 cfg。
+	if !isHTTPURL(req.URL) {
+		apierr.BadRequest(c, "URL 必须以 http:// 或 https:// 开头")
 		return
 	}
 	// 空 password = 保留旧值（避免 UI 清空密码时把后端改成空）
@@ -202,7 +224,7 @@ func (h *IntegrationHandler) TestNetBox(c *gin.Context) {
 
 // UpdateNetBoxRequest v2.2: NetBox URL + Token。Token 空 = 保留旧值（避免 UI 误清空）。
 type UpdateNetBoxRequest struct {
-	URL   string `json:"url" binding:"required,url"`
+	URL   string `json:"url" binding:"required"`
 	Token string `json:"token"`
 }
 
@@ -211,6 +233,11 @@ func (h *IntegrationHandler) UpdateNetBox(c *gin.Context) {
 	var req UpdateNetBoxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		apierr.BadRequest(c, "url 必填: "+err.Error())
+		return
+	}
+	// T-56: 只放行 http(s)（内网无 TLD 地址如 http://netbox:8000 仍然通过）。
+	if !isHTTPURL(req.URL) {
+		apierr.BadRequest(c, "URL 必须以 http:// 或 https:// 开头")
 		return
 	}
 	if req.Token == "" {
@@ -241,7 +268,7 @@ func (h *IntegrationHandler) TestGLPI(c *gin.Context) {
 
 // UpdateGLPIRequest v2.2: GLPI URL + 两个 token。两个 token 各自允许空 = 保留旧值。
 type UpdateGLPIRequest struct {
-	URL       string `json:"url" binding:"required,url"`
+	URL       string `json:"url" binding:"required"`
 	AppToken  string `json:"app_token"`
 	UserToken string `json:"user_token"`
 }
@@ -251,6 +278,11 @@ func (h *IntegrationHandler) UpdateGLPI(c *gin.Context) {
 	var req UpdateGLPIRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		apierr.BadRequest(c, "url 必填: "+err.Error())
+		return
+	}
+	// T-56: 只放行 http(s)。
+	if !isHTTPURL(req.URL) {
+		apierr.BadRequest(c, "URL 必须以 http:// 或 https:// 开头")
 		return
 	}
 	if req.AppToken == "" {
