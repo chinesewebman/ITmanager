@@ -993,3 +993,194 @@ describe("Settings M57 Tab URL sync", () => {
     expect(screen.getByTestId("current-path").textContent).not.toContain("tab=notifications");
   });
 });
+
+// ==================== M59：集成 / 通知表单字段格式校验 ====================
+//
+// 现状（M59 前）：这些字段只校验 required —— `not-a-url` / `99999` / `not-an-email`
+// 前端放行，用户要等后端 400 才知道哪个字段错了（F-1 摩擦）。
+// 这里把「前端能挡住的」钉在 UI 层：坏值 → 显示格式错误 **且不发请求**；
+// 好值 → 校验通过走到请求（否则「报错」测试可能只是因为 handler 根本没接上）。
+describe("Settings M59 表单格式校验", () => {
+  // mock 返回的最小形状。services/api 的返回类型是 axios 的 `AxiosResponse`
+  // （还要求 status/statusText/headers/config 等字段），单测不构造它们 ——
+  // 用 `as unknown as AxiosResponse` 收口（测试替身，不是需要运行时校验的外部输入）。
+  function apiOk(data: unknown = {}, message?: string): AxiosResponse {
+    return {
+      data: { code: 0, data, ...(message === undefined ? {} : { message }) },
+    } as unknown as AxiosResponse;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue(apiOk([]));
+    vi.mocked(integrationApi.getStatus).mockResolvedValue(apiOk({}));
+    vi.mocked(apiKeyApi.list).mockResolvedValue(apiOk([]));
+    vi.mocked(integrationApi.updateZabbix).mockResolvedValue(apiOk({}));
+    vi.mocked(integrationApi.updateNetBox).mockResolvedValue(apiOk({}));
+    vi.mocked(notificationApi.createChannel).mockResolvedValue(apiOk({}));
+  });
+
+  // 集成 tab 是默认 tab：`renderSettings()` 后即可拿到三家 URL 输入框
+  // （placeholder 唯一，能区分三个同 label="URL" 的字段）。
+  function integrationCard(placeholder: string): { input: HTMLElement; card: HTMLElement } {
+    const input = screen.getByPlaceholderText(placeholder);
+    return { input, card: input.closest(".ant-card") as HTMLElement };
+  }
+
+  it("M59：Zabbix URL 填 not-a-url → 显示格式错误，且不发保存请求", async () => {
+    renderSettings();
+    const { input, card } = integrationCard("http://zabbix:8080");
+    fireEvent.change(input, { target: { value: "not-a-url" } });
+    // user 是另一个必填项：不填的话「没发请求」可能只是因为 user 校验没过
+    fireEvent.change(screen.getByPlaceholderText("Admin"), { target: { value: "Admin" } });
+
+    fireEvent.click(within(card).getByRole("button", { name: /保存配置/ }));
+
+    expect(
+      await within(card).findByText("URL 必须以 http:// 或 https:// 开头"),
+    ).toBeInTheDocument();
+    expect(integrationApi.updateZabbix).not.toHaveBeenCalled();
+  });
+
+  it("M59：Zabbix URL 填内网地址 http://zabbix:8080 → 校验通过并发保存请求", async () => {
+    renderSettings();
+    const { input, card } = integrationCard("http://zabbix:8080");
+    fireEvent.change(input, { target: { value: "http://zabbix:8080" } });
+    fireEvent.change(screen.getByPlaceholderText("Admin"), { target: { value: "Admin" } });
+
+    fireEvent.click(within(card).getByRole("button", { name: /保存配置/ }));
+
+    await waitFor(() => expect(integrationApi.updateZabbix).toHaveBeenCalled());
+    expect(
+      within(card).queryByText("URL 必须以 http:// 或 https:// 开头"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("M59：NetBox URL 填 https://netbox.local → 校验通过并发保存请求", async () => {
+    renderSettings();
+    const { input, card } = integrationCard("http://netbox:8000");
+    fireEvent.change(input, { target: { value: "https://netbox.local" } });
+
+    fireEvent.click(within(card).getByRole("button", { name: /保存配置/ }));
+
+    await waitFor(() => expect(integrationApi.updateNetBox).toHaveBeenCalled());
+    expect(
+      within(card).queryByText("URL 必须以 http:// 或 https:// 开头"),
+    ).not.toBeInTheDocument();
+  });
+
+  // 渠道弹窗里的字段（email / dingtalk）：与 G-33 的 openChannelForm 同形，
+  // 所有查询限定在弹窗内（页面上还有 Zabbix 表单的同名 label）。
+  async function openChannelForm(typeLabel: string): Promise<HTMLElement> {
+    renderSettings();
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加渠道/ }));
+
+    const nameInput = await screen.findByLabelText("渠道名称");
+    fireEvent.change(nameInput, { target: { value: "校验样本" } });
+    fireEvent.mouseDown(screen.getByLabelText("渠道类型"));
+    fireEvent.click(await screen.findByTitle(typeLabel));
+
+    return nameInput.closest(".ant-modal") as HTMLElement;
+  }
+
+  // email 表单的「除被测字段外全部填合法值」前置 —— 否则断言到的错误可能是别的字段的。
+  async function fillEmailForm(modalEl: HTMLElement, overrides: {
+    port?: string;
+    from?: string;
+    to?: string;
+  }) {
+    const modal = within(modalEl);
+    fireEvent.change(await modal.findByLabelText("SMTP服务器"), {
+      target: { value: "smtp.example.com" },
+    });
+    fireEvent.change(modal.getByLabelText("端口"), {
+      target: { value: overrides.port ?? "587" },
+    });
+    fireEvent.change(modal.getByLabelText("用户名"), {
+      target: { value: "nmp@example.com" },
+    });
+    fireEvent.change(modal.getByLabelText("发件人"), {
+      target: { value: overrides.from ?? "nmp@example.com" },
+    });
+    const toInput = modal.getByLabelText("收件人");
+    fireEvent.change(toInput, { target: { value: overrides.to ?? "ops@example.com" } });
+    fireEvent.keyDown(toInput, { key: "Enter", code: "Enter", keyCode: 13 });
+  }
+
+  it("M59：SMTP 端口 99999 → 显示超范围，且不发保存请求", async () => {
+    const modalEl = await openChannelForm("邮件");
+    await fillEmailForm(modalEl, { port: "99999" });
+    const modal = within(modalEl);
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    expect(await modal.findByText("端口必须在 1-65535 之间")).toBeInTheDocument();
+    expect(notificationApi.createChannel).not.toHaveBeenCalled();
+  });
+
+  it("M59：SMTP 发件人 not-an-email → 显示邮箱格式错误，且不发保存请求", async () => {
+    const modalEl = await openChannelForm("邮件");
+    await fillEmailForm(modalEl, { from: "not-an-email" });
+    const modal = within(modalEl);
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    expect(await modal.findByText("邮箱格式不正确")).toBeInTheDocument();
+    expect(notificationApi.createChannel).not.toHaveBeenCalled();
+  });
+
+  it("M59：SMTP 收件人加 bad@@@ → 显示邮箱格式错误，且不发保存请求", async () => {
+    const modalEl = await openChannelForm("邮件");
+    await fillEmailForm(modalEl, { to: "bad@@@" });
+    const modal = within(modalEl);
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    expect(await modal.findByText("邮箱格式不正确")).toBeInTheDocument();
+    expect(notificationApi.createChannel).not.toHaveBeenCalled();
+  });
+
+  it("M59：钉钉 webhook_url 填 ftp:// → 显示 URL 格式错误，且不发保存请求", async () => {
+    const modal = within(await openChannelForm("钉钉"));
+    fireEvent.change(await modal.findByLabelText("Webhook URL"), {
+      target: { value: "ftp://example.com/hook" },
+    });
+
+    fireEvent.click(modal.getByRole("button", { name: "保 存" }));
+
+    expect(
+      await modal.findByText("URL 必须以 http:// 或 https:// 开头"),
+    ).toBeInTheDocument();
+    expect(notificationApi.createChannel).not.toHaveBeenCalled();
+  });
+});
+
+// 直接钉 pattern 边界：上面 UI 用例只覆盖「填一个坏值 → 报错」的连线，
+// 这里把正则的正/负样本显式化 —— 放宽（收下 ftp://）或收紧（拒掉内网无 TLD）都会红。
+describe("M59 共享 pattern 边界", () => {
+  const urlOk = [
+    "http://zabbix:8080", // 内网主机名 + 端口（无 TLD）
+    "https://netbox.local",
+    "http://glpi:80",
+    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx",
+  ];
+  const urlBad = ["not-a-url", "zabbix:8080", "ftp://example.com", "//host/path", "http://"];
+
+  it.each(urlOk)("URL_PATTERN 接受 %s", (u) => {
+    expect(URL_PATTERN.test(u)).toBe(true);
+  });
+  it.each(urlBad)("URL_PATTERN 拒绝 %s", (u) => {
+    expect(URL_PATTERN.test(u)).toBe(false);
+  });
+
+  const emailOk = ["nmp@example.com", "ops+oncall@sub.example.co"];
+  const emailBad = ["not-an-email", "bad@@@", "a@b", "@example.com", "a b@example.com"];
+
+  it.each(emailOk)("EMAIL_PATTERN 接受 %s", (e) => {
+    expect(EMAIL_PATTERN.test(e)).toBe(true);
+  });
+  it.each(emailBad)("EMAIL_PATTERN 拒绝 %s", (e) => {
+    expect(EMAIL_PATTERN.test(e)).toBe(false);
+  });
+});
