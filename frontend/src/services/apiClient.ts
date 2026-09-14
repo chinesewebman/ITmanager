@@ -29,6 +29,9 @@ export type TicketDTO = components['schemas']['Ticket']
 /** TicketHistory 工单经手历史行（M25） */
 export type TicketHistoryDTO = components['schemas']['TicketHistory']
 
+/** AuditLog 审计日志行（M49 G-UI-Audit） */
+export type AuditLogDTO = components['schemas']['AuditLog']
+
 /** Rack 机柜对象 */
 export type RackDTO = components['schemas']['Rack']
 

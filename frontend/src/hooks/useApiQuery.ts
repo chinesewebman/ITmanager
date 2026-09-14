@@ -32,6 +32,13 @@ export const queryKeys = {
     stats: () => ['dashboard', 'stats'] as const,
     trends: () => ['dashboard', 'trends'] as const,
   },
+  // M49 G-UI-Audit：filter（含 cursor）进 key，翻页/筛选各自独立缓存；vocabulary 是不带筛选的
+  // 词表采样（后端没有 action/user 枚举接口），与列表分开缓存。
+  audit: {
+    all: ['audit'] as const,
+    list: (filters?: Record<string, unknown>) => ['audit', 'list', filters ?? {}] as const,
+    vocabulary: () => ['audit', 'vocabulary'] as const,
+  },
 }
 
 // 2. useApiQuery — 列表/详情查询统一入口

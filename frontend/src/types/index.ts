@@ -1,7 +1,7 @@
 // 用户相关类型
 // User 由 openapi.yaml 生成（api.types.ts components.schemas.User），
 // 从 apiClient 单一源头 re-export，避免手维护 role union 漂移（P1-4）。
-import type { User, User as ApiClientUser, TicketHistoryDTO as ApiTicketHistory } from '../services/apiClient'
+import type { User, User as ApiClientUser, TicketHistoryDTO as ApiTicketHistory, AuditLogDTO as ApiAuditLog } from '../services/apiClient'
 export type { User }
 
 // P1-4 单一源头断言：User 必须与 apiClient.User 同型（角色词表唯一来源）。
@@ -147,6 +147,55 @@ export interface TicketHistory {
 type _Extends<X, Y> = [X] extends [Y] ? true : false
 export type TicketHistoryDriftOK = _Assert<_Extends<TicketHistory, ApiTicketHistory>>
 export type TicketHistoryDriftOKRev = _Assert<_Extends<ApiTicketHistory, TicketHistory>>
+
+// 审计日志相关类型（M49 G-UI-Audit）
+//
+// 字段逐个对齐 openapi.yaml 的 `AuditLog`（后端 models.AuditLog / 中间件写入的那一行）。
+// **没有 request body**：审计只记方法 / 路径 / 状态码 / 错误摘要 —— 请求体从不落库，
+// 所以「payload 摘要」列只能从 method+path+status 派生，详情抽屉展示的是整行而非请求体。
+//
+// 手写而非 re-export 的理由同 TicketHistory（渲染层要挂注释、要标哪些可空）。
+// 漂移守卫只能做**单向**：openapi 的 AuditLog 没声明 required，生成物每个字段都是可选的，
+// 反方向（生成物 ⊂ 本地）恒真、不构成断言。正方向仍能抓住「生成物少字段 / 改名 / 类型收紧」
+// （例如把 status 改成 string）。
+//
+// 空值语义：未认证请求（登录失败）的 user_id 是真 null；resource_id 是裸 UUID 无外键，
+// 被删对象的行仍然保留。id/action/created_at 后端必写（GORM 主键 + not null 列 + 默认时间戳），
+// 故按必填建模；其余列在零值时空串/0（Go 的 string/int 零值），不做 null 区分。
+export interface AuditEvent {
+  id: string
+  /** 未认证请求（如登录失败）为 null */
+  user_id?: string | null
+  /** 写入时点的用户名快照 */
+  username?: string
+  action: string
+  /** 路由首个静态段（如 assets / tickets） */
+  resource?: string
+  resource_id?: string | null
+  method?: string
+  path?: string
+  ip?: string
+  user_agent?: string
+  /** HTTP 状态码 */
+  status?: number
+  error_msg?: string
+  request_id?: string
+  created_at: string
+}
+export type AuditLogDriftOK = _Assert<_Extends<AuditEvent, ApiAuditLog>>
+
+// GET /api/audit-logs 的查询参数（**cursor 分页**，不是 page/page_size）。
+// 后端为精确匹配（action/method/path 都是 `=`，path 是前缀 LIKE）；user_id 非法 uuid 会被
+// 静默忽略（退回不按用户过滤），不是 400。下一页把响应的 next_cursor 原样回传。
+export interface AuditListParams {
+  user_id?: string
+  action?: string
+  method?: string
+  /** 前缀匹配（后端 LIKE 'path%'） */
+  path?: string
+  cursor?: string
+  limit?: number
+}
 
 // 通知渠道相关类型
 // config 是后端落库的 JSON **字符串**（表单里才 parse 成对象）。

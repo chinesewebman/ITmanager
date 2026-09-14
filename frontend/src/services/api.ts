@@ -7,6 +7,8 @@ import type {
   LoginRequest,
 } from "./apiClient";
 import { dispatchAuthLogout } from "./authEvents";
+// M49: 审计日志查询参数（与 openapi AuditLog 同源的手写类型，见 types/index.ts）
+import type { AuditListParams } from "../types";
 
 // 创建 axios 实例（C-F5：用 httpOnly cookie 替代 localStorage 存 token）
 const api: AxiosInstance = axios.create({
@@ -95,6 +97,11 @@ export const authApi = {
   // C7: 改密 (复用 PUT /auth/password; 后端 ChangePassword handler 兼容)
   changePassword: (oldPassword: string, newPassword: string) =>
     api.put("/auth/password", { old_password: oldPassword, new_password: newPassword }),
+  // M49: 当前身份 + 能力集（后端从鉴权上下文下发 role/capabilities）。
+  // Settings 的「管理」入口据此判断是否显示审计日志链接 —— 前端不复制一份
+  // 角色→能力矩阵（backend/internal/middleware/roles.go 注释明确警告过复制会漂移，
+  // 且「按钮隐藏但接口放行」的错位正是从复制矩阵开始的）。
+  me: () => api.get("/auth/me"),
 };
 
 // ==================== 仪表盘 ====================
@@ -215,6 +222,15 @@ export const apiKeyApi = {
   revoke: (id: string) => api.put(`/auth/api-keys/${id}/revoke`),
   delete: (id: string) => api.delete(`/auth/api-keys/${id}`),
 }
+
+// ==================== 审计日志（M49 G-UI-Audit） ====================
+// 后端 GET /api/audit-logs（protected + canAudit 能力：admin / ops_admin / auditor）。
+// 路径**不能**写成 "/audit/logs"：真实路由是 `/api/audit-logs`（routes.go:286），
+// 前缀错会落到 NoRoute 返回 index.html（同 B1-1 的 /auth/api-keys 教训）。
+// 分页是 **cursor 式**（limit + next_cursor），没有 page/page_size 与 total。
+export const auditApi = {
+  list: (params?: AuditListParams) => api.get("/audit-logs", { params }),
+};
 
 // ==================== 通知渠道 ====================
 export const notificationApi = {
