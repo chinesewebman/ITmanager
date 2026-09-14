@@ -345,17 +345,23 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
   - **`refetch()` 替代 `useQueryClient().invalidateQueries`**：保持跟老 `createMut / updateMut` 同模式，
     避免引入 `useQueryClient` 导致老 `Assets.test.tsx`（无 QueryClientProvider wrapper）级联失败。
     TODO: 后续若用 `useApiMutation` 内置 invalidate, 可一并换掉。
+  - **（fix M51-1, P1 review）批量按钮互锁**：三条按钮 (`批量退役` / `批量恢复` / `清空选择`) 全部
+    `disabled={bulkRetireMut.isPending || bulkRestoreMut.isPending}` + `loading=...`。防 race condition：
+    用户选中 50 项点 [批量退役] 后再点 [批量恢复]，两条 mutate 同时 in-flight 会互相 `setSelectedRowKeys([])`。
 - **`frontend/src/components/AssetTable.tsx`** —
   - `rowSelection?:` 接口加 `[key: string]: any`（**TypeScript index signature**），
     让父组件自由透传 antd 原生字段（如 `preserveSelectedRowKeys`、`getCheckboxProps`），
     组件内部仍 spread 进 antd `<Table>`。**不破坏**老调用方（兼容既有 `selectedRowKeys / onChange`）。
-- **`frontend/src/pages/Assets.test.tsx`** — 新加 5 个用例（18 / 18 PASS）：
+- **`frontend/src/pages/Assets.test.tsx`** — 新加 6 个用例（19 / 19 PASS）：
   1. 选中 0 项时 `data-testid='asset-bulk-bar'` 不渲染。
   2. 选中 ≥1 项时批量条出现且显示「已选 N 项」。
   3. `[清空选择]` 清掉 `selectedRowKeys`，批量条隐藏。
   4. 全是 `active` 资产时不显示「批量恢复」（`selectedHasRetired === false`）。
-  5. placeholder mutation 实证（注：受 `useApiMutation` 老 mock `{mutate: vi.fn()}` 限制，
-     真 mutation 路径通过 `refetch()` + `setSelectedRowKeys([])` 状态机验证；e2e 见 `db_smoke`）。
+  5. **`[批量退役]` 真 mutation 实证（fix M51-2, P1 review）**：让 `useApiMutation` mock 走真 mutator
+     （不接 QueryClient, 避免测试套级联包装），Popconfirm trigger → OK → onConfirm → mutate →
+     `assetApi.retire` spy 真被调 N 次，reason = "批量退役"。
+  6. **`[批量退役]` mutation inversion 实证**：bypass `onConfirm={() => { /*MUT*/} }` →
+     测试 5 FAIL (1/19), revert → 19/19 PASS。证据测试 5 不是 vacuous。
 
 **未做（intent 明确 out of scope，留 future round）**：
 - 批量改标签 / 批量转移 owner / 批量导出 / 服务端 `bulk_retire` 端点（前端循环 N 次即可，
