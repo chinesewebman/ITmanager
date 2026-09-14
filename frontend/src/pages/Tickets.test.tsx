@@ -3,6 +3,7 @@
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Tickets from './Tickets'
 
 // vi.hoisted：mock 工厂在 import 期就会被调用，共享状态必须在提升块里创建
@@ -45,6 +46,16 @@ vi.mock('../hooks/useApiQuery', () => ({
         ...h.statsOverride,
       }
     }
+    if (k[0] === 'users') {
+      // M50：详情弹窗的派单候选人列表（工单页与它不相干，这里只要它别顶掉 lastListKey）。
+      return {
+        data: { data: { items: [], total: 0 } },
+        isLoading: false,
+        isError: false,
+        error: undefined,
+        refetch: vi.fn(),
+      }
+    }
     if (k[1] === 'history') {
       // M25 经手记录时间线（TicketDetailModal 内）。这里只要求它别把详情弹窗带崩 ——
       // 分组/渲染的正确性在 TicketHistoryTimeline.test.tsx 与 utils/ticketHistory.test.ts。
@@ -70,12 +81,30 @@ vi.mock('../hooks/useApiQuery', () => ({
   useApiMutation: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
   queryKeys: {
     tickets: {
+      // M50：弹窗在 mutation 成功后用 all 前缀 invalidate（列表/统计/历史一起）
+      all: ['tickets'],
       list: (f?: unknown) => ['tickets', 'list', f ?? {}],
       stats: () => ['tickets', 'stats'],
       history: (id: string) => ['tickets', 'history', id],
     },
   },
 }))
+
+/**
+ * M50：TicketDetailModal 自己发写请求并 invalidate 工单查询（后端只有一个写入口
+ * PUT /tickets/:id，mutation 收在弹窗里），于是它要求一个 QueryClient —— 真实运行
+ * 环境由 main.tsx 提供。这个文件此前不需要 provider，是因为弹窗不碰 react-query。
+ */
+function renderTickets() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  })
+  return render(
+    <QueryClientProvider client={qc}>
+      <Tickets />
+    </QueryClientProvider>,
+  )
+}
 
 beforeEach(() => {
   h.listOverride = {}
@@ -92,7 +121,7 @@ function statValue(label: string): string | undefined {
 
 describe('Tickets page', () => {
   it('渲染工单页 + 表格（mock 数据）', () => {
-    render(<Tickets />)
+    renderTickets()
     expect(screen.getByText('工单管理')).toBeInTheDocument()
     // TicketTable 显示 mock 工单标题
     expect(screen.getByText('服务器磁盘空间不足')).toBeInTheDocument()
@@ -100,12 +129,12 @@ describe('Tickets page', () => {
   })
 
   it('不 crash 渲染', () => {
-    expect(() => render(<Tickets />)).not.toThrow()
+    expect(() => renderTickets()).not.toThrow()
   })
 
   it('W1：列表失败时显示错误态 + 重试，不回落 MOCK_TICKETS', () => {
     h.listOverride = { data: undefined, isError: true, error: { response: { status: 500 } } }
-    render(<Tickets />)
+    renderTickets()
     expect(screen.getByText('数据加载失败')).toBeInTheDocument()
     // 关键回归断言：MOCK_TICKETS 里的标题必须消失
     expect(screen.queryByText('服务器磁盘空间不足')).toBeNull()
@@ -115,7 +144,7 @@ describe('Tickets page', () => {
   })
 
   it('W1：统计卡按未筛选列表真实推导（5 档，不再写死 3/5/2/15）', () => {
-    render(<Tickets />)
+    renderTickets()
     expect(statValue('待处理')).toBe('7')
     expect(statValue('处理中')).toBe('4')
     expect(statValue('待定')).toBe('2')
@@ -127,7 +156,7 @@ describe('Tickets page', () => {
 
   it('W1：统计接口失败只在统计区块内报错，列表照常渲染', () => {
     h.statsOverride = { data: undefined, isError: true, error: { response: { status: 500 } } }
-    render(<Tickets />)
+    renderTickets()
     expect(screen.getByText('数据加载失败')).toBeInTheDocument()
     // 区块隔离：列表数据不受牵连
     expect(screen.getByText('服务器磁盘空间不足')).toBeInTheDocument()
@@ -137,7 +166,7 @@ describe('Tickets page', () => {
 
   // M10 + M3/P5：副标题计数来自服务端 total（默认 = items.length），筛选后补「（已筛选）」。
   it('M10：副标题计数来自服务端 total，筛选后补「（已筛选）」', async () => {
-    render(<Tickets />)
+    renderTickets()
     expect(screen.getByText('共 2 个工单')).toBeInTheDocument()
     // 打开状态下拉并选「新建」
     fireEvent.mouseDown(screen.getAllByRole('combobox')[0])
@@ -148,7 +177,7 @@ describe('Tickets page', () => {
   // M3/P5：服务端分页——total 不再丢弃 + 翻页更新 queryKey（page 变化），筛选变化重置 page。
   it('M3/P5：服务端分页——翻页更新 queryKey 的 page，筛选重置回第 1 页', async () => {
     h.listOverride = { data: { items: LIST_TICKETS, total: 100 } }
-    const { container } = render(<Tickets />)
+    const { container } = renderTickets()
 
     // 副标题来自服务端 total（覆盖 items.length=2）
     expect(screen.getByText('共 100 个工单')).toBeInTheDocument()
@@ -175,7 +204,7 @@ describe('Tickets page', () => {
   // M2：表格排序——此前全站零 sorter，用户无法点击表头排序。
   // TicketTable 给标题/优先级/状态/请求人/处理人/创建时间加前端本地排序；这里验证最核心的时间排序行为。
   it('M2：创建时间列可排序（点击表头后按时间升序重排）', async () => {
-    const { container } = render(<Tickets />)
+    const { container } = renderTickets()
     // 整行 textContent（无 rowSelection，但统一用 data-row-key 选行，避免列位置耦合）
     const rowTexts = () =>
       Array.from(container.querySelectorAll('tbody tr[data-row-key]')).map(
@@ -193,13 +222,13 @@ describe('Tickets page', () => {
   })
 
   it('W2：创建时间走 utils/time 统一格式（T 分隔 → 空格）', () => {
-    render(<Tickets />)
+    renderTickets()
     expect(screen.getByText('2026-02-14 10:00:00')).toBeInTheDocument()
     expect(screen.getByText('2026-02-13 15:00:00')).toBeInTheDocument()
   })
 
   it('W2：详情弹窗的创建/更新时间同样格式化', () => {
-    render(<Tickets />)
+    renderTickets()
     fireEvent.click(screen.getAllByText('详情')[0])
     expect(screen.getByText('工单详情')).toBeInTheDocument()
     expect(screen.getByText('2026-02-14 11:00:00')).toBeInTheDocument()

@@ -5,6 +5,7 @@ import type {
   AlertListParams,
   TicketListParams,
   LoginRequest,
+  User as UserDTO,
 } from "./apiClient";
 import { dispatchAuthLogout } from "./authEvents";
 // M49: 审计日志查询参数（与 openapi AuditLog 同源的手写类型，见 types/index.ts）
@@ -193,7 +194,11 @@ export const ticketApi = {
 
 // ==================== 用户 ====================
 export const userApi = {
-  list: () => api.get("/users"),
+  // M50：派单候选人下拉要按角色筛，故必须能指定 page_size —— 后端默认 20 条
+  // （user_handler.go:27），一个几十人的部署会静默丢掉候选池里的运维。
+  // 上限由 service 夹在 500（user_service.go:34-36），传大了不会报错。
+  list: (params?: { page?: number; page_size?: number }) =>
+    api.get<{ code: number; data: { items: UserDTO[]; total: number } }>("/users", { params }),
   get: (id: string) => api.get(`/users/${id}`),
 };
 
