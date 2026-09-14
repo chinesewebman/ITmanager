@@ -7,7 +7,8 @@ import "@testing-library/jest-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import Settings, { URL_PATTERN, EMAIL_PATTERN } from "./Settings";
+import Settings from "./Settings";
+import { URL_PATTERN, EMAIL_PATTERN } from "../utils/validators";
 import type { AxiosResponse } from "axios";
 import { message } from "antd";
 // G-33 M1：跨语言配置契约样本（后端 internal/service/channel_service_test.go 读同一文件）

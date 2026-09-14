@@ -4,6 +4,7 @@ import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, T
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { notificationApi, integrationApi, apiKeyApi, authApi, type APIKey } from '../services/api'
 import { formatDateTime } from '../utils/time'
+import { EMAIL_PATTERN, urlRules, emailRules, portRules, arrayOfPatternRules } from '../utils/validators'
 import { PageHeader } from '../components/PageHeader'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -15,39 +16,10 @@ interface NotificationChannel {
   is_enabled: boolean
 }
 
-// ===== M59: 集成 / 通知表单的共享格式规则 =====
-// 放在 module 顶层 (不是组件内硬编码): 测试可 import 直接钉正/负样本, 且 10 处 form
-// item 引用同一份规则对象 —— 改一处不会漏掉另一处。
-//
-// URL_PATTERN 刻意允许**无 TLD 的内网地址**(`http://zabbix:8080`): 三家集成的目标
-// 通常是内网主机名/IP, 用「必须有 TLD」的写法会把合法配置挡在门外。
-export const URL_PATTERN = /^https?:\/\/[^\s/$.?#].[^\s]*$/
-export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-export const urlRules = [
-  { required: true, message: '请输入 URL' },
-  { pattern: URL_PATTERN, message: 'URL 必须以 http:// 或 https:// 开头' },
-]
-export const emailRules = [
-  { required: true, message: '请输入邮箱' },
-  { pattern: EMAIL_PATTERN, message: '邮箱格式不正确' },
-]
-export const portRules = [
-  { required: true, message: '请输入端口' },
-  { type: 'integer' as const, min: 1, max: 65535, message: '端口必须在 1-65535 之间' },
-]
-// 收件人是 tags 数组 (Select mode="tags") —— antd 的 pattern 规则只作用于字符串值,
-// 对数组不生效, 必须逐项校验。
-export const toRules = [
-  { required: true, message: '请输入收件人' },
-  {
-    validator: (_: unknown, value: unknown) => {
-      if (!Array.isArray(value)) return Promise.resolve()
-      return value.some((v) => !EMAIL_PATTERN.test(String(v).trim()))
-        ? Promise.reject(new Error('邮箱格式不正确'))
-        : Promise.resolve()
-    },
-  },
-]
+// M59 的 URL/email/port 规则 M60 已提到 src/utils/validators.ts（跨页复用，pattern 单一事实来源）。
+// `to` 是 tags 数组 → 走 arrayOfPatternRules（antd 的 pattern 规则对数组静默不生效，T-71）；
+// 必填文案保持「请输入收件人」（该字段的 label 是「收件人」而不是「邮箱」）。
+const toRules = arrayOfPatternRules(EMAIL_PATTERN, '邮箱', '请输入收件人')
 
 function Settings() {
   const navigate = useNavigate()
