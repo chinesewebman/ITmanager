@@ -111,7 +111,8 @@ export const AlertTable = memo(function AlertTable({
   const columns = useMemo<ColumnsType<Alert>>(() => [
     // M2：加前端本地排序。主机/状态按字符串，级别按 severity 数值，时间按 Date 解析
     // （RFC3339 字符串字典序会因时区偏移不同而错序，故不用 localeCompare）。
-    { title: "主机", dataIndex: "host", key: "host", width: 150, sorter: (a, b) => a.host.localeCompare(b.host) },
+    // M54: 长主机名 ellipsis + Tooltip (showTitle: 让 antd Table 自动挂浏览器原生 tooltip).
+    { title: "主机", dataIndex: "host", key: "host", width: 150, ellipsis: { showTitle: true }, sorter: (a, b) => a.host.localeCompare(b.host) },
     { title: "告警信息", dataIndex: "message", key: "message" },
     {
       title: "级别",
