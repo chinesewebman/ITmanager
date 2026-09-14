@@ -489,11 +489,10 @@ func TestUpdateGLPI_空Token_各自保留旧值(t *testing.T) {
 	assert.Equal(t, "preserved-user", cfg.Integrations.GLPI.UserToken, "空 user_token 必须保留旧值")
 }
 
-// ==================== M59: 集成 URL 的 `url` binding ====================
+// ==================== M59 + M60: 集成 URL 的 scheme 校验 ====================
 
-// TestUpdateIntegrations_非URL_返400 M59: 三家集成的 URL 都带 `binding:"required,url"`，
-// scheme-less 的值（`not-a-url`）必须在进 handler 逻辑前被拒。M59 前只有 required ——
-// API 直连 / 脚本调用（不经前端表单）可以写入非法 URL。
+// TestUpdateIntegrations_非URL_返400 M59 引入、M60 换成自定义校验后仍成立：
+// scheme-less 的值（`not-a-url`）不进 handler 逻辑，直接 400。
 func TestUpdateIntegrations_非URL_返400(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -516,10 +515,10 @@ func TestUpdateIntegrations_非URL_返400(t *testing.T) {
 	}
 }
 
-// TestUpdateIntegrations_内网URL_不被url标签拒 M59: go-playground/validator 的 `url` tag
-// 只要求「有 scheme + host」，**不**要求 TLD —— 集成目标常是内网主机名（`http://netbox:8000`）。
-// 这条钉住「内网地址必须放行」：若把它换成「必须有 TLD」的校验，合法配置会被挡在门外
-// （M59 brief 点名的风险，实测 v10.16 不成立，用断言固化）。
+// TestUpdateIntegrations_内网URL_不被url标签拒 M59 引入、M60 起由 isHTTPURL 承接同一语义：
+// scheme 是 http 但 **host 无 TLD**（`http://netbox:8000`）的自定义校验必须放行 —— 集成目标
+// 常是内网主机名。若哪天换成「必须有 TLD」的校验（直接 `new URL()` 强校验 / RFC 3986 附录 B
+// 正则），合法配置会被挡在门外（M59 brief 点名的风险），这条钉住它。
 func TestUpdateIntegrations_内网URL_不被url标签拒(t *testing.T) {
 	cfg := minimalCfgForTest("", "", "")
 	r := newIntegrationTestRouter(cfg)
@@ -532,6 +531,55 @@ func TestUpdateIntegrations_内网URL_不被url标签拒(t *testing.T) {
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, "http://netbox:8000", cfg.Integrations.Netbox.URL)
+}
+
+// TestUpdateIntegrations_非HTTPScheme_返400 M60/T-56：三家集成的 URL 必须是 http(s)。
+//
+// M59 用的 `binding:"url"` 只要求「有 scheme + host」—— `ftp://example.com` 照样通过，
+// 于是 API 直连 / 脚本调用能给集成配置写进非 http(s) 的地址（前端 URL_PATTERN 拦不住绕过的调用）。
+// 这条按 3 端点 × 3 非 http(s) scheme 展开，钉住「handler 里那道 isHTTPURL」：
+// 断言 400 **且** cfg 未被写 —— 证明拒绝发生在写内存配置之前，不是「先写坏再报错」。
+func TestUpdateIntegrations_非HTTPScheme_返400(t *testing.T) {
+	for _, ep := range []struct {
+		name  string
+		path  string
+		body  func(url string) string
+		urlOf func(*config.Config) string
+	}{
+		{
+			name:  "zabbix",
+			path:  "/integrations/zabbix",
+			body:  func(u string) string { return `{"url":"` + u + `","user":"Admin"}` },
+			urlOf: func(c *config.Config) string { return c.Integrations.Zabbix.URL },
+		},
+		{
+			name:  "netbox",
+			path:  "/integrations/netbox",
+			body:  func(u string) string { return `{"url":"` + u + `","token":"t"}` },
+			urlOf: func(c *config.Config) string { return c.Integrations.Netbox.URL },
+		},
+		{
+			name:  "glpi",
+			path:  "/integrations/glpi",
+			body:  func(u string) string { return `{"url":"` + u + `","app_token":"a","user_token":"b"}` },
+			urlOf: func(c *config.Config) string { return c.Integrations.GLPI.URL },
+		},
+	} {
+		// file:/// 是「有 scheme + 有 host」的合法 URI，正是 `url` tag 放行而白名单必须挡的形态。
+		for _, scheme := range []string{"ftp://example.com", "file:///etc/passwd", "ssh://root@10.0.0.1"} {
+			t.Run(ep.name+"/"+scheme, func(t *testing.T) {
+				cfg := minimalCfgForTest("", "", "")
+				r := newIntegrationTestRouter(cfg)
+				req := httptest.NewRequest(http.MethodPut, ep.path, bytes.NewReader([]byte(ep.body(scheme))))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+
+				assert.Equal(t, http.StatusBadRequest, w.Code)
+				assert.Empty(t, ep.urlOf(cfg), "非 http(s) 的值不得写进内存 cfg")
+			})
+		}
+	}
 }
 
 // ==================== v2.2: TestNetBox/TestGLPI 连通 ====================
