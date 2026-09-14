@@ -337,6 +337,31 @@
 
 ---
 
+### T-62. `PUT /tickets/{id}` 认的是**库列名**，不是 openapi `Ticket` 的字段名 —— 写 `assignee` 是 500 而不是「没效果」
+**状态**: ACTIVE | **类别**: 前后端契约 | **来源**: M50 (2026-09-14)
+**现象**: 前端按 openapi 生成物写 `{ assignee: '李四' }`，接口回 500「更新工单失败」。
+**根因**: handler 把请求体绑成裸 `map[string]interface{}` 直接交给 gorm 的
+`Updates(map)`（`ticket_handler.go:158-185` → `ticket_service.go:491`），gorm 按**列名**解析每个键；
+`assignee` 只是读侧 JSON 名（`openapi.yaml` 的 `Ticket.assignee`），库里那一列叫 `assignee_name`
+（`models/ticket.go:22-23`）→ PG 报 `column "assignee" does not exist` → 500。
+**检测**: 写工单前先 `grep -n 'json:"' internal/models/ticket.go`；或在真库上对目标列跑一次 PUT。
+**修**: 写 `assignee_name`。反向的坑同样存在：`TicketList.data` 声明成裸数组、`updated_at` 不可写
+（进了 `immutableTicketUpdateFields`）—— **openapi 的 Ticket ≠ 可写字段集**。
+**推广**: 任何「请求体是 map」的更新端点，契约层字段名与库列名是两套东西，别按生成物拼键。
+
+### T-63. 遗留角色别名 `operator` 在**出站**已被折叠 —— 前端按 `operator` 筛用户列表**永远筛不到**
+**状态**: ACTIVE | **类别**: 角色词表 | **来源**: M50 (2026-09-14)
+**现象**: 派单候选人下拉按 `role === 'operator'` 过滤，列表**恒为空**，而库里确实有运维账号。
+**根因**: `operator` 是设计期别名，`GET /users` 在出站前对每行跑 `CanonicalRole`
+（`user_handler.go:34-37` → `middleware/roles.go:77-83`）→ 客户端只会看到 `ops_user`。
+写 `role === 'ops_user'` 之外的一切写法（`operator` / 大写 / Go 常量拼写）都静默匹配 0 行。
+**检测**: 拿一个运维账号看 `/users` 的原始响应里的 `role` 值，以**它**为准写判据。
+**修**: 判据用折叠后的词表值（写能力集＝`capRoles[CapWrite]` 的运维角色 `ops_user`/`ops_admin`）。
+**推广**: 任何按角色分流的前端逻辑，别用 **openapi enum 之外的**历史写法；角色判据只在
+`middleware/roles.go` 定义一次，前端复制一份就会漂移（该文件头部注释已列 6 处必须同步的位置）。
+
+---
+
 ## 三、跨模块陷阱
 
 ### T-22. 新 endpoint 漏 1 处 = 编译/404/nil panic
@@ -1041,6 +1066,8 @@ R1/R2 的变异 M7 常量偏大 / M7b 常量偏小 只能在真 PG 上分辩)。
 | — (M31 轮) | T-59 | ACTIVE |
 | — (M32 轮) | T-60 | ACTIVE |
 | — (M33 轮) | T-61 | ACTIVE |
+| — (M50 轮) | T-62 | ACTIVE |
+| — (M50 轮) | T-63 | ACTIVE |
 
 ---
 

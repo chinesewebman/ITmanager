@@ -323,6 +323,65 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M50 — G-UI-Tickets 工单工作流产品化（2026-09-14）
+
+**改了什么（frontend-only，后端零改动）：**
+
+工单页在此之前是**只读**的：详情弹窗 footer 只有一个 `[关闭]`，列表行只有一个 `[详情]`，
+运维要改派/改优先级/关单**没有任何入口**（PM 自查 G-UI-Tickets）。
+
+- **`frontend/src/components/TicketDetailModal.tsx`** — footer 加 5 个操作，全部**写这一个弹窗**里：
+  - `[+ 评论]` → 展开 `<TextArea>` + `[提交评论]`（**空文本时按钮 disabled**，intent 硬要求前端挡空提交）。
+  - `[改派]` → 展开人员下拉（懒加载，展开才请求）+ `[确认改派]`。
+  - `[改优先级]` → 展开四档下拉（`critical/high/normal/low`，即 service 的契约词表）+ `[确认修改]`。
+  - `[关单]` / `[已解决]` → `Popconfirm` **二次确认**后写 `status`。
+  - `[关闭]` 原样保留（它是收起弹窗，不是关单）。
+  - 五种操作共用**一条** mutation（后端只有一个写入口，拆五条只会把 invalidate/收弹窗写五遍）；
+    `onSuccess` → `message.success` + `invalidateQueries({queryKey: queryKeys.tickets.all})` + `onClose()`。
+    错误**不在这里处理**：axios 拦截器已统一 toast，再加一层就是同一句话弹两遍；弹窗内不放 error alert。
+- **`frontend/src/components/TicketTable.tsx`** — 加 `更新时间` 列（`formatRelativeTime`，在 `创建时间` 之后，
+  带 sorter；相对时间回答的是「多久没动了」）+ 行尾 `[更多操作]` `Dropdown`（**click 触发**，
+  antd 默认 hover 在触屏/键盘够不着）：查看详情 / 改派 / 改优先级 / 关单。
+  四个入口都只是**打开票面**（`onView` / `onAssign` / `onChangePriority` / `onClose` 传整行 record），
+  写入仍只在弹窗里发生。
+- **`frontend/src/pages/Tickets.tsx`** — 接收三个行回调 → `openTicket(record, panel)` 打开弹窗并
+  预设展开哪块面板（`initialAction`）。
+- **`frontend/src/services/api.ts`** — `userApi.list` 加可选 `page/page_size` 并**收窄返回类型**。
+  派单候选池必须显式放大分页：后端默认 20 条（`user_handler.go:27`）会静默丢掉运维。
+  **`ticketApi` 一字未改**（不改契约、不加新方法）。
+
+**与 intent 假设不符、按实测改掉的三处（grep 后端后确认）：**
+
+1. **`POST /tickets/:id/comments` 不存在** —— 全仓无 comment handler，openapi 也没这个 path。
+   工单上唯一可写的自由文本列是 `description`，故「加评论」= 追加成新段落再 `PUT`；
+   这次改动会以「描述」的字段变更进 M25 经手历史（正好是 intent 想要的「提交后刷新经手历史」）。
+2. **「改派」写 `assignee_name`，不写 `assignee`** —— `assignee` 是 openapi 的**读侧**字段名，
+   库里没有这一列，写了 gorm 拼出不存在的列 → 500（新登记 **T-62**）。也不写 `assignee_id`：
+   该列前后端零消费方，写它只会多出一行裸 UUID 的经手历史（残余风险见报告）。
+3. **候选角色判据用 `ops_user`/`ops_admin`** —— `operator` 是设计期别名，`GET /users` 出站前
+   已由 `CanonicalRole` 折叠（`user_handler.go:34-37`），按 `operator` 筛**恒为 0 行**（新登记 **T-63**）。
+
+**测试（`TicketDetailModal.test.tsx` 6 新 + `TicketTable.test.tsx` 2 新）：**
+
+- 弹窗层**不 mock `services/api`**（M25 那边 mock 掉服务模块是它的取舍）：走真 axios 实例、只换
+  `api.defaults.adapter`，于是响应拦截器**真的执行** ——「失败只弹一次 toast」这条断言才有内容，
+  且能顺带钉住「弹窗没多加一层 toast」（`message.error` 调用次数恰为 1）。
+- 6 例：5 个按钮都在（含 `[关闭]` 不动）/ 空评论不可提交 + 提交后 `description` 是 `旧文\n\n新评论` /
+  关单 Popconfirm **确认前零请求** + 确认后 `{status:'closed'}` + invalidate + 收弹窗 /
+  失败：拦截器 toast 一次、弹窗不关、无 `.ant-alert-error`、不 invalidate / 改派候选只含运维角色
+  （`admin`/`auditor`/遗留 `operator` 都不出现）→ `{assignee_name}` / 改优先级四档 → `{priority}`。
+- 表：`更新时间` 列在表头且渲染相对时间；`[更多操作]` 四项俱全且把**整行 record** 交给对应回调。
+- **`Tickets.test.tsx` 既有 10 例全部保留**，仅补基建：弹窗现在要 `QueryClient`（真环境由 `main.tsx`
+  提供）→ `renderTickets()` 套 `QueryClientProvider`；mock 里补 `queryKeys.tickets.all` 与
+  `users` 键分支（否则弹窗的候选 query 会顶掉用例断言的 `lastListKey`）。
+- **Mutation inversion 实证 3 次**（revert 后逐条回绿）：① `[关单]` 的 `onConfirm` 改 `return` →
+  `2 failed | 4 passed`；② `ASSIGNEE_ROLES` 换成 `['admin','auditor']` → `1 failed | 5 passed`；
+  ③ 注释掉 `invalidateQueries` 一行 → `1 failed | 5 passed`。
+- 新增 trap **T-62 / T-63**（`docs/TRAPS.md` §二 + §五 索引）。
+
+**未做（intent 明确 out of scope）**：批量派单 / 工单模板 / SLA 提醒 / 导出 / 删除按钮 / 非 admin
+的权限门禁（后端 RBAC 已 ship，前端不再复制一份矩阵）。
+
 ### M49 — G-UI-Audit 审计日志前端页 + admin 入口（2026-09-14）
 
 **改了什么（frontend-only, 后端零改动）：**
