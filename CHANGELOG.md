@@ -323,6 +323,58 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M59 — G-UI-SettingsValidators 集成 / 通知 form 字段格式校验（F-1 结案）（2026-09-15）
+
+**摩擦**: `Settings.tsx` 里 10 个字段（3 集成 URL + 3 webhook URL + SMTP user/from/to + SMTP 端口）
+只校验 required —— 填 `not-a-url` / `99999` / `not-an-email` 前端一律放行，用户只有等后端 400
+才知道哪个字段错了（M57 留的 **F-1**）。
+
+**改动** (frontend 2 files + backend 2 files):
+
+- `frontend/src/pages/Settings.tsx`: URL / email pattern 提到 module 顶层并 `export`
+  （`URL_PATTERN` / `EMAIL_PATTERN`，测试可 import 直接钉正/负样本）；共享
+  `urlRules` / `emailRules` / `portRules` / `toRules` 在 **10 处 Form.Item** 引用 ——
+  改一处不会漏掉另一处，不再逐字段复制规则串。
+  `URL_PATTERN=^https?://[^\s/$.?#].[^\s]*$` **刻意允许内网无 TLD 地址**（`http://zabbix:8080`：
+  三家集成的目标是内网主机名/IP，「必须有 TLD」的写法会把合法配置挡在门外）；
+  `EMAIL_PATTERN=^[^\s@]+@[^\s@]+\.[^\s@]+$`；端口 `type: integer` + 1-65535。
+  `to` 是 `Select mode="tags"`（值域是**数组**）—— antd 的 `pattern` 规则对数组不生效，
+  故用自定义 `validator` 逐项校验。SMTP host 不加格式规则（域名/IP 校验太宽，只留 required）。
+- `frontend/src/pages/Settings.test.tsx`: 新 `describe` 两组 —— 7 条 UI 用例（坏值必须**不发请求**、
+  好值必须**走到请求**）+ 16 条 pattern 边界（`it.each`）；M6 两条断言随共享规则的 required 文案
+  同步（`请输入用户名`/`请输入发件人` → `请输入邮箱`；`请输入Webhook URL` → `请输入 URL`）。
+- `backend/internal/api/handlers/integration_handler.go`: `UpdateZabbixRequest` / `UpdateNetBoxRequest` /
+  `UpdateGLPIRequest` 的 `URL` 字段加 `binding:"required,url"` —— 前端已挡，但 API 直连 / 脚本
+  不经过前端。**注意语义**：validator 的 `url` tag 只要求「scheme + host」，实测**接受**内网无 TLD 地址
+  （`http://zabbix:8080`，brief 的担心在 v10.16.0 不成立），但它**也接受 `ftp://example.com`** ——
+  它不是 http(s) 白名单（前端 pattern 才是），故这里挡的是 scheme-less 垃圾值，不是「只允许 http(s)」。
+  通知渠道的 `config` 是不透明 JSON 字符串（`smtp_host`/`webhook_url` 在串里），bind tag 无处可挂。
+- `backend/internal/api/handlers/integration_handler_test.go`: `TestUpdateIntegrations_非URL_返400`
+  （表驱动 3 家，`not-a-url` → 400）+ `TestUpdateIntegrations_内网URL_不被url标签拒`
+  （把「内网地址必须放行」固化，防未来换成「必须有 TLD」的校验）。
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- frontend `npx vitest run`: **42 files / 409 tests 全 PASS**（基线 386 → +23，零退化）
+- frontend `src/pages/Settings.test.tsx`: **58 tests PASS**（基线 35 → +23）
+- backend `go test -count=1 ./...`: **27 packages ok（0 fail）**
+- **mutation inversion 实证**（三处，打在不同层）：
+  - bypass Zabbix `rules={urlRules}`（退回 required-only）→ **1 failed \| 22 passed**
+  - 放宽 `EMAIL_PATTERN = /^.*$/` → **7 failed**（2 UI + 5 pattern 负样本）
+  - 后端去掉 `,url` binding → `TestUpdateIntegrations_非URL_返400/netbox` **FAIL**
+- 双轨分析：graphify + codegraph 0 anomalies（见 `M59-graph-analysis.md`）
+
+**行为变更（运维可见）**: 渠道弹窗 3 处 required 文案随共享规则统一（`请输入用户名`/`请输入发件人`
+→ `请输入邮箱`，Webhook URL → `请输入 URL`）。新增格式拦截：填错格式**前端即拒绝保存**，
+不再需要等后端 400。**边界风险（登记）**：SMTP 用户名现在必须通过 email 格式 —— SendGrid（`apikey`）
+/ AWS SES 等用非邮箱字符串作 SASL 用户名时会被挡，见 `M59-completion-report.md` Follow-up。
+
+**Out of scope**（留 future）:
+- 后端 http(s) 白名单（需自定义 validator）
+- SMTP user 的非邮箱用户名场景（若真实工单出现再放宽）
+- F-6 Token 留空语义 / F-7 「测试连接」/ F-9 保存按钮 loading
+- `URL_PATTERN` / `EMAIL_PATTERN` 提成跨页共享模块（`src/utils/validators.ts`）
+
 ### M58 — G-Asset-BulkRetireEndpoint 批量退役单端点（M51-3 结案）（2026-09-15）
 
 **摩擦**: M51 ship 的资产批量退役是前端 `bulkRetireMut` 里的**串行循环** —— 100 台资产 = 100 次
