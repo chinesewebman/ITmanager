@@ -364,12 +364,25 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				tickets.PUT("/:id", canWrite, ticketH.UpdateTicket)
 			}
 
-			// 用户列表暴露账号/邮箱/角色 → identity（仅 admin）
+			// 用户列表暴露账号/邮箱/角色 → identity（仅 admin）。
+			// M61 起整组也含**写**：账号处置（禁用离职员工 / 改角色 / 置强改密）。
+			//
+			// 写端点额外挂 RejectAPIKeyAuth：长期凭据不得改账号 —— admin 名下的
+			// write Key 原本能调 PATCH /users/:id/role 把任意账号提成 admin
+			//（权限持久化，吊销 Key 也撤不掉），或禁用掉真正的管理员（自锁），
+			// 与 /auth/api-keys、通知渠道、集成 PUT 的既有收口同源
+			//（docs/FIX-PLAN-AUTHZ-LEFTOVER.md S-2 同族）。
+			//
+			// 静态段与动态段的注册次序：PATCH/PUT 的模板是 `/:id/role` 这类**两段**路径，
+			// 与 GET `/:id`（一段）不冲突，故先 GET 后写也安全（gin 的树按段匹配）。
 			users := protected.Group("/users")
 			users.Use(canIdentity)
 			{
 				users.GET("", userH.ListUsers)
 				users.GET("/:id", userH.GetUser)
+				users.PUT("/:id", middleware.RejectAPIKeyAuth(), userH.UpdateUser)
+				users.PATCH("/:id/status", middleware.RejectAPIKeyAuth(), userH.UpdateUserStatus)
+				users.PATCH("/:id/role", middleware.RejectAPIKeyAuth(), userH.UpdateUserRole)
 			}
 			// 仪表盘
 			dashboard := protected.Group("/dashboard")

@@ -976,6 +976,186 @@ paths:
               schema:
                 $ref: '#/components/schemas/User'
 
+    put:
+      tags:
+        - 用户管理
+      summary: 更新用户（局部）
+      description: |
+        账号处置的**局部**更新：只写请求体里出现的字段，未出现的列一个字节都不动。
+        三个字段全为 null / 缺省时返回 400（「这次请求没有意义」不该回 200 加当前值）。
+
+        **严格请求体**：未知键一律 400 —— 而不是静默忽略。写 `{"email": …}` 拿到 200
+        而邮箱一字未改，是「写了不生效」的静默失败（调用方以为改成功了）。
+
+        **403 的两种情形**（策略拒绝，改参数重试无用）：
+        - 操作者禁用/降级自己（identity 路由只有 admin 进得来，点错即自锁在门外）
+        - 目标是最后一名**可登录**的管理员（禁用它之后无人能管理用户；
+          已被禁用的 admin 不算「能自救的那个人」）
+
+        `role` 先折叠设计期遗留别名（`operator`→`ops_user`、`viewer`→`readonly`）
+        再校验词表，落库的永远是词表值。
+      operationId: updateUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: 请求体非法 / 枚举或角色词表越界 / 未给出任何要改的字段
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 自我禁用 / 自我降级 / 目标是最后一名可登录管理员；或当前为 API Key 身份
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 用户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/{id}/status:
+    patch:
+      tags:
+        - 用户管理
+      summary: 启用/禁用用户
+      description: |
+        只改 `status`。窄端点的理由：前端表格点一下开关只知道自己要改 status，
+        整对象 PUT 会把同时刻别人改过的角色一起写回旧值（lost update）。
+
+        可写值只有 `active` / `inactive`。**没有 `locked`** —— 鉴权侧（JWT 路径、
+        API Key 路径、登录 handler）只拦 `status == "inactive"`，写 `locked`
+        不会拦住任何请求（真正的锁定走 `locked_until`），收它等于给管理员一个
+        静默无效的开关。
+
+        禁用效果：该账号的 JWT 与 API Key 立即失效（最长 30s 滞后，见
+        `middleware/auth_status_cache.go` 的 TTL 取舍）。
+
+        403 情形同 `PUT /users/{id}`（自我禁用 / 最后一名可登录管理员）。
+      operationId: updateUserStatus
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum: [active, inactive]
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: status 缺失或不在 [active, inactive] 内 / 请求体含未知键
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 自我禁用 / 目标是最后一名可登录管理员；或当前为 API Key 身份
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 用户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/{id}/role:
+    patch:
+      tags:
+        - 用户管理
+      summary: 修改用户角色
+      description: |
+        只改 `role`。取值 = 权威词表（`middleware/roles.go` 的 knownRoles，
+        与 `User.role` 的 enum 同源）。设计期遗留别名 `operator` / `viewer`
+        会被折叠成 `ops_user` / `readonly` 后落库 —— 直接存原始串会让
+        `role == "ops_user"` 这类字面量比较静默失配。
+
+        403 情形同 `PUT /users/{id}`（自我降级 / 降级最后一名可登录管理员）。
+      operationId: updateUserRole
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              additionalProperties: false
+              properties:
+                role:
+                  type: string
+                  enum: [admin, ops_admin, ops_user, auditor, readonly]
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: role 缺失或不在词表内 / 请求体含未知键
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 自我降级 / 目标是最后一名可登录管理员；或当前为 API Key 身份
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 用户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   # ==================== 通知渠道 ====================
   /notification-channels:
     get:
@@ -3429,9 +3609,39 @@ components:
           # 权威词表 = migrations/000001 的 roles.code + 000013 兜底值 user。
           # 旧值 operator/viewer 仅在存量库里可能见到，服务端会折叠为 ops_user/readonly。
           enum: [admin, ops_admin, ops_user, auditor, readonly, user]
+        status:
+          type: string
+          # 库列是裸 VARCHAR(20)、无 CHECK（migrations/000001:31），故 enum 收全三值：
+          # `locked` 是 models.User 注释里的历史取值，存量库可能有。
+          # **可写**的只有 active / inactive（PATCH /users/{id}/status）——
+          # 鉴权侧只拦 inactive，写 locked 不拦任何请求。
+          enum: [active, inactive, locked]
+        last_login:
+          type: string
+          format: date-time
+          nullable: true
+          description: 从未登录为 null
         created_at:
           type: string
           format: date-time
+
+    UserUpdateRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        局部更新：只写出现的字段。三个字段都缺省时服务端返回 400。
+        `additionalProperties: false` 是**如实**描述而非建议 —— handler 用
+        `DisallowUnknownFields` 严格解码，未知键一律 400（不是静默忽略）。
+      properties:
+        status:
+          type: string
+          enum: [active, inactive]
+        role:
+          type: string
+          enum: [admin, ops_admin, ops_user, auditor, readonly]
+        must_change_password:
+          type: boolean
+          description: 置 true 强制该账号下次登录改密（前端「重置密码」入口）
 
     UserList:
       type: object
@@ -3439,9 +3649,18 @@ components:
         code:
           type: integer
         data:
-          type: array
-          items:
-            $ref: '#/components/schemas/User'
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/User'
+            total:
+              type: integer
+            page:
+              type: integer
+            page_size:
+              type: integer
 
     # ==================== 通知渠道 ====================
     NotificationChannel:

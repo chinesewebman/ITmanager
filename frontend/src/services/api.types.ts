@@ -524,12 +524,84 @@ export interface paths {
         };
         /** 获取用户详情 */
         get: operations["getUser"];
-        put?: never;
+        /**
+         * 更新用户（局部）
+         * @description 账号处置的**局部**更新：只写请求体里出现的字段，未出现的列一个字节都不动。
+         *     三个字段全为 null / 缺省时返回 400（「这次请求没有意义」不该回 200 加当前值）。
+         *
+         *     **严格请求体**：未知键一律 400 —— 而不是静默忽略。写 `{"email": …}` 拿到 200
+         *     而邮箱一字未改，是「写了不生效」的静默失败（调用方以为改成功了）。
+         *
+         *     **403 的两种情形**（策略拒绝，改参数重试无用）：
+         *     - 操作者禁用/降级自己（identity 路由只有 admin 进得来，点错即自锁在门外）
+         *     - 目标是最后一名**可登录**的管理员（禁用它之后无人能管理用户；
+         *       已被禁用的 admin 不算「能自救的那个人」）
+         *
+         *     `role` 先折叠设计期遗留别名（`operator`→`ops_user`、`viewer`→`readonly`）
+         *     再校验词表，落库的永远是词表值。
+         */
+        put: operations["updateUser"];
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * 启用/禁用用户
+         * @description 只改 `status`。窄端点的理由：前端表格点一下开关只知道自己要改 status，
+         *     整对象 PUT 会把同时刻别人改过的角色一起写回旧值（lost update）。
+         *
+         *     可写值只有 `active` / `inactive`。**没有 `locked`** —— 鉴权侧（JWT 路径、
+         *     API Key 路径、登录 handler）只拦 `status == "inactive"`，写 `locked`
+         *     不会拦住任何请求（真正的锁定走 `locked_until`），收它等于给管理员一个
+         *     静默无效的开关。
+         *
+         *     禁用效果：该账号的 JWT 与 API Key 立即失效（最长 30s 滞后，见
+         *     `middleware/auth_status_cache.go` 的 TTL 取舍）。
+         *
+         *     403 情形同 `PUT /users/{id}`（自我禁用 / 最后一名可登录管理员）。
+         */
+        patch: operations["updateUserStatus"];
+        trace?: never;
+    };
+    "/users/{id}/role": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * 修改用户角色
+         * @description 只改 `role`。取值 = 权威词表（`middleware/roles.go` 的 knownRoles，
+         *     与 `User.role` 的 enum 同源）。设计期遗留别名 `operator` / `viewer`
+         *     会被折叠成 `ops_user` / `readonly` 后落库 —— 直接存原始串会让
+         *     `role == "ops_user"` 这类字面量比较静默失配。
+         *
+         *     403 情形同 `PUT /users/{id}`（自我降级 / 降级最后一名可登录管理员）。
+         */
+        patch: operations["updateUserRole"];
         trace?: never;
     };
     "/notification-channels": {
@@ -2008,12 +2080,37 @@ export interface components {
             email?: string;
             /** @enum {string} */
             role?: "admin" | "ops_admin" | "ops_user" | "auditor" | "readonly" | "user";
+            /** @enum {string} */
+            status?: "active" | "inactive" | "locked";
+            /**
+             * Format: date-time
+             * @description 从未登录为 null
+             */
+            last_login?: string | null;
             /** Format: date-time */
             created_at?: string;
         };
+        /**
+         * @description 局部更新：只写出现的字段。三个字段都缺省时服务端返回 400。
+         *     `additionalProperties: false` 是**如实**描述而非建议 —— handler 用
+         *     `DisallowUnknownFields` 严格解码，未知键一律 400（不是静默忽略）。
+         */
+        UserUpdateRequest: {
+            /** @enum {string} */
+            status?: "active" | "inactive";
+            /** @enum {string} */
+            role?: "admin" | "ops_admin" | "ops_user" | "auditor" | "readonly";
+            /** @description 置 true 强制该账号下次登录改密（前端「重置密码」入口） */
+            must_change_password?: boolean;
+        };
         UserList: {
             code?: number;
-            data?: components["schemas"]["User"][];
+            data?: {
+                items?: components["schemas"]["User"][];
+                total?: number;
+                page?: number;
+                page_size?: number;
+            };
         };
         NotificationChannel: {
             /** Format: uuid */
@@ -3392,6 +3489,171 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"];
+                };
+            };
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description 更新成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description 请求体非法 / 枚举或角色词表越界 / 未给出任何要改的字段 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 自我禁用 / 自我降级 / 目标是最后一名可登录管理员；或当前为 API Key 身份 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 用户不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    updateUserStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    status: "active" | "inactive";
+                };
+            };
+        };
+        responses: {
+            /** @description 更新成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description status 缺失或不在 [active, inactive] 内 / 请求体含未知键 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 自我禁用 / 目标是最后一名可登录管理员；或当前为 API Key 身份 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 用户不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    updateUserRole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    role: "admin" | "ops_admin" | "ops_user" | "auditor" | "readonly";
+                };
+            };
+        };
+        responses: {
+            /** @description 更新成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description role 缺失或不在词表内 / 请求体含未知键 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 自我降级 / 目标是最后一名可登录管理员；或当前为 API Key 身份 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 用户不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
