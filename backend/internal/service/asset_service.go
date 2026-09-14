@@ -24,6 +24,10 @@ var (
 	// 与 ErrInvalidInput 分开：那是「请求写错了」（400），这是「来晚了/状态已经走了」（409）。
 	// 混成一个会让调用方分不清「改参数重试」和「刷新后别再试」。
 	ErrInvalidState = errors.New("invalid state transition")
+	// ErrForbidden M61：请求合法、调用方也有权限，但**服务端策略**不允许（403）。
+	// 与 ErrInvalidInput 分开的理由同上：自我禁用 / 降级最后一名管理员改参数重试无用，
+	// 报 400 会让调用方去改请求体。目前只有账号处置守卫（user_service.go）用它。
+	ErrForbidden = errors.New("forbidden")
 )
 
 // AssetFilter 资产列表查询条件

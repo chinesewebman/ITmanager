@@ -18,7 +18,7 @@ type AuditConfig struct {
 	DB *gorm.DB
 	// SkipPaths 不记录审计的路径 (e.g. /healthz, /readyz, /metrics)
 	SkipPaths map[string]bool
-	// ActionFunc 从 context 推断 Action (默认用 HTTP method)
+	// ActionFunc 从 context 推断 Action（默认：context 键 audit_action 优先，缺省回落 HTTP method）
 	ActionFunc func(c *gin.Context) string
 	// Async 是否异步写入（零值 false = 同步写，响应返回时审计行已落库；
 	// 登录路由依赖这一点做测试断言，见 docs/FIX-PLAN-AUTHZ-CLOSURE.md §2 D-E）
@@ -49,7 +49,19 @@ func AuditLog(cfg AuditConfig) gin.HandlerFunc {
 		cfg.SkipPaths = DefaultSkipPaths()
 	}
 	if cfg.ActionFunc == nil {
-		cfg.ActionFunc = func(c *gin.Context) string { return c.Request.Method }
+		// 默认判据先看 context 键 `audit_action`：handler 可以用它把「同一个 HTTP 动词
+		// 的不同业务动作」区分开（账号处置的三个端点都是 PUT/PATCH，而审计页的「动作」
+		// 列要能读出改的是状态还是角色）。写入方式与登录 handler 放 `username` 同源 ——
+		// `c.Set("audit_action", …)`，无需为每条路由单挂一个 AuditLog 实例
+		//（那样会让每个请求**写两行**审计：组级实例 + 路由级实例都会落库）。
+		// 值由 handler 给定，不接受请求体字段，故不是可注入面；仍走 sanitizeField
+		// 收敛到 action 列的 varchar(50) 宽度。
+		cfg.ActionFunc = func(c *gin.Context) string {
+			if action := c.GetString("audit_action"); action != "" {
+				return action
+			}
+			return c.Request.Method
+		}
 	}
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -91,8 +103,12 @@ func AuditLog(cfg AuditConfig) gin.HandlerFunc {
 // buildAuditEntry 收集请求上下文
 func buildAuditEntry(c *gin.Context, cfg AuditConfig) *models.AuditLog {
 	entry := &models.AuditLog{
-		ID:       uuid.New(),
-		Action:   cfg.ActionFunc(c),
+		ID: uuid.New(),
+		// Action 也走 sanitizeField（列宽 varchar(50)，migrations/000001）：默认值是
+		// HTTP method（定长安全），但 handler 可以用 context 键 audit_action 覆盖 ——
+		// 那条路径进来的字符串此前完全不截断，超宽即 22001 → **整行** INSERT 被拒
+		//（G-44 同族：丢一行审计比日志难看严重得多）。
+		Action:   sanitizeField(cfg.ActionFunc(c), 50),
 		Resource: resourceFromPath(c),
 		Method:   c.Request.Method,
 		// G-44：以下字段全部走 sanitizeField（净化 + 按字符截断到列宽）。
