@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Tag, Space, Modal, message, Popconfirm, Spin, Alert, Menu } from 'antd'
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled, AuditOutlined } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { notificationApi, integrationApi, apiKeyApi, authApi, type APIKey } from '../services/api'
 import { formatDateTime } from '../utils/time'
 import { PageHeader } from '../components/PageHeader'
@@ -17,6 +17,12 @@ interface NotificationChannel {
 
 function Settings() {
   const navigate = useNavigate()
+  // M57: Tabs 受控 URL sync. 刷新 / 分享链接保留 tab 状态, 后退键也能在 tab 间切换
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = searchParams.get('tab') || 'integrations'
+  const handleTabChange = (key: string) => {
+    setSearchParams({ tab: key })
+  }
   const [channels, setChannels] = useState<NotificationChannel[]>([])
   const [loading, setLoading] = useState(false)
   const [channelModal, setChannelModal] = useState<{ open: boolean; data?: NotificationChannel }>({ open: false })
@@ -1129,7 +1135,12 @@ function Settings() {
     <div>
       {/* M1：标题体系统一——原用原生 h2，与其它页 PageHeader h4 不一致 */}
       <PageHeader title="系统设置" />
-      <Tabs items={tabItems} />
+      {/* M57: Tabs 受控 URL sync, 刷新 / 分享链接保留 tab 状态 */}
+      <Tabs
+        activeKey={activeTab}
+        onChange={handleTabChange}
+        items={tabItems}
+      />
     </div>
   )
 }

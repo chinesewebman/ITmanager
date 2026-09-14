@@ -5,7 +5,7 @@
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { message } from 'antd'
 
 // vi.hoisted：mock 工厂在 import 期被调用，共享状态必须在提升块里创建
@@ -58,7 +58,19 @@ vi.mock('../hooks/useApiQuery', () => ({
 import { Oncall } from './Oncall'
 
 function renderOncall() {
-  return render(<MemoryRouter><Oncall /></MemoryRouter>)
+  // M57：ProbeRoute 暴露 pathname + search, 便于断言 setSearchParams 效果
+  return render(
+    <MemoryRouter>
+      <Oncall />
+      <ProbeRoute />
+    </MemoryRouter>
+  )
+}
+
+function ProbeRoute() {
+  // M57：React Router v6 setSearchParams 触发后 useLocation() 会 re-render
+  const loc = useLocation()
+  return <div data-testid="oncall-path">{loc.pathname + loc.search}</div>
 }
 
 /** 切到某个 tab（antd 惰性渲染，非激活 tab 不挂载）。 */
@@ -347,5 +359,52 @@ describe('Oncall', () => {
       expect(message.error).toHaveBeenCalledWith('Levels JSON 格式错误，请检查后重试')
     })
     expect(h.apiSend).not.toHaveBeenCalled()
+  })
+})
+
+// M57: Tab URL sync — 用户刷新 / 分享链接保留 tab 状态
+describe('Oncall M57 Tab URL sync', () => {
+  beforeEach(() => {
+    h.overrides = {}
+    for (const k of ['current', 'schedules', 'policies']) h.refetch[k]?.mockClear()
+    h.apiSend.mockReset()
+  })
+
+  it('M57：默认 active tab = 当前值班 (URL 无 tab 时)', () => {
+    renderOncall()
+    const currentTab = screen.getByRole('tab', { name: '当前值班' })
+    expect(currentTab.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('M57：点击值班组 tab → URL search params 含 tab=schedules', async () => {
+    renderOncall()
+    fireEvent.click(screen.getByRole('tab', { name: '值班组' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('oncall-path').textContent).toContain('tab=schedules')
+    })
+  })
+
+  it('M57：URL 已带 tab=policies → 渲染时直接激活升级策略 tab', () => {
+    render(
+      <MemoryRouter initialEntries={['/oncall?tab=policies']}>
+        <Oncall />
+        <ProbeRoute />
+      </MemoryRouter>
+    )
+    const policiesTab = screen.getByRole('tab', { name: '升级策略' })
+    expect(policiesTab.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('M57：连续切 tab → URL search params 跟新', async () => {
+    renderOncall()
+    fireEvent.click(screen.getByRole('tab', { name: '值班组' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('oncall-path').textContent).toContain('tab=schedules')
+    })
+    fireEvent.click(screen.getByRole('tab', { name: '升级策略' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('oncall-path').textContent).toContain('tab=policies')
+    })
+    expect(screen.getByTestId('oncall-path').textContent).not.toContain('tab=schedules')
   })
 })

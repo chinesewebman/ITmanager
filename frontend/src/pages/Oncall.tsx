@@ -4,6 +4,7 @@ import {
   Button, Card, Form, Input, Modal, Popconfirm, Space, Switch, Table, Tag, Typography, Tabs, message,
 } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
+import { useSearchParams } from 'react-router-dom'
 import { useApiQuery } from '../hooks/useApiQuery'
 import { apiGet, apiSend } from '../services/api'
 import { ErrorState } from '../components/ErrorState'
@@ -26,11 +27,19 @@ interface EscalationPolicy {
 
 export function Oncall() {
   useDocumentTitle('值班管理')
+  // M57: Tabs 受控 URL sync. 刷新 / 分享链接保留 tab 状态, 后退键也能在 tab 间切换
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = searchParams.get('tab') || 'current'
+  const handleTabChange = (key: string) => {
+    setSearchParams({ tab: key })
+  }
   return (
     <div>
       {/* M1：标题体系统一——原 Tabs 页无可见标题，用户进来不知道这是值班管理页 */}
       <PageHeader title="值班管理" />
       <Tabs
+        activeKey={activeTab}
+        onChange={handleTabChange}
         items={[
           { key: 'current', label: '当前值班', children: <CurrentTab /> },
           { key: 'schedules', label: '值班组', children: <SchedulesTab /> },

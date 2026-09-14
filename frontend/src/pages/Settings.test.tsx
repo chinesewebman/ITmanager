@@ -60,7 +60,9 @@ import { apiKeyApi, notificationApi, integrationApi, authApi } from "../services
 // RouteProbe 把「点击是否真的发生了路由跳转」变成可断言的事实：只断言入口渲染出来
 // 无法区分「navigate('/audit')」与「onClick 根本没接上」（后者正是 B1-1 死表单那类缺陷）。
 function RouteProbe() {
-  return <div data-testid="current-path">{useLocation().pathname}</div>;
+  const loc = useLocation()
+  // M57：同时暴露 search 以断言 setSearchParams 的效果
+  return <div data-testid="current-path">{loc.pathname + loc.search}</div>
 }
 
 function renderSettings() {
@@ -929,5 +931,63 @@ describe("M49 审计入口（能力门禁）", () => {
       expect(authApi.me).toHaveBeenCalled();
     });
     expect(screen.queryByText("审计日志")).toBeNull();
+  });
+});
+
+
+// M57: Tab URL sync — 用户刷新 / 分享链接保留 tab 状态
+describe("Settings M57 Tab URL sync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(notificationApi.listChannels).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+    vi.mocked(integrationApi.getStatus).mockResolvedValue({
+      data: { code: 0, data: {} },
+    } as any);
+    vi.mocked(apiKeyApi.list).mockResolvedValue({
+      data: { code: 0, data: [] },
+    } as any);
+  });
+
+  it("M57：默认 active tab = integrations (URL 无 tab 时)", async () => {
+    renderSettings();
+    // 默认 integrations 是激活 tab — 检查 active tab role
+    const integrationsTab = await screen.findByRole("tab", { name: /第三方集成/ });
+    expect(integrationsTab.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("M57：点击通知设置 tab → URL search params 含 tab=notifications", async () => {
+    renderSettings();
+    const notifTab = await screen.findByRole("tab", { name: /通知设置/ });
+    fireEvent.click(notifTab);
+    await waitFor(() => {
+      expect(screen.getByTestId("current-path").textContent).toContain("tab=notifications");
+    });
+  });
+
+  it("M57：URL 已带 tab=api → 渲染时直接激活 API 密钥 tab", async () => {
+    // 重写 render 用 custom initialEntries
+    render(
+      <MemoryRouter initialEntries={["/settings?tab=api"]}>
+        <Settings />
+        <RouteProbe />
+      </MemoryRouter>
+    );
+    const apiTab = await screen.findByRole("tab", { name: /API 密钥/ });
+    expect(apiTab.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("M57：连续切 tab → URL search params 跟新", async () => {
+    renderSettings();
+    fireEvent.click(await screen.findByRole("tab", { name: /通知设置/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("current-path").textContent).toContain("tab=notifications");
+    });
+    fireEvent.click(await screen.findByRole("tab", { name: /API 密钥/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("current-path").textContent).toContain("tab=api");
+    });
+    expect(screen.getByTestId("current-path").textContent).not.toContain("tab=notifications");
   });
 });
