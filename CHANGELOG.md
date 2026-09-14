@@ -323,6 +323,25 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M54 — G-UI-AlertsHostHover 告警表主机列 ellipsis（2026-09-14）
+
+**摩擦**: T99 E2 — AlertTable 主机列 `width: 150` 但 host 字段无长度限制, 长主机名 (`web-server-01.prod.iad1.example.com` 38 chars) 在 150px 列宽下强制换行撑高整行, 表格行高不一致影响扫读.
+
+**改动** (frontend-only, 1 file, +2/-1 LOC):
+- `frontend/src/components/AlertTable.tsx`: 主机列加 `ellipsis: { showTitle: true }` (antd Table 自带 Ellipsis + 浏览器原生 title Tooltip).
+
+**Mutation inversion 诚实承认**: bypass `ellipsis:` → 29/29 PASS (无 fail). **视觉层 fix, 单测无能力 catch** — 现有测试只验 mock 数据 render / 操作按钮, 不验列宽 / overflow / Tooltip. 接受 (走 e2e 视觉验证: 人工 + chrome devtools).
+
+**Hard pass**:
+- `npx tsc --noEmit`: 0 error
+- `npx vitest run src/pages/Alerts.test.tsx src/components/AlertCard.test.tsx`: 29/29 PASS (Alerts 20 + AlertCard 9, 无退化)
+- backend 27 packages ok (零改动)
+- 双轨分析 (graphify 6664 nodes / 0 anomalies / codegraph index 6244 nodes)
+
+**Out of scope** (留 future round):
+- 自定义 Tooltip 替代 antd Ellipsis — 不必要, antd 自带够用
+- 列宽调整 — 150px 是设计选择, 不动
+
 ### M53 — G-UI-AlertsBulkFP 告警批量标记误报（2026-09-14）
 
 **摩擦**: T99 C2 — Alerts header 只有 `[批量确认] [批量解决]` (有 selection 时), 缺 `[批量标记误报]`. 运维收到 webhook 风暴 (50+ 假阳告警) 只能一行一行点 `[标记误报]` × 50 次. 跟 M51 G-UI-BulkAssets 同样的"批量操作缺位"问题.
