@@ -198,6 +198,22 @@ export const ticketApi = {
 };
 
 // ==================== 用户 ====================
+// M61：账号处置（启用/禁用、改角色、置强改密）。三个写端点挂 canIdentity + 
+// RejectAPIKeyAuth（仅 admin 会话可调）。
+//
+// 后端契约（**读实现，不猜**）：
+//   - PUT   /users/:id          局部更新（status / role / must_change_password）
+//   - PATCH /users/:id/status   只改状态，可写值 {active, inactive}（**没有 locked** ——
+//     鉴权侧只拦 inactive，写 locked 不拦任何请求）
+//   - PATCH /users/:id/role     只改角色，词表 {admin, ops_admin, ops_user, auditor, readonly}
+//     （遗留别名 operator/viewer 由服务端折叠，前端只提供词表值）
+// 三条都是**严格请求体**：未知键 400。故这里逐字段显式传，不透传任意对象。
+export type UserStatus = 'active' | 'inactive'
+
+/** 用户角色词表（与后端 middleware/roles.go 的 knownRoles 同源；不含遗留别名与 user 地板）。 */
+export const ASSIGNABLE_ROLES = ['admin', 'ops_admin', 'ops_user', 'auditor', 'readonly'] as const
+export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number]
+
 export const userApi = {
   // M50：派单候选人下拉要按角色筛，故必须能指定 page_size —— 后端默认 20 条
   // （user_handler.go:27），一个几十人的部署会静默丢掉候选池里的运维。
@@ -205,6 +221,13 @@ export const userApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     api.get<{ code: number; data: { items: UserDTO[]; total: number } }>("/users", { params }),
   get: (id: string) => api.get(`/users/${id}`),
+  // M61：局部更新。三个字段都可选，至少给一个（后端对空对象返 400）。
+  update: (
+    id: string,
+    updates: { status?: UserStatus; role?: AssignableRole; must_change_password?: boolean },
+  ) => api.put(`/users/${id}`, updates),
+  updateStatus: (id: string, status: UserStatus) => api.patch(`/users/${id}/status`, { status }),
+  updateRole: (id: string, role: AssignableRole) => api.patch(`/users/${id}/role`, { role }),
 };
 
 // ==================== API 密钥（B1-1） ====================

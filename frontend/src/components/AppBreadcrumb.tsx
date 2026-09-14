@@ -41,6 +41,8 @@ const TOP_LABELS: Record<string, string> = {
   '/settings': '系统设置',
   // M49：审计页由 Settings「管理」区链接进入（不在侧边栏），但面包屑要认得它
   '/audit': '审计日志',
+  // M61：用户管理（admin 专属，侧边栏按 identity 能力显示；面包屑无条件认得）
+  '/users': '用户管理',
 }
 
 const TOP_ORDER: Array<{ path: string; label: string }> = [

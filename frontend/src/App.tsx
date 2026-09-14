@@ -23,6 +23,7 @@ import {
   LogoutOutlined,
   BookOutlined,
   LineChartOutlined,
+  TeamOutlined, // M61: 用户管理入口
 } from "@ant-design/icons";
 import {
   BrowserRouter,
@@ -46,6 +47,7 @@ const Oncall = lazy(() => import("./pages/Oncall"));
 const Runbook = lazy(() => import("./pages/Runbook"));
 const MetricSnapshot = lazy(() => import("./pages/MetricSnapshot"));
 const Audit = lazy(() => import("./pages/Audit"));
+const Users = lazy(() => import("./pages/Users")); // M61: admin-only 用户管理
 import Login from "./pages/Login"; // Login 走 SSR 首屏（无 lazy）
 // C7: 改密页 — 跟 Login 一样不走 AppLayout (无侧边栏, 满屏卡片)
 import ChangePassword from "./pages/ChangePassword";
@@ -69,9 +71,48 @@ interface UserInfo {
   avatar?: string;
 }
 
-function AppLayout() {
+// M61：菜单项里按**后端下发的能力**条件渲染的条目。
+//
+// 为什么不用 `userInfo.role === "admin"`：roles.go 的注释明确警告过「复制一份角色→能力
+// 矩阵会漂移」，且字面量比较会绕过 CanonicalRole 的别名折叠。能力集由 /auth/me 从鉴权
+// 上下文下发（M49 Settings 的审计入口就是这么做的），这里沿用同一判据。
+//
+// 抽成导出的纯函数是为了让它可被单测钉住（同 buildTheme 的做法）：条件渲染写错的表现是
+// 「入口不显示」或「显示了但点进去 403」，两种都不容易被人工发现。
+export function buildMenuItems(hasIdentity: boolean): MenuProps["items"] {
+  return [
+    { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },
+    { key: "/assets", icon: <DesktopOutlined />, label: "资产管理" },
+    { key: "/alerts", icon: <AlertOutlined />, label: "告警中心" },
+    { key: "/alert-suppressions", icon: <AlertOutlined />, label: "告警抑制" },
+    { key: "/racks", icon: <FolderOutlined />, label: "机房机柜" },
+    { key: "/topology", icon: <ShareAltOutlined />, label: "网络拓扑" },
+    { key: "/oncall", icon: <UserOutlined />, label: "值班管理" },
+    { key: "/runbooks", icon: <BookOutlined />, label: "故障 Runbook" },
+    {
+      key: "/metric-snapshots",
+      icon: <LineChartOutlined />,
+      label: "指标快照",
+    },
+    { key: "/tickets", icon: <BuildOutlined />, label: "工单管理" },
+    // M61：用户管理是 admin 专属（identity 能力，capRoles 里只有 admin）。
+    // 入口按能力显示而不是按 role：ops_admin 看不到（后端也会 403），
+    // 而将来若 identity 授权给别的角色，这里无需改动。
+    ...(hasIdentity
+      ? [{ key: "/users", icon: <TeamOutlined />, label: "用户管理" }]
+      : []),
+    { key: "/settings", icon: <SettingOutlined />, label: "系统设置" },
+  ];
+}
+
+// 导出供菜单/能力门禁用例直接渲染（同 buildTheme 的理由：条件渲染写错的表现是
+// 「入口该有却没有」或「不该有却出现」，两种都不会自己冒出来）。
+export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  // M61：能力集来自后端 /auth/me（不复制角色矩阵）。取不到 = 无 identity 能力
+  // （fail-closed：少个入口只是少个链接，误显示会让人点进 403）。
+  const [hasIdentity, setHasIdentity] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const {
@@ -90,6 +131,22 @@ function AppLayout() {
     }
   }, []);
 
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const res = (await authApi.me()) as { data?: { data?: { capabilities?: unknown } } }
+        const caps = res?.data?.data?.capabilities
+        if (alive) setHasIdentity(Array.isArray(caps) && caps.includes("identity"))
+      } catch {
+        if (alive) setHasIdentity(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, []);
+
   // P1-审计: 监听 axios 401 触发的全局登出事件
   // 不用 window.location.href（丢路由 state + 滚动位置）
   // 改用 React Router navigate 保留跳转
@@ -105,23 +162,7 @@ function AppLayout() {
     return () => window.removeEventListener(AUTH_LOGOUT_EVENT, handler)
   }, [navigate, location.pathname])
 
-  const menuItems = [
-    { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },
-    { key: "/assets", icon: <DesktopOutlined />, label: "资产管理" },
-    { key: "/alerts", icon: <AlertOutlined />, label: "告警中心" },
-    { key: "/alert-suppressions", icon: <AlertOutlined />, label: "告警抑制" },
-    { key: "/racks", icon: <FolderOutlined />, label: "机房机柜" },
-    { key: "/topology", icon: <ShareAltOutlined />, label: "网络拓扑" },
-    { key: "/oncall", icon: <UserOutlined />, label: "值班管理" },
-    { key: "/runbooks", icon: <BookOutlined />, label: "故障 Runbook" },
-    {
-      key: "/metric-snapshots",
-      icon: <LineChartOutlined />,
-      label: "指标快照",
-    },
-    { key: "/tickets", icon: <BuildOutlined />, label: "工单管理" },
-    { key: "/settings", icon: <SettingOutlined />, label: "系统设置" },
-  ];
+  const menuItems = buildMenuItems(hasIdentity);
 
   const handleMenuClick = (e: { key: string }) => {
     navigate(e.key);
@@ -323,6 +364,17 @@ function AppLayout() {
                   element={
                     <ErrorBoundary pageName="审计日志">
                       <Audit />
+                    </ErrorBoundary>
+                  }
+                />
+                {/* M61：用户管理（仅 admin）。路由不做能力门禁 —— 非 admin 手输
+                    /users 会看到 403 错误态（后端 canIdentity 拦），比「静默跳回首页」
+                    更容易让人理解发生了什么。侧边栏入口按能力隐藏，见 buildMenuItems。 */}
+                <Route
+                  path="/users"
+                  element={
+                    <ErrorBoundary pageName="用户管理">
+                      <Users />
                     </ErrorBoundary>
                   }
                 />

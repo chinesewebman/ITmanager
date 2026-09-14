@@ -39,6 +39,11 @@ export const queryKeys = {
     list: (filters?: Record<string, unknown>) => ['audit', 'list', filters ?? {}] as const,
     vocabulary: () => ['audit', 'vocabulary'] as const,
   },
+  // M61 G-User-AdminManagement：用户列表。处置成功后 invalidate 整棵 users 树。
+  users: {
+    all: ['users'] as const,
+    list: (filters?: Record<string, unknown>) => ['users', 'list', filters ?? {}] as const,
+  },
 }
 
 // 2. useApiQuery — 列表/详情查询统一入口
