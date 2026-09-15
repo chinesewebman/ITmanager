@@ -323,6 +323,33 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M65 — G-UI-AssetIpValidatorParity IP regex 与 Go `net.ParseIP` 口径一致（M64 派生 TODO）（2026-09-15）
+
+**摩擦（M64 派生，本轮结案）**: M64 把 IP 走通了写入路径 —— POST /assets 含 `ip_address` 现在真
+落 `asset_networks`（v4 → `ipv4_address`、v6 → `ipv6_address`），后端用 `net.ParseIP` 兜底校验
+（失败返 422 `validation_failed`）。但前端 `IP_PATTERN`（M62 ship）的 IPv4 段是 `[01]?\d\d?`，
+允许 `010.1.1.1` / `00.0.0.0` / `192.168.001.1` —— Go `net.ParseIP` 按 RFC 6943 **拒绝前导零**
+（除单 0）。用户填 `010.1.1.1` → 前端放行 → 提交 → backend 422，UX 卡墙。
+
+**改动**: `frontend/src/utils/validators.ts` OCTET 收紧为
+`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`，加注释引用 RFC 6943 + Go 口径。
+
+**测试**: `validators.test.ts` 加 4 case（`010.1.1.1` / `00.0.0.0` / `192.168.001.1` /
+`001.002.003.004`）；`AssetFormModal.test.tsx` 加 2 UI case（填 `010.1.1.1` / `00.0.0.0` →
+红色格式错误 + 不调 `onSubmit`）。
+
+**mutation inversion 实证**:
+- bypass OCTET 收紧 → `validators.test.ts` **4 failed**（4 前导零 case 全放行）
+- bypass OCTET 收紧 → `AssetFormModal.test.tsx` **2 failed**（UI 端 `findByText(IP_ERROR)`
+  timeout —— 旧 pattern 放行，没显示错误直接 onSubmit，正是 M64 422 误伤的 UI 路径）
+- 还原后 65/65 PASS
+
+**前端 0 业务行为改**：所有合法 IP（`0.0.0.0` / `255.255.255.255` / `192.168.1.1` / `::1` 等）
+继续放行；只收紧「形状对但地址错」边界。
+
+**Out of scope（future）**: `G-Asset-UpdateIpPersist`（PUT 写网卡）/ `G-Asset-IpConflictGuard`
+（同 IP 多资产校验）/ 其他页接入 `utils/validators`（Oncall / Runbook 等）。
+
 ### M64 — G-Asset-NetworksPersist 资产 IP 的写入路径（form submit → 第一张 `asset_networks`）（M63 派生 TODO）（2026-09-15）
 
 **摩擦（M63 派生，本轮结案）**: M63 把 `ip_address` 做成了**只读投影** —— `GET /assets` 与
