@@ -2,6 +2,7 @@ package apierr
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -110,6 +111,29 @@ func TestBadRequest_PassesMessage(t *testing.T) {
 	BadRequest(c, "字段缺失")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "字段缺失")
+}
+
+// M64: 422 出口 —— 状态码 + **code 字符串**都要钉。
+//
+// code 是跨语言契约：前端按 `ApiErrorCode.ValidationFailed`（services/apiClient.ts）
+// 判分支，写成 "bad_request" 时前端会把它当「请求本身不成立」，改错方向
+// （这条常量此前**没有后端生产者**，本函数的 code 选择是第一处实现）。
+func TestUnprocessable_状态码与code(t *testing.T) {
+	c, w := newTestCtx()
+	Unprocessable(c, "IP 地址格式不合法")
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, CodeValidationFailed, resp.Code)
+	assert.Equal(t, "IP 地址格式不合法", resp.Message)
+}
+
+func TestUnprocessable_EmptyMessage_DefaultText(t *testing.T) {
+	c, w := newTestCtx()
+	Unprocessable(c, "")
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "请求参数校验失败")
 }
 
 func TestBadRequest_EmptyMessage_StillValidJSON(t *testing.T) {

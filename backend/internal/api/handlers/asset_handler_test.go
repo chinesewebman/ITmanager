@@ -29,7 +29,7 @@ type mockAssetService struct {
 	listFunc       func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error)
 	listAllFunc    func(ctx context.Context) ([]models.Asset, error)
 	getFunc        func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
-	createFunc     func(ctx context.Context, a *models.Asset) error
+	createFunc     func(ctx context.Context, a *models.Asset, ip *string) error
 	updateFunc     func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
 	deleteFunc     func(ctx context.Context, id string) error
 	retireFunc     func(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
@@ -46,8 +46,8 @@ func (m *mockAssetService) ListAll(ctx context.Context) ([]models.Asset, error) 
 func (m *mockAssetService) Get(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error) {
 	return m.getFunc(ctx, id)
 }
-func (m *mockAssetService) Create(ctx context.Context, a *models.Asset) error {
-	return m.createFunc(ctx, a)
+func (m *mockAssetService) Create(ctx context.Context, a *models.Asset, ip *string) error {
+	return m.createFunc(ctx, a, ip)
 }
 func (m *mockAssetService) Update(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error) {
 	return m.updateFunc(ctx, id, u)
@@ -180,7 +180,7 @@ func TestGetAsset_DB错误_返回500_不泄露内部错误(t *testing.T) {
 
 func TestCreateAsset_参数错误_返回400(t *testing.T) {
 	svc := &mockAssetService{
-		createFunc: func(ctx context.Context, a *models.Asset) error { return nil },
+		createFunc: func(ctx context.Context, a *models.Asset, ip *string) error { return nil },
 	}
 	r := newTestRouter(svc)
 
@@ -195,7 +195,7 @@ func TestCreateAsset_参数错误_返回400(t *testing.T) {
 
 func TestCreateAsset_名称为空_返回400(t *testing.T) {
 	svc := &mockAssetService{
-		createFunc: func(ctx context.Context, a *models.Asset) error {
+		createFunc: func(ctx context.Context, a *models.Asset, ip *string) error {
 			// service 层应拒绝空名
 			return service.ErrInvalidInput
 		},
@@ -567,13 +567,21 @@ func TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200(t *testing.T)
 		"UPDATE 不得引用 assets 上不存在的列（PG 42703）")
 }
 
-// M63: POST /assets 带 ip_address —— JSON 绑定不报错（字段存在），但**不落库**：
-// `gorm:"-"` 让它在 schema 解析阶段就被排除，INSERT 语句里没有这一列。
-func TestM63_CreateAsset_带ip_address_JSON解析OK但不进INSERT(t *testing.T) {
+// M64: POST /assets 带 ip_address —— 它**不进 assets 的 INSERT**（`assets` 表没有这一列，
+// `gorm:"-"` 让虚拟字段在 schema 解析阶段就被排除），但**会**产生一条 asset_networks 的 INSERT。
+//
+// M63 时这条用例断言的是「不落库」—— 那时确实是：值绑进虚拟字段后被 GORM 静默丢掉，
+// 表单里的 IP 写完没影（正是 M64 要修的东西）。现在两件事分开看：
+//   - 虚拟字段仍然不是写入路径（第一段断言，防 `assets` 列清单漂移 / T-76 那类 42703）；
+//   - 真写入走的是独立入参 → asset_networks 行（第二段断言，M64 的实质）。
+//   - 第二段的 IP 用**规范形式**比对：实现走 net.ParseIP().String()，1.2.3.4 恰好不变。
+func TestM64_CreateAsset_带ip_address_assets无此列但网卡有行(t *testing.T) {
 	gormDB, mock, captured := newSQLCapturingDB(t)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO "assets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery(`INSERT INTO "asset_networks"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
@@ -585,8 +593,19 @@ func TestM63_CreateAsset_带ip_address_JSON解析OK但不进INSERT(t *testing.T)
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, captured.joined(), `INSERT INTO "assets"`)
-	assert.NotContains(t, captured.joined(), "ip_address", "虚拟字段不得出现在 INSERT 的列清单里")
+	joined := captured.joined()
+	assert.Contains(t, joined, `INSERT INTO "assets"`)
+	assert.Contains(t, joined, `INSERT INTO "asset_networks"`, "表单里的 IP 必须真的写进网卡表")
+	// 「写下去的到底是表单里那个地址」不在这一层断言：PreferSimpleProtocol 把值走成占位符
+	// （$5）而非字面量，SQL 文本里看不到它 —— 值保真由真 sqlite 的端到端用例断言
+	// （TestM64_CreateAsset_带ip_address_落成网卡行 读回 ipv4_address）。
+	// `assets` 的列清单里不得出现 ip_address —— 真 PG 上是 42703。
+	// 逐条语句看：网卡表的 INSERT 本来就有 ipv4_address 这样的列名。
+	for _, stmt := range captured.stmts {
+		if strings.Contains(stmt, `INSERT INTO "assets"`) {
+			assert.NotContains(t, stmt, "ip_address", "虚拟字段不得出现在 assets 的列清单里：%s", stmt)
+		}
+	}
 }
 
 // sqlCapture 记录驱动**实际收到**的语句。

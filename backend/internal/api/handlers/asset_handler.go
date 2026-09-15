@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"network-monitor-platform/internal/apierr"
 	"network-monitor-platform/internal/models"
@@ -88,17 +90,42 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 	})
 }
 
+// invalidIPAddress 报告「提供了 ip_address，但它不是合法 IP」。
+//
+// 判据与 service.Create 的取数口径逐字对齐：nil / 空串（trim 后）都算「没提供」——
+// openapi 的 AssetInput 不把它列进 required，建资产不带 IP 是合法的（网卡表可以为空）。
+// 这里不 trim 后回写：service 自己会 trim，handler 只做「能不能解析」这一件事。
+func invalidIPAddress(ip *string) bool {
+	if ip == nil {
+		return false
+	}
+	s := strings.TrimSpace(*ip)
+	return s != "" && net.ParseIP(s) == nil
+}
+
 // CreateAsset 创建资产
 //
-// M64 中间态：service.Create 已改签名为 (asset, ipAddress)，此处暂传 nil
-// （handler 侧接 `ip_address` 的改动落在下一个 commit）。
+// 入参是**匿名嵌套结构**而不是直接绑 models.Asset：`ip_address` 在模型里是虚拟投影字段
+// （`gorm:"-"`，见 models.Asset.IpAddress）。继续绑模型的话，JSON 展平会让这个键落进那个
+// 虚拟字段，然后被 GORM 静默丢掉 —— 表单里的 IP 写完没影（M63 的现状）。
+// 嵌套结构把它变成**独立入参**，一路传到 service 去写 asset_networks（M64）。
+//
+// 不会有同名冲突：顶层字段在 JSON 展平里盖过嵌入结构的同名字段（深度浅者胜），
+// 所以 `ip_address` 只落 input.IpAddress，嵌进去的 Asset.IpAddress 恒为 nil。
 func (h *AssetHandler) CreateAsset(c *gin.Context) {
-	var asset models.Asset
-	if err := c.ShouldBindJSON(&asset); err != nil {
+	var input struct {
+		models.Asset
+		IpAddress *string `json:"ip_address"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	if err := h.svc.Create(c.Request.Context(), &asset, nil); err != nil {
+	if invalidIPAddress(input.IpAddress) {
+		apierr.Unprocessable(c, "IP 地址格式不合法")
+		return
+	}
+	if err := h.svc.Create(c.Request.Context(), &input.Asset, input.IpAddress); err != nil {
 		if errors.Is(err, service.ErrAlreadyExists) {
 			apierr.Conflict(c, "资产已存在")
 			return
@@ -112,7 +139,7 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"code": 0,
-		"data": asset,
+		"data": input.Asset,
 	})
 }
 

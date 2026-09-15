@@ -94,6 +94,19 @@ func Conflict(c *gin.Context, message string) {
 	Respond(c, http.StatusConflict, CodeConflict, sanitizeMessage(message), nil)
 }
 
+// Unprocessable 422 — 请求体**语法**没问题（JSON 合法、字段名都对），但**取值**不合法。
+// 与 400 分开的理由：400 是「请求本身不成立」（JSON 坏了、必填列缺失），改请求体才有救；
+// 422 是「字段都在、就是值不对」（如 IP 串解析不了），前端要按字段高亮。
+//
+// code 复用 CodeValidationFailed —— 该常量与前端 ApiErrorCode.ValidationFailed
+// （services/apiClient.ts）早就声明，此前**没有后端出口**，本函数是它的第一个生产者。
+func Unprocessable(c *gin.Context, message string) {
+	if message == "" {
+		message = "请求参数校验失败"
+	}
+	Respond(c, http.StatusUnprocessableEntity, CodeValidationFailed, sanitizeMessage(message), nil)
+}
+
 // sanitizeMessage 4xx 路径统一脱敏 + 去控制字符 (M45 / G-31).
 // 顺序: StripControl → Text (同 apierr.Respond 5xx 路径的「内层先 Strip 再 Text」,
 // 否则 CR/LF 截断 redact.Text 的值类, 外层 Strip 把尾部接回去 = 泄漏).
