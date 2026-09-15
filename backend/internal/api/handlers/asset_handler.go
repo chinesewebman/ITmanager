@@ -126,6 +126,10 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Create(c.Request.Context(), &input.Asset, input.IpAddress); err != nil {
+		if errors.Is(err, service.ErrIPConflict) {
+			apierr.Conflict(c, "IP 地址已被其他资产占用")
+			return
+		}
 		if errors.Is(err, service.ErrAlreadyExists) {
 			apierr.Conflict(c, "资产已存在")
 			return
@@ -197,6 +201,10 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "资产不存在")
+			return
+		}
+		if errors.Is(err, service.ErrIPConflict) {
+			apierr.Conflict(c, "IP 地址已被其他资产占用")
 			return
 		}
 		apierr.Internal(c, "更新资产失败", err)

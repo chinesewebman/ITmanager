@@ -29,6 +29,12 @@ var (
 	// 与 ErrInvalidInput 分开的理由同上：自我禁用 / 降级最后一名管理员改参数重试无用，
 	// 报 400 会让调用方去改请求体。目前只有账号处置守卫（user_service.go）用它。
 	ErrForbidden = errors.New("forbidden")
+	// ErrIPConflict M68：写入网卡 IP 时发现该 IP 已被**其他资产**占用。
+	// 与 ErrAlreadyExists 区分：那是「asset.name 唯一冲突」（资产创建层），
+	// 这是「asset_networks.ipv4_address 业务冲突」（网卡写入层）。两层都用 409 但语义不同,
+	// 调用方看 message 区分。两个 error 不复用 — 未来 audit 视图要列「历史重复 IP」时,
+	// 不能把 name 冲突和 IP 冲突混在一起报。
+	ErrIPConflict = errors.New("ip address already in use by another asset")
 )
 
 // AssetFilter 资产列表查询条件
@@ -260,6 +266,8 @@ func (s *assetService) Create(ctx context.Context, asset *models.Asset, ipAddres
 //
 //   - ipAddress == nil 或空字符串：不改网卡（未提供/明确不改）。
 //   - ipAddress 非空但 net.ParseIP 失败：返 ErrInvalidInput（handler 映 422）。
+//   - IP 已被**其他资产**占用：返 ErrIPConflict（handler 映 409）。M68 加的守卫 ——
+//     业务规则而非 DB unique 约束，留「退役释放后能否复用」的语义灵活性。
 //   - 资产无网卡：创建 eth0（与 Create 对齐）。
 //   - 有网卡：v4/v6 分流落 IPv4Address/IPv6Address，另一列清空（避免「v4 字段残留 v6 历史」）。
 //
@@ -268,6 +276,11 @@ func (s *assetService) Create(ctx context.Context, asset *models.Asset, ipAddres
 //
 // M66：从 Create 抽出供 Update 复用 —— POST/PUT 的 IP 写入路径走同一函数，
 // 同一判据不再有两份实现。
+//
+// M68：在 SELECT 网卡**之前**先做 IP 占用检查（排除自己），原因有两个：
+//   1. INSERT 分支（isNew=true）下当前 SELECT 还没拿到 network.ID，self-exclude 必须用
+//      assetID 而不是 network.ID —— 全表查更稳。
+//   2. 提前 fail 比拿到网卡后再发现冲突少一步往返；tx 里 SELECT 多查一次不增 commit 数。
 func (s *assetService) updateFirstNetworkIP(tx *gorm.DB, assetID uuid.UUID, ipAddress *string) error {
 	if ipAddress == nil {
 		return nil
@@ -279,6 +292,28 @@ func (s *assetService) updateFirstNetworkIP(tx *gorm.DB, assetID uuid.UUID, ipAd
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return ErrInvalidInput
+	}
+	// M68: v4 业务冲突守卫（v6 留 future，理由见 intent-M68.md Decision 3）。
+	// parsed.To4() 非 nil ⇒ IPv4/4-in-6 映射形式；后者落 ipv4_address 时已归一为 v4 文本，
+	// 所以这里直接拿归一后的字符串查。self-exclude 必须放在 INSERT 之前，因为 INSERT 分支
+	// 这时还没网络行 —— 用 assetID 排除。
+	if v4 := parsed.To4(); v4 != nil {
+		v4Str := v4.String()
+		var taken struct {
+			ID uuid.UUID
+		}
+		err := tx.Raw(
+			`SELECT id FROM asset_networks WHERE ipv4_address = ? AND asset_id <> ? AND ipv4_address <> '' LIMIT 1`,
+			v4Str, assetID,
+		).Scan(&taken).Error
+		// 0 行 = 没人占 = OK；tx.Raw + Scan 在 0 行时返 ErrRecordNotFound，与「占用了」
+		// 分歧清楚，不算异常。ErrRecordNotFound 之外的错误才返。
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if taken.ID != uuid.Nil {
+			return ErrIPConflict
+		}
 	}
 	var network models.AssetNetwork
 	err := tx.Where("asset_id = ?", assetID).

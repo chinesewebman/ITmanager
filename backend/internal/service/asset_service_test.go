@@ -1012,6 +1012,11 @@ func TestM66_AssetService_Update_ipAddress_走独立参数不混进map(t *testin
 		WillReturnRows(assetSampleRows(id.String()))
 	mock.ExpectExec(`UPDATE "assets"`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// M68: v4 冲突守卫（在 updateFirstNetworkIP 内、UPDATE assets 之后、SELECT 网卡之前），
+	// IP=10.0.0.1 没被占用，期望 ErrRecordNotFound（不是「有占用」）。
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv4_address = \$1 AND asset_id <> \$2 AND ipv4_address <> ''`).
+		WithArgs("10.0.0.1", id.String()).
+		WillReturnError(gorm.ErrRecordNotFound)
 	// 网卡先查再写
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
 		WithArgs(id.String(), 1).
@@ -1031,6 +1036,103 @@ func TestM66_AssetService_Update_ipAddress_走独立参数不混进map(t *testin
 		"updates map 不应再含 ip_address（否则 handler 没剥，仍会撞 42703）：%v", cap.stmts)
 	assert.True(t, cap.has(`INSERT INTO "asset_networks"`),
 		"ip_address 独立参数应触网卡表写入：%v", cap.stmts)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M68: 同 IP 多资产守卫 (G-Asset-IpConflictGuard) ====================
+
+// TestM68_AssetService_ip被其他资产占用_返ErrIPConflict
+// 真实业务场景：资产 B 的网卡已经持有 1.2.3.4，资产 A 想 POST/PUT 占同一 IP，必须 409。
+//
+// sqlmock 写法：guard SELECT 直接返一行（taken.ID != uuid.Nil）→ 立即 ErrIPConflict，
+// 不进 SELECT 网卡、不进 UPDATE/INSERT 网卡。如果 guard 漏走，UPDATE 网卡仍然发生 →
+// 测试通过反而是 bug。Mutation inversion 实证见 service 层 TestM68_Mutation_跳过guard_写成功。
+func TestM68_AssetService_ip被其他资产占用_返ErrIPConflict(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	otherAssetID := uuid.New() // 占用同一 IP 的"别人"
+	ip := "1.2.3.4"
+
+	// tx 包：First(asset) → UPDATE assets → guard SELECT 命中 → Rollback。
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectExec(`UPDATE "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv4_address = \$1 AND asset_id <> \$2 AND ipv4_address <> ''`).
+		WithArgs(ip, id).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(otherAssetID))
+	mock.ExpectRollback()
+
+	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "web-02"}, &ip)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIPConflict, "占用冲突应映 ErrIPConflict（不是 ErrAlreadyExists）")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestM68_AssetService_自己资产持同一IP_不冲突
+// UPDATE 资产 A 的网卡到 A 现在已有的 IP（值不变）→ 不是冲突；guard 的 `asset_id <> ?`
+// 必须**严格排除自己**，否则 UPDATE 同一资产会误报冲突。
+func TestM68_AssetService_自己资产持同一IP_不冲突(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	ip := "1.2.3.4"
+
+	// tx 包：First(asset) → UPDATE assets → guard SELECT 0 行 → SELECT 网卡 → UPDATE 网卡 → Commit。
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectExec(`UPDATE "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv4_address = \$1 AND asset_id <> \$2 AND ipv4_address <> ''`).
+		WithArgs(ip, id).
+		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec(`UPDATE "asset_networks"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "web-02"}, &ip)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestM68_AssetService_v6_不参与v4校验
+// v6 地址 (`fe80::1`) 不进 v4 守卫 → 守卫 SELECT 不应被调用。这条用例钉的是"v6 留 future"
+// 这个 decision 的具体行为：守卫 SQL 含 ipv4_address 字段，v6 解析时 parsed.To4() == nil
+// 直接跳过。
+func TestM68_AssetService_v6_不参与v4校验(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	ip := "fe80::1"
+
+	// tx 包：First(asset) → UPDATE assets → 直接进 SELECT 网卡（v6 跳过 guard）→ INSERT 网卡 → Commit。
+	// 没有 guard SELECT 期望 —— 如果守卫跑了，这个测试 fail。
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectExec(`UPDATE "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`INSERT INTO "asset_networks"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "web-02"}, &ip)
+	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

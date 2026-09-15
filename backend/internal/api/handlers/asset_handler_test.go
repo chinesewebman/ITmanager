@@ -560,6 +560,10 @@ func TestM66_UpdateAsset_带ip_address_assets无该列但网卡有行(t *testing
 			AddRow(id.String(), "web-01", "active", "server", time.Now(), time.Now()))
 	mock.ExpectExec(`UPDATE "assets" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// M68: v4 冲突守卫在 updateFirstNetworkIP 内、UPDATE assets 之后、SELECT 网卡之前。
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv4_address = \$1 AND asset_id <> \$2 AND ipv4_address <> ''`).
+		WithArgs("1.2.3.4", id.String()).
+		WillReturnError(gorm.ErrRecordNotFound)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -598,6 +602,10 @@ func TestM64_CreateAsset_带ip_address_assets无此列但网卡有行(t *testing
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO "assets"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(assetID))
+	// M68: v4 冲突守卫先走 SELECT（无占用 → 0 行 / ErrRecordNotFound）；v6 不参与。
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv4_address = \$1 AND asset_id <> \$2 AND ipv4_address <> ''`).
+		WithArgs("1.2.3.4", assetID).
+		WillReturnError(gorm.ErrRecordNotFound)
 	// M66: updateFirstNetworkIP（Create 和 Update 复用）先 SELECT 资产已有的网卡，没网卡才 INSERT。
 	// SQL mock 的 RETURNING 不会回写 asset.ID —— 必须用**真 UUID**让 assetID 与 SELECT 的 arg 匹配。
 	// 返回 ErrRecordNotFound 让 First() 走 ErrRecordNotFound 分支 → isNew=true → INSERT 分支。
@@ -850,4 +858,23 @@ func TestM64_CreateAsset_ip_address走独立入参不变虚拟字段(t *testing.
 	assert.Equal(t, "10.0.0.5", *gotIP)
 	require.NotNil(t, gotAsset)
 	assert.Nil(t, gotAsset.IpAddress, "虚拟字段是只读投影，值只能走显式入参（否则就是静默丢弃）")
+}
+
+// ==================== M68: 同 IP 多资产守卫 (G-Asset-IpConflictGuard) ====================
+
+// TestM68_CreateAsset_IP已被占用_返409
+// service.Create 抛 ErrIPConflict → handler 映 409 + "IP 地址已被其他资产占用"。
+// 这条用例钉的是 handler→service→HTTP 状态码的整链路映射；service 层钉子见 service_test.go。
+func TestM68_CreateAsset_IP已被占用_返409(t *testing.T) {
+	svc := &mockAssetService{
+		createFunc: func(ctx context.Context, a *models.Asset, ip *string) error {
+			return service.ErrIPConflict
+		},
+	}
+	r := newTestRouter(svc)
+
+	w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server", "ip_address": "1.2.3.4"})
+	require.Equal(t, http.StatusConflict, w.Code, "body=%s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "IP 地址已被其他资产占用",
+		"409 文案必须明确是「IP 冲突」而不是「资产已存在」（ErrAlreadyExists 走另一条文案）")
 }
