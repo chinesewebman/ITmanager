@@ -314,6 +314,23 @@ func (s *assetService) updateFirstNetworkIP(tx *gorm.DB, assetID uuid.UUID, ipAd
 		if taken.ID != uuid.Nil {
 			return ErrIPConflict
 		}
+	} else {
+		// M69：v6 业务冲突守卫，复用 M68 v4 SELECT pattern。
+		// 业务上同 IPv6 跨资产也是真摩擦（link-local / 唯一本地 / 全局单播都可能撞）。
+		v6Str := parsed.String()
+		var taken struct {
+			ID uuid.UUID
+		}
+		err := tx.Raw(
+			`SELECT id FROM asset_networks WHERE ipv6_address = ? AND asset_id <> ? AND ipv6_address <> '' LIMIT 1`,
+			v6Str, assetID,
+		).Scan(&taken).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if taken.ID != uuid.Nil {
+			return ErrIPConflict
+		}
 	}
 	var network models.AssetNetwork
 	err := tx.Where("asset_id = ?", assetID).

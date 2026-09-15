@@ -1106,9 +1106,12 @@ func TestM68_AssetService_自己资产持同一IP_不冲突(t *testing.T) {
 }
 
 // TestM68_AssetService_v6_不参与v4校验
-// v6 地址 (`fe80::1`) 不进 v4 守卫 → 守卫 SELECT 不应被调用。这条用例钉的是"v6 留 future"
-// 这个 decision 的具体行为：守卫 SQL 含 ipv4_address 字段，v6 解析时 parsed.To4() == nil
-// 直接跳过。
+// v6 地址 (`fe80::1`) 走 v6 守卫 SELECT —— M69 起 v6 也参与冲突检查（但与 v4 守卫分两条
+// SELECT）。这条用例钉的是「v6 不进 ipv4_address 字段」的旧口径，**期望里 guard SELECT
+// 走的是 ipv6_address 而非 ipv4_address**。
+//
+// M69 派生：M68 之前 v6 留 future（parsed.To4() == nil 时直接跳过守卫）。M69 起 v6 走
+// 自己的守卫 SELECT，业务冲突覆盖 IPv6。
 func TestM68_AssetService_v6_不参与v4校验(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	svc := NewAssetService(gormDB)
@@ -1116,14 +1119,17 @@ func TestM68_AssetService_v6_不参与v4校验(t *testing.T) {
 	id := uuid.New()
 	ip := "fe80::1"
 
-	// tx 包：First(asset) → UPDATE assets → 直接进 SELECT 网卡（v6 跳过 guard）→ INSERT 网卡 → Commit。
-	// 没有 guard SELECT 期望 —— 如果守卫跑了，这个测试 fail。
+	// M69 后顺序：First(asset) → UPDATE assets → v6 guard SELECT (0 行 → OK) → SELECT 网卡 → INSERT 网卡 → Commit
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
 	mock.ExpectExec(`UPDATE "assets"`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// M69：v6 guard SELECT 期望。如果守卫走了 ipv4_address 字段（错位），这个 mock 不匹配，测试 fail
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv6_address = \$1 AND asset_id <> \$2 AND ipv6_address <> '' LIMIT 1`).
+		WithArgs("fe80::1", id.String()).
+		WillReturnError(gorm.ErrRecordNotFound)
 	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -1135,6 +1141,41 @@ func TestM68_AssetService_v6_不参与v4校验(t *testing.T) {
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestM69_AssetService_v6_被其他资产占用_返ErrIPConflict
+// v6 业务冲突守卫：跨资产同 IPv6 也应返 ErrIPConflict。这条用例是 M69 loop 第 1 cycle
+// 的核心 ——
+//
+// 注意：守卫 SELECT 期望**有 1 行**，taken.ID 非 uuid.Nil 时返 ErrIPConflict。这次走的是
+// ipv6_address 字段（与 v4 守卫分两条 SELECT，query 不混淆）。
+func TestM69_AssetService_v6_被其他资产占用_返ErrIPConflict(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	otherID := uuid.New()
+	ip := "2001:db8::1"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectExec(`UPDATE "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// M69：v6 guard SELECT 期望 — 命中 1 行 (otherID)，业务冲突
+	mock.ExpectQuery(`SELECT id FROM asset_networks WHERE ipv6_address = \$1 AND asset_id <> \$2 AND ipv6_address <> '' LIMIT 1`).
+		WithArgs("2001:db8::1", id.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(otherID.String()))
+	// 冲突 → 直接 rollback，不应继续 SELECT 网卡
+	mock.ExpectRollback()
+
+	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "web-03"}, &ip)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrIPConflict), "expected ErrIPConflict, got %v", err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M69: 跨资产同 IPv6 守卫 ====================
 
 // ==================== M64: Create 写 AssetNetwork (G-Asset-NetworksPersist) ====================
 
