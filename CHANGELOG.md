@@ -323,6 +323,24 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M70 — G-Asset-IpConflictAudit 跨资产同 IP 巡检（OMH ulw-loop 第 2 cycle, 2026-09-16）
+
+**摩擦**: M68/M69 守卫只在**写入时**检查 (POST/PUT → 409), 不查**历史数据**.
+业务库可能已经有跨资产同 IP 的脏数据, 需要巡检.
+
+**改动**:
+- `service.AuditIPConflicts(ctx) ([]IPConflictRow, error)` (NEW): GROUP BY `ipv4_address` /
+  `ipv6_address` + HAVING `COUNT(*) >= 2`, 输出冲突报告 (IP/Kind/Count/AssetIDs/Networks).
+  不在 tx 里, 单条 SELECT, 与业务写入解耦.
+- CLI wrapper `/tmp/m70-audit/main.go` (不入 repo): 一次性脚本, 输出 JSON + 文本报告.
+
+**测试**: 4 case 真 sqlite (核心冲突 / 空表 / 全唯一 / 空串不参与).
+
+**Mutation inversion 实证**: bypass `HAVING COUNT(*) >= 2` → `TestM70_查跨资产同IP_返所有冲突`
+FAIL + `TestM70_全唯一IP_返空切片` FAIL → restore → 全绿 ✓ (2 test 真红)
+
+**verify**: `go build ./...` 0 err / `go test -count=1 ./...` 27 packages ok / mutation inversion red
+
 ### M69 — G-Asset-IpConflictGuard-v6 跨资产同 IPv6 守卫（OMH ulw-loop 第 1 cycle, 2026-09-16）
 
 **摩擦**: M68 拍了 v4 守卫（`asset_networks.ipv4_address` 同 IP 跨资产 → 409），但 v6 没查。
