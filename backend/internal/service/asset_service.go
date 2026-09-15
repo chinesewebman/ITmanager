@@ -101,6 +101,10 @@ func (s *assetService) List(ctx context.Context, f AssetFilter) ([]models.Asset,
 	if err := q.Offset((page - 1) * pageSize).Limit(pageSize).Order("created_at DESC").Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
+	// M63: 投影主 IP（虚拟字段，不是列；见 injectPrimaryIPs 的取舍说明）。
+	if err := s.injectPrimaryIPs(ctx, items); err != nil {
+		return nil, 0, err
+	}
 	return items, total, nil
 }
 
@@ -139,6 +143,8 @@ func (s *assetService) Get(ctx context.Context, id string) (*models.Asset, []mod
 	if err != nil {
 		return nil, nil, err
 	}
+	// M63: 网卡已经在手，直接投影主 IP（不再查一次库）。
+	asset.IpAddress = primaryIP(networks)
 	return &asset, networks, nil
 }
 
@@ -161,6 +167,52 @@ func (s *assetService) listNetworks(ctx context.Context, db *gorm.DB, assetID uu
 		Order("created_at ASC, id ASC").
 		Find(&networks).Error
 	return networks, err
+}
+
+// ==================== M63: IP 投影 (G-UI-AssetIpPersistence) ====================
+//
+// 判据（pickPrimaryIP / primaryIP）在 asset_ip.go —— 它是这些投影与复盘报告头
+// （postmortem_service.fetchIP）共用的唯一一份实现，本文件只负责**取数**。
+
+// injectPrimaryIPs 给**一页**资产填 `IpAddress`：一条 IN 查询取回这些资产的全部网卡，
+// 按 asset_id 分组后逐资产取主 IP。入参是切片，元素就地改（调用方拿到同一份 backing array）。
+//
+// 为什么不用 GORM `Joins` 一步到位：assets 与 asset_networks 是 1:N，join 会把有 N 张
+// 网卡的资产复制成 N 行 —— 「第 N 页」的页大小和 `total` 的含义当场改变（一条资产多行），
+// 前端 AssetTable 也会出现重复行。多一条 IN 查询换来行数语义不变，代价与一页
+// （≤500 条）同阶。
+//
+// 为什么不逐条查：N+1。一条 IN + 内存分组，DB 往返恒为 1。
+//
+// 排序与 listNetworks 同口径（created_at ASC, id ASC）：IN 结果里**每个资产的子序列**
+// 保持这个相对顺序，故「第一张网卡」的含义与详情页/退役恢复路径一致（T-45：没有
+// ORDER BY 的「第一张」是没有定义的）。
+func (s *assetService) injectPrimaryIPs(ctx context.Context, items []models.Asset) error {
+	if len(items) == 0 {
+		return nil // 不给空切片发 `IN ()`（空页多一次往返，且部分方言不接受空 IN）
+	}
+	ids := make([]uuid.UUID, 0, len(items))
+	for i := range items {
+		ids = append(ids, items[i].ID)
+	}
+
+	var networks []models.AssetNetwork
+	if err := s.db.WithContext(ctx).
+		Where("asset_id IN ?", ids).
+		Order("created_at ASC, id ASC").
+		Find(&networks).Error; err != nil {
+		return err
+	}
+
+	byAsset := make(map[uuid.UUID][]models.AssetNetwork, len(ids))
+	for _, n := range networks {
+		byAsset[n.AssetID] = append(byAsset[n.AssetID], n)
+	}
+	for i := range items {
+		// 没有网卡的资产：map 里没有键 → nil 切片 → primaryIP 返回 nil（`ip_address: null`）。
+		items[i].IpAddress = primaryIP(byAsset[items[i].ID])
+	}
+	return nil
 }
 
 func (s *assetService) Create(ctx context.Context, asset *models.Asset) error {

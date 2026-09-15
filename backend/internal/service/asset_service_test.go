@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +234,10 @@ func TestAssetService_List_带keyword和status过滤(t *testing.T) {
 	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE`).
 		WithArgs("%web%", "%web%", "%web%", "active", 20).
 		WillReturnRows(assetSampleRows(id))
+	// M63: List 多一条 IN 查询投影主 IP（无网卡的资产不会出现在结果里）
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id IN`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "ipv4_address"}).
+			AddRow(uuid.New(), id, "10.0.0.7"))
 
 	items, total, err := svc.List(context.Background(), AssetFilter{
 		Keyword: "web", Status: "active", Page: 1, PageSize: 20,
@@ -241,6 +246,8 @@ func TestAssetService_List_带keyword和status过滤(t *testing.T) {
 	assert.Equal(t, int64(1), total)
 	assert.Len(t, items, 1)
 	assert.Equal(t, "web-01", items[0].Name)
+	require.NotNil(t, items[0].IpAddress, "M63: 列表项必须带上投影出的主 IP")
+	assert.Equal(t, "10.0.0.7", *items[0].IpAddress)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -782,5 +789,225 @@ func TestAssetService_BulkRetire_非法UUID进failed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, ok)
 	assert.Equal(t, map[string]string{"not-a-uuid": "无法退役（资产已退役或参数无效）"}, failed)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M63: 资产 IP 投影 (G-UI-AssetIpPersistence) ====================
+
+// netCard 造一张网卡：只有 IPv4/IPv6 两列参与判据，其余字段与用例无关。
+func netCard(v4, v6 string) models.AssetNetwork {
+	return models.AssetNetwork{IPv4Address: v4, IPv6Address: v6}
+}
+
+// 指针入参用文件里已有的 strPtr（user_service_test.go:157）—— go.mod 还是 1.25.0，
+// Go 1.26 的 `new(值)` 在本模块里用不了。
+
+// M63: 主 IP 判据 —— 先第一个非空 IPv4，否则第一个非空 IPv6。
+// 这是资产列表/详情 ip_address 与复盘报告头 fetchIP 共用的**唯一**一份实现。
+func TestM63_PickPrimaryIP_判据(t *testing.T) {
+	cases := []struct {
+		name     string
+		networks []models.AssetNetwork
+		wantV4   *string
+		wantV6   *string
+	}{
+		{"空 networks", nil, nil, nil},
+		{"全 v4 取第一张", []models.AssetNetwork{netCard("10.0.0.1", ""), netCard("10.0.0.2", "")}, strPtr("10.0.0.1"), nil},
+		{"全 v6 取第一张", []models.AssetNetwork{netCard("", "fe80::1"), netCard("", "fe80::2")}, nil, strPtr("fe80::1")},
+		{"v4 与 v6 并存 → 各自第一张",
+			[]models.AssetNetwork{netCard("10.0.0.1", "fe80::1")}, strPtr("10.0.0.1"), strPtr("fe80::1")},
+		{"v6 在前 v4 在后 → 顺序无关",
+			[]models.AssetNetwork{netCard("", "fe80::1"), netCard("10.0.0.1", "")}, strPtr("10.0.0.1"), strPtr("fe80::1")},
+		{"第一张 v4 是空串 → 跳过它, v6 照样取到",
+			[]models.AssetNetwork{netCard("", "fe80::1")}, nil, strPtr("fe80::1")},
+		{"第一张 v6 是空串 → v4 照样取到",
+			[]models.AssetNetwork{netCard("10.0.0.1", "")}, strPtr("10.0.0.1"), nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v4, v6 := pickPrimaryIP(c.networks)
+			if c.wantV4 == nil {
+				assert.Nil(t, v4)
+			} else {
+				require.NotNil(t, v4)
+				assert.Equal(t, *c.wantV4, *v4)
+			}
+			if c.wantV6 == nil {
+				assert.Nil(t, v6)
+			} else {
+				require.NotNil(t, v6)
+				assert.Equal(t, *c.wantV6, *v6)
+			}
+		})
+	}
+}
+
+// M63: 单值投影（列表/详情实际用的那个）：v4 优先，否则 v6，都没有 → nil。
+func TestM63_PrimaryIP_单值投影(t *testing.T) {
+	assert.Nil(t, primaryIP(nil), "无网卡 → null")
+	assert.Nil(t, primaryIP([]models.AssetNetwork{netCard("", "")}), "网卡都在但没填 IP → null")
+
+	v4v6 := []models.AssetNetwork{netCard("", "fe80::1"), netCard("10.0.0.1", "")}
+	require.NotNil(t, primaryIP(v4v6))
+	assert.Equal(t, "10.0.0.1", *primaryIP(v4v6), "有 v4 时不用 v6（哪怕 v4 在后面的卡上）")
+
+	v6only := []models.AssetNetwork{netCard("", "fe80::1")}
+	require.NotNil(t, primaryIP(v6only))
+	assert.Equal(t, "fe80::1", *primaryIP(v6only))
+}
+
+// M63: List 投影 —— 3 条资产：v4+v6 取 v4 / 只有 v6 取 v6 / 无网卡为 null。
+// 同时钉住「只有一条 IN 查询」（sqlmock 的期望是顺序消费的：多发一条就 "was not expected"）。
+func TestM63_AssetService_List_投影ip_address(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	a1, a2, a3 := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "assets"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "assets"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).
+			AddRow(a1, "web-01").AddRow(a2, "web-02").AddRow(a3, "web-03"))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id IN \(\$1,\$2,\$3\) ORDER BY created_at ASC, id ASC`).
+		WithArgs(a1, a2, a3).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "ipv4_address", "ipv6_address"}).
+			AddRow(uuid.New(), a1, "10.0.0.1", "fe80::1"). // 同一张卡有 v4 与 v6 → v4
+			AddRow(uuid.New(), a1, "10.0.0.2", "").        // 第二张卡不改变结论（第一张已有 v4）
+			AddRow(uuid.New(), a2, "", "fe80::2"))         // 只有 v6 → v6
+
+	items, total, err := svc.List(context.Background(), AssetFilter{Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, items, 3)
+
+	require.NotNil(t, items[0].IpAddress)
+	assert.Equal(t, "10.0.0.1", *items[0].IpAddress, "v4 优先，且是排序后的第一张卡")
+	require.NotNil(t, items[1].IpAddress)
+	assert.Equal(t, "fe80::2", *items[1].IpAddress, "没有 v4 时用 v6")
+	assert.Nil(t, items[2].IpAddress, "无网卡的资产 → null（不是空串）")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// M63: Get 投影 —— 复用已经在手的 networks（不再多发一条查询）。
+// v4 在**第二张**卡上：证明判据是「第一个非空 v4」而不是「第一张卡的 IP」。
+func TestM63_AssetService_Get_投影ip_address(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "asset_networks" WHERE asset_id = $1 ORDER BY created_at ASC, id ASC`)).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id", "ipv4_address", "ipv6_address"}).
+			AddRow(uuid.New(), id, "", "fe80::1").
+			AddRow(uuid.New(), id, "10.0.0.1", ""))
+
+	asset, networks, err := svc.Get(context.Background(), id.String())
+	require.NoError(t, err)
+	require.Len(t, networks, 2, "Get 仍返回全部网卡（详情页的网络接口表）")
+	require.NotNil(t, asset.IpAddress)
+	assert.Equal(t, "10.0.0.1", *asset.IpAddress, "v4 优先：v4 在第二张卡上也要选它")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// M63: 无网卡资产的 Get —— ip_address 为 nil（前端 `!record.ip_address` 禁用 Ping/Traceroute）。
+func TestM63_AssetService_Get_无网卡时ip_address为nil(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks" WHERE asset_id = \$1`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "asset_id"}))
+
+	asset, networks, err := svc.Get(context.Background(), id.String())
+	require.NoError(t, err)
+	assert.Empty(t, networks)
+	assert.Nil(t, asset.IpAddress)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// sqlCapture 记录驱动**实际收到**的 SQL。
+//
+// 为什么需要它：sqlmock 的期望匹配只能断言「某条 SQL 被发过」，无法断言「某列没被写」——
+// 而 M63 要证明的恰恰是**没有** ip_address 出现在 INSERT/SET 里。期望仍要声明（sqlmock
+// 按顺序消费），这里用 `.*` 全接受，把 actual SQL 抄下来供用例直接读。
+type sqlCapture struct{ stmts []string }
+
+func (c *sqlCapture) Match(_, actualSQL string) error {
+	c.stmts = append(c.stmts, actualSQL)
+	return nil
+}
+
+// has 是否有语句包含 sub（子串，非正则 —— 调用的都是带引号的列名）。
+func (c *sqlCapture) has(sub string) bool {
+	for _, s := range c.stmts {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func newCapturingDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock, *sqlCapture) {
+	t.Helper()
+	cap := &sqlCapture{}
+	mockDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(cap))
+	require.NoError(t, err)
+
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: mockDB, PreferSimpleProtocol: true}), &gorm.Config{})
+	require.NoError(t, err)
+	return gormDB, mock, cap
+}
+
+// M63: `ip_address` 是虚拟字段 —— POST 绑得进来（handler 层用例钉 JSON 绑定），
+// 但**不进 INSERT**：gorm:"-" 让它在 schema 解析阶段就被排除在 Fields 之外。
+func TestM63_AssetService_Create_ip_address不进INSERT(t *testing.T) {
+	gormDB, mock, cap := newCapturingDB(t)
+	svc := NewAssetService(gormDB)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`.*`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	err := svc.Create(context.Background(), &models.Asset{Name: "web-01", IpAddress: strPtr("10.0.0.1")})
+	require.NoError(t, err)
+
+	require.True(t, cap.has(`INSERT INTO "assets"`), "Create 必须发出 INSERT：%v", cap.stmts)
+	assert.False(t, cap.has("ip_address"), "assets 表没有 ip_address 列，INSERT 不得带上它：%v", cap.stmts)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// M63 (T-75): Update 走的 `db.Updates(map)` **不丢弃**模型里没有的键 —— GORM v1.30.0 照样
+// 生成 `SET "ip_address"=$n`（callbacks/update.go: LookUpField 为 nil 时仍 append Assignment）。
+// 真 PG 上这是 42703 → 500。所以 handler 必须在入口剥掉这个键（asset_handler.UpdateAsset）。
+//
+// 本用例钉的是**这条 trap 本身**（不是我们期望的行为）：哪天 GORM 改成丢弃未知键，它会红，
+// 那时 handler 的 delete 就可以删掉。
+func TestM63_AssetService_Update_map含模型外列时GORM照发SET(t *testing.T) {
+	gormDB, mock, cap := newCapturingDB(t)
+	svc := NewAssetService(gormDB)
+
+	id := uuid.New()
+	// First() 在事务之外（service.Update 先读后写）
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(assetSampleRows(id.String()))
+	mock.ExpectBegin()
+	mock.ExpectExec(`.*`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
+		"name":       "web-02",
+		"ip_address": "10.0.0.1", // 模型里只有虚拟字段，没有这一列
+	})
+	require.NoError(t, err)
+	assert.True(t, cap.has(`"ip_address"`),
+		"GORM 未丢弃模型外的键 → 真 PG 会报 42703，handler 入口必须剥掉它：%v", cap.stmts)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
