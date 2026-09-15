@@ -421,9 +421,13 @@ function App() {
       locale={zhCN}
       theme={buildTheme(themeMode)}
     >
-      {/* 小改进 #3：Cmd/Ctrl+K 全局搜索面板（登录前后均可用） */}
-      <CommandPalette />
       <BrowserRouter>
+        {/* 小改进 #3：Cmd/Ctrl+K 全局搜索面板（登录前后均可用）。
+            **必须在 BrowserRouter 内**：它内部调 useNavigate()，挂在外层会让
+            react-router 的 invariant 抛错 → React 卸载整棵树 → **整个应用白屏**
+            （真浏览器实测，自 f7e98eb 起；回归钉子见 App.render.test.tsx）。
+            注释留在这里而不是提交信息里：移动任何一行都要先看见这个约束。 */}
+        <CommandPalette />
         <Routes>
           <Route
             path="/login"
