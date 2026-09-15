@@ -308,21 +308,13 @@ func (s *assetService) retireCore(ctx context.Context, db *gorm.DB, id string, r
 		return nil, nil, err
 	}
 
-	// 取"主 IP"作为 last_known (第一张有 IPv4 的网卡; 都没就空)
-	var lastIP4, lastIP6 *string
-	for _, n := range networks {
-		if lastIP4 == nil && n.IPv4Address != "" {
-			ip := n.IPv4Address
-			lastIP4 = &ip
-		}
-		if lastIP6 == nil && n.IPv6Address != "" {
-			ip := n.IPv6Address
-			lastIP6 = &ip
-		}
-		if lastIP4 != nil && lastIP6 != nil {
-			break
-		}
-	}
+	// 取"主 IP"作为 last_known: v4 / v6 各自第一张非空。
+	// M63: 复用 asset_ip.pickPrimaryIP —— 这段循环曾在这里第三遍实现同一条判据
+	// （asset_ip.go 的注释里那份「唯一出口」在当时并不成立）。Retire 存下的地址与
+	// 列表/详情显示的主 IP 现在说的是同一个口径。
+	// 返回的指针指向 networks 的元素：下面只把它们当**只读**快照绑定进 UPDATE，
+	// 不在写库后回读内存（末尾那次 listNetworks 换的是新切片，不动这里的内存）。
+	lastIP4, lastIP6 := pickPrimaryIP(networks)
 
 	now := time.Now()
 	trimmedReason := strings.TrimSpace(reason)
