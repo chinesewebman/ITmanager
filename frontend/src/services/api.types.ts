@@ -1841,7 +1841,13 @@ export interface components {
             name?: string;
             /** @enum {string} */
             asset_type?: "server" | "switch" | "router" | "firewall" | "storage" | "other";
-            ip_address?: string;
+            /**
+             * @description 主 IP（**只读投影**）：取自该资产「第一张网卡」的地址，v4 优先、否则 v6
+             *     （`asset_networks`，判据见 service.pickPrimaryIP）。没有任何网卡时为 null。
+             *     写入请用 `AssetInput.ip_address`（创建）—— 本字段本身不是 `assets` 表的列。
+             * @example 10.0.0.5
+             */
+            ip_address?: string | null;
             mac_address?: string;
             /** @enum {string} */
             status?: "active" | "inactive" | "maintenance";
@@ -1857,10 +1863,22 @@ export interface components {
             /** Format: date-time */
             updated_at?: string;
         };
+        /**
+         * @description 创建资产的请求体（`POST /assets`）。`ip_address` 一并给出非空值时，后端在**同一事务**里
+         *     为这张资产建「第一张网卡」（`asset_networks`，接口名 `eth0`）：IPv4 落 `ipv4_address`、
+         *     IPv6 落 `ipv6_address`（两列并存是为区分地址族，不要都塞一列）。
+         */
         AssetInput: {
             name: string;
             asset_type: string;
-            ip_address: string;
+            /**
+             * @description 主 IP。可选（不传 / 传空串 = 不建网卡，`asset_networks` 为空 —— 这与
+             *     `Asset.ip_address` 为 null 是同一件事）。取值必须能被 `net.ParseIP` 解析，
+             *     否则 **422**（`validation_failed`）。
+             *     只支持「一个地址」：一张网卡一行（多网卡见 G-Asset-MultiNetwork）。
+             * @example 192.168.1.10
+             */
+            ip_address?: string | null;
             mac_address?: string;
             /** Format: uuid */
             site_id?: string;
