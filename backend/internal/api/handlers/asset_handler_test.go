@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -635,4 +636,196 @@ func newSQLCapturingDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock, *sqlCapture) {
 	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: mockDB, PreferSimpleProtocol: true}), &gorm.Config{})
 	require.NoError(t, err)
 	return gormDB, mock, cap
+}
+
+// ==================== M64: CreateAsset 写 AssetNetwork (G-Asset-NetworksPersist) ====================
+
+// newAssetSQLiteHandlerDB 真 sqlite（手写 DDL，列口径对齐 models.Asset / models.AssetNetwork）。
+//
+// 这里用真库而不是 mock：本组要证的是**端到端**接线 —— 表单 JSON 里的 `ip_address`
+// 一路变成 `asset_networks` 里的一行。mock 只能证明「handler 把某个值递给了 service」，
+// 递的是不是 JSON 里那个值、service 有没有把它写下去，只有真库能一起看到。
+// （不用 AutoMigrate：models.Asset.ID 带 `default:gen_random_uuid()`，sqlite 上没这个函数。）
+func newAssetSQLiteHandlerDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+
+	stmts := []string{
+		`CREATE TABLE assets (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			asset_tag TEXT,
+			sn TEXT,
+			asset_type TEXT,
+			brand TEXT,
+			model TEXT,
+			site_id TEXT,
+			site_name TEXT,
+			rack_id TEXT,
+			rack_name TEXT,
+			rack_position TEXT,
+			purchase_date DATETIME,
+			warranty_end DATETIME,
+			vendor TEXT,
+			vendor_contact TEXT,
+			status TEXT DEFAULT 'active',
+			online_time DATETIME,
+			offline_time DATETIME,
+			last_known_ip4 TEXT,
+			last_known_ip6 TEXT,
+			retired_at DATETIME,
+			retired_reason TEXT,
+			retired_by TEXT,
+			business_unit TEXT,
+			service_name TEXT,
+			tags TEXT,
+			custom_fields TEXT,
+			net_box_id INTEGER,
+			source TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE asset_networks (
+			id TEXT PRIMARY KEY,
+			asset_id TEXT NOT NULL,
+			interface_name TEXT NOT NULL,
+			interface_type TEXT,
+			mac_address TEXT,
+			ipv4_address TEXT,
+			ipv4_netmask TEXT,
+			ipv6_address TEXT,
+			speed INTEGER,
+			duplex TEXT,
+			status TEXT,
+			connected_to TEXT,
+			connected_port TEXT,
+			purpose TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+	}
+	for _, s := range stmts {
+		require.NoError(t, db.Exec(s).Error)
+	}
+	return db
+}
+
+// postAsset 发一条 POST /assets，返回响应。
+func postAsset(t *testing.T, r *gin.Engine, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/assets", bytes.NewBuffer(raw))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// M64 主证据（端到端）：POST /assets 带 ip_address → 201，且 `asset_networks` 里有**恰好一行**，
+// 值落在 ipv4_address、并挂在刚建的这张资产下。
+//
+// 「M63 之前这里是 0 行」是本轮存在的理由：表单一直在送这个字段，后端一直静默丢掉。
+func TestM64_CreateAsset_带ip_address_落成网卡行(t *testing.T) {
+	db := newAssetSQLiteHandlerDB(t)
+	r := newTestRouter(service.NewAssetService(db))
+
+	w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server", "ip_address": "10.0.0.5"})
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+
+	var nets []models.AssetNetwork
+	require.NoError(t, db.Find(&nets).Error)
+	require.Len(t, nets, 1, "表单里的 IP 必须真的落成一张网卡行")
+	assert.Equal(t, "10.0.0.5", nets[0].IPv4Address)
+	assert.Equal(t, "eth0", nets[0].InterfaceName)
+
+	// 网卡是**这张**资产的，不是孤儿行：比对响应体里回传的 asset.id。
+	var resp struct {
+		Data models.Asset `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, resp.Data.ID, nets[0].AssetID, "网卡必须挂在响应里那张资产下")
+}
+
+// 不带 ip_address：201 且网卡表为空 —— 建资产不该凭空长出一个网口。
+// 与上一条成对的负控：没有它，上一条的「恰好一行」在实现改成「总是建一行」时仍会绿。
+func TestM64_CreateAsset_无ip_address_不建网卡(t *testing.T) {
+	db := newAssetSQLiteHandlerDB(t)
+	r := newTestRouter(service.NewAssetService(db))
+
+	w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server"})
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+
+	var n int64
+	require.NoError(t, db.Model(&models.AssetNetwork{}).Count(&n).Error)
+	assert.Zero(t, n, "没给 IP 就不该建网卡")
+}
+
+// 非法 IP → 422 + `validation_failed`，且**不进 service**。
+//
+// 为什么是 422 而不是 400：JSON 合法、字段名也对，只有取值不对 —— 前端要按字段高亮而不是
+// 当成请求坏了。为什么必须挡在入口：service 也会拒（兜底），但那时请求已经过了参数校验这道
+// 语义闸，错误文案只能笼统说「名称不能为空」（ErrInvalidInput 的既有映射），指错字段。
+func TestM64_CreateAsset_非法ip_address_返回422(t *testing.T) {
+	called := false
+	svc := &mockAssetService{
+		createFunc: func(ctx context.Context, a *models.Asset, ip *string) error {
+			called = true
+			return nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server", "ip_address": "not-an-ip"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "body=%s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "validation_failed")
+	assert.False(t, called, "非法 IP 挡在入口，不回调 service")
+}
+
+// 空串 / 纯空白不算非法（也**不是** 201 时凭空建的网卡）：API 直连方与「清空 IP」都走这条路。
+// 前端表单的 required 规则会先挡住空值，但这不该让后端把空串判成格式错误。
+func TestM64_CreateAsset_空ip_address不算非法(t *testing.T) {
+	for _, ip := range []string{"", "   "} {
+		t.Run(ip, func(t *testing.T) {
+			var got *string
+			svc := &mockAssetService{
+				createFunc: func(ctx context.Context, a *models.Asset, ip *string) error {
+					got = ip
+					return nil
+				},
+			}
+			r := newTestRouter(svc)
+
+			w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server", "ip_address": ip})
+			require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+			require.NotNil(t, got, "字段存在时应原样透传给 service（由它决定空值 = 不建网卡）")
+			assert.Equal(t, ip, *got)
+		})
+	}
+}
+
+// ip_address 的值必须落进 **Asset** 之外的通道：`models.Asset.IpAddress` 是 `gorm:"-"` 的投影字段，
+// 若 handler 继续只绑 models.Asset（M63 之前的写法），这个键会被 JSON 展平塞进虚拟字段再被 GORM
+// 丢掉 —— 接口返 201，库里什么都没有。本用例直接钉那条通道：service 收到的 Asset 上虚拟字段为 nil，
+// 值走的是独立入参。
+func TestM64_CreateAsset_ip_address走独立入参不变虚拟字段(t *testing.T) {
+	var gotAsset *models.Asset
+	var gotIP *string
+	svc := &mockAssetService{
+		createFunc: func(ctx context.Context, a *models.Asset, ip *string) error {
+			gotAsset, gotIP = a, ip
+			return nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	w := postAsset(t, r, map[string]any{"name": "web-01", "asset_type": "server", "ip_address": "10.0.0.5"})
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+
+	require.NotNil(t, gotIP)
+	assert.Equal(t, "10.0.0.5", *gotIP)
+	require.NotNil(t, gotAsset)
+	assert.Nil(t, gotAsset.IpAddress, "虚拟字段是只读投影，值只能走显式入参（否则就是静默丢弃）")
 }

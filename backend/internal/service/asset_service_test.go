@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -1017,4 +1018,194 @@ func TestM63_AssetService_Update_map含模型外列时GORM照发SET(t *testing.T
 	assert.True(t, cap.has(`"ip_address"`),
 		"GORM 未丢弃模型外的键 → 真 PG 会报 42703，handler 入口必须剥掉它：%v", cap.stmts)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M64: Create 写 AssetNetwork (G-Asset-NetworksPersist) ====================
+
+// newAssetSQLiteDB 真 sqlite + 手写 DDL（口径同 models/hooks_test.go 的 assetSchema）。
+//
+// 不用 AutoMigrate：models.Asset.ID 带 `default:gen_random_uuid()`，sqlite 上没有该函数。
+//
+// 为什么这一组用真库而不是 sqlmock：被测行为是「网卡表里**到底有没有那一行、值落在哪一列**」。
+// sqlmock 只能断言「某条 SQL 被发过」，行内容得由测试作者手写进期望里 —— 而「写是写了、
+// 写错了列/写错了行」正是这类改动最容易出的缺陷，恰恰是手写期望盖不住的地方。
+func newAssetSQLiteDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+
+	stmts := []string{
+		`CREATE TABLE assets (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			asset_tag TEXT,
+			sn TEXT,
+			asset_type TEXT,
+			brand TEXT,
+			model TEXT,
+			site_id TEXT,
+			site_name TEXT,
+			rack_id TEXT,
+			rack_name TEXT,
+			rack_position TEXT,
+			purchase_date DATETIME,
+			warranty_end DATETIME,
+			vendor TEXT,
+			vendor_contact TEXT,
+			status TEXT DEFAULT 'active',
+			online_time DATETIME,
+			offline_time DATETIME,
+			last_known_ip4 TEXT,
+			last_known_ip6 TEXT,
+			retired_at DATETIME,
+			retired_reason TEXT,
+			retired_by TEXT,
+			business_unit TEXT,
+			service_name TEXT,
+			tags TEXT,
+			custom_fields TEXT,
+			net_box_id INTEGER,
+			source TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE asset_networks (
+			id TEXT PRIMARY KEY,
+			asset_id TEXT NOT NULL,
+			interface_name TEXT NOT NULL,
+			interface_type TEXT,
+			mac_address TEXT,
+			ipv4_address TEXT,
+			ipv4_netmask TEXT,
+			ipv6_address TEXT,
+			speed INTEGER,
+			duplex TEXT,
+			status TEXT,
+			connected_to TEXT,
+			connected_port TEXT,
+			purpose TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+	}
+	for _, s := range stmts {
+		require.NoError(t, db.Exec(s).Error)
+	}
+	return db
+}
+
+// networksOf 回库读某资产的网卡（顺序对齐 listNetworks：created_at ASC, id ASC）。
+func networksOf(t *testing.T, db *gorm.DB, assetID uuid.UUID) []models.AssetNetwork {
+	t.Helper()
+	var rows []models.AssetNetwork
+	require.NoError(t, db.Where("asset_id = ?", assetID).
+		Order("created_at ASC, id ASC").Find(&rows).Error)
+	return rows
+}
+
+func assetRowCount(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var n int64
+	require.NoError(t, db.Model(&models.Asset{}).Count(&n).Error)
+	return n
+}
+
+// 没给 IP：只有资产行。网卡表必须**空** —— 凭空造一张空网卡会让 GET 的 ip_address
+// 投影与「这个资产有几个网口」的问题都失去答案（前端 `!record.ip_address` 判据还行，
+// 但列表里会长出一张不存在的接口）。
+func TestM64_AssetService_Create_无IP时只建资产行(t *testing.T) {
+	db := newAssetSQLiteDB(t)
+	svc := NewAssetService(db)
+
+	asset := &models.Asset{Name: "web-01", AssetType: "server"}
+	require.NoError(t, svc.Create(context.Background(), asset, nil))
+
+	assert.EqualValues(t, 1, assetRowCount(t, db))
+	assert.Empty(t, networksOf(t, db, asset.ID), "没给 IP 就不该建网卡")
+}
+
+// 空串（含纯空白）与「未提供」同义：表单里没填的 IP 会以 `""` 到达（AssetFormValues.ip_address
+// 是 string 不是可选），把它当成一个 IP 去解析会得到 nil → 更不能拿 nil 去建网卡。
+func TestM64_AssetService_Create_空IP视作未提供(t *testing.T) {
+	for _, ip := range []string{"", "   "} {
+		t.Run(ip, func(t *testing.T) {
+			db := newAssetSQLiteDB(t)
+			svc := NewAssetService(db)
+
+			asset := &models.Asset{Name: "web-01", AssetType: "server"}
+			require.NoError(t, svc.Create(context.Background(), asset, strPtr(ip)))
+
+			assert.EqualValues(t, 1, assetRowCount(t, db))
+			assert.Empty(t, networksOf(t, db, asset.ID), "空串不是 IP，不该建网卡")
+		})
+	}
+}
+
+// IPv4：落 ipv4_address，ipv6_address 必须留空。
+// 两列并存正是为区分族 —— 都塞一列会让 pickPrimaryIP 的判据（先第一个非空 v4）读出错误结果。
+func TestM64_AssetService_Create_IPv4落ipv4列(t *testing.T) {
+	db := newAssetSQLiteDB(t)
+	svc := NewAssetService(db)
+
+	asset := &models.Asset{Name: "web-01", AssetType: "server"}
+	require.NoError(t, svc.Create(context.Background(), asset, strPtr("10.0.0.5")))
+
+	nets := networksOf(t, db, asset.ID)
+	require.Len(t, nets, 1, "给了 IP 必须恰好建一张网卡")
+	assert.Equal(t, asset.ID, nets[0].AssetID, "网卡必须挂在这张资产下")
+	assert.Equal(t, "eth0", nets[0].InterfaceName, "接口名是这一轮的产品决定（多网卡另立 G-Asset-MultiNetwork）")
+	assert.Equal(t, "10.0.0.5", nets[0].IPv4Address)
+	assert.Empty(t, nets[0].IPv6Address, "v4 不得落到 v6 列")
+}
+
+// IPv6：落 ipv6_address，ipv4_address 必须留空（反向的同一件事）。
+// 第二条子用例钉「落库的是解析后的规范形式」：`net.ParseIP().String()` 会把 2001:0db8:0:0::1
+// 归一成 2001:db8::1 —— 同一个地址的两种写法若原样入库，按字符串比对的去重/检索就会各算一条。
+func TestM64_AssetService_Create_IPv6落ipv6列(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"2001:db8::1", "2001:db8::1"},
+		{"2001:0DB8:0000:0000:0000:0000:0000:0001", "2001:db8::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			db := newAssetSQLiteDB(t)
+			svc := NewAssetService(db)
+
+			asset := &models.Asset{Name: "web-01", AssetType: "server"}
+			require.NoError(t, svc.Create(context.Background(), asset, strPtr(tc.in)))
+
+			nets := networksOf(t, db, asset.ID)
+			require.Len(t, nets, 1)
+			assert.Equal(t, tc.want, nets[0].IPv6Address)
+			assert.Empty(t, nets[0].IPv4Address, "v6 不得落到 v4 列（pickPrimaryIP 会把它当 v4 读出）")
+		})
+	}
+}
+
+// 非法 IP：service 直接拒绝，且**一张资产行都不落**。
+// 早返必须发生在事务之前：先建资产再发现 IP 坏了，会留下半落状态（资产在、IP 没了），
+// 而调用方（handler 已挡在入口，这里是给 db_smoke/导入器那类直接调用方的兜底）会当整条失败。
+func TestM64_AssetService_Create_非法IP不落库(t *testing.T) {
+	db := newAssetSQLiteDB(t)
+	svc := NewAssetService(db)
+
+	err := svc.Create(context.Background(), &models.Asset{Name: "web-01", AssetType: "server"}, strPtr("not-an-ip"))
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Zero(t, assetRowCount(t, db), "非法 IP 不得留下任何行")
+}
+
+// 网卡那一步失败时资产行必须一起回滚。
+//
+// 手法：把 asset_networks 整张表删掉，让第二条 INSERT 撞上**真的 DB 错误**（"no such table"），
+// 而不是靠 mock 编排一个假错误 —— 要证的正是真驱动上事务边界的实际行为。
+// 若 Create 不包事务（先 Create(asset) 再 Create(network)），资产行会留下而接口返回 500。
+func TestM64_AssetService_Create_网卡写失败时资产行一并回滚(t *testing.T) {
+	db := newAssetSQLiteDB(t)
+	require.NoError(t, db.Exec(`DROP TABLE asset_networks`).Error)
+	svc := NewAssetService(db)
+
+	err := svc.Create(context.Background(), &models.Asset{Name: "web-01", AssetType: "server"}, strPtr("10.0.0.5"))
+	require.Error(t, err, "网卡写不进去就必须报错，不得谎报成功")
+	assert.Zero(t, assetRowCount(t, db),
+		"资产行必须随网卡行一起回滚 —— 半落状态会让调用方重试时撞 name 唯一约束")
 }
