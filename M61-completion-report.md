@@ -36,7 +36,7 @@
 | frontend `npm run lint`（全量，`--max-warnings 0`） | 干净 ✓ |
 | frontend `npx vitest run src/pages/Users.test.tsx` | **14 tests PASS** ✓（M61 新增） |
 | frontend `npx vitest run src/App.menu.test.tsx` | **5 tests PASS** ✓（M61 新增） |
-| frontend 全量 `npx vitest run` | **47 files / 489 tests PASS** ✓（M60 基线 42/409；+5 文件 +80 测试，含 M62 并行落地的 2 文件，零退化） |
+| frontend 全量 `npx vitest run`（最终冻结态，json 逐文件核对） | **47 files / 489 tests / 0 failed** ✓（M60 基线 42/409；+5 文件 +80 测试，含 M62 并行落地的 2 文件，零退化） |
 | frontend `src/App.render.test.tsx` | **2 tests PASS**（修复前 2 failed —— 复现同一条 invariant 异常）✓ |
 | `npm run validate:api` + `gen:api` 漂移 | valid ✓；生成物差异仅新增 path/schema 与 `UserList.data` 形状修正（CI 门禁 `git diff --exit-code` 覆盖） |
 | mutation inversion（5 处，全红在**断言**上，非编译） | ① 自我守卫短路 → service 3 条 + 集成 1 条 FAIL；② 守卫 count 去掉 `status='active'` → `_被禁用的管理员不算能自救` FAIL；③ 去掉 `CanonicalRole` 折叠 → 2 条 FAIL；④ 前端 bypass `statusMut.mutate` → `禁用账号…PATCH /users/:id/status` FAIL；⑤ 全部还原后复跑全绿 ✓ |

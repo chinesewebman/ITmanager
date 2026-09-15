@@ -491,9 +491,10 @@ JWT 拿到手就能用满 24h（G-5 的 M40 修复把「禁用即失效」做进
 - frontend `src/pages/Users.test.tsx`: **14 tests PASS**（M61 新增）✓
 - frontend `src/App.menu.test.tsx`: **5 tests PASS**（M61 新增）✓
 - frontend `src/App.render.test.tsx`: **2 tests PASS**（M61 新增，白屏回归；修复前 2 failed）✓
-- frontend 全量 `npx vitest run`: **47 files / 489 tests PASS**（M60 基线 42/409；+5 文件 +80 测试，
-  其中 M62 并行同仓落地 2 文件；零退化。唯一一次红是 `AssetFormModal.test.tsx` 在
-  负载下（同机并发跑两个套件）的偶发，单独复跑 4/4 PASS —— 与 M60 retro 记录的同源现象一致）✓
+- frontend 全量 `npx vitest run`（最终冻结态，`--reporter=json` 逐文件核对）:
+  **47 files / 489 tests / 0 failed**（M60 基线 42/409；+5 文件 +80 测试，其中 M62 并行同仓
+  落地 2 文件；零退化）。中途一次 `AssetFormModal.test.tsx` 在**同机并发跑两个套件**时偶发红，
+  单独复跑 4/4 PASS，最终态全绿 —— 与 M60 retro 记录的同源现象一致 ✓
 - **真浏览器验证**（`vite build` 产物 + 契约桩 API，本地 8101；见下方白屏修复段）：
   侧边栏入口、列表 3 行、禁用/启用、改角色、403 回滚、能力门禁逐项实测通过，附截图 ✓
 - **mutation inversion 实证（5 处，全部红在断言上）**:
