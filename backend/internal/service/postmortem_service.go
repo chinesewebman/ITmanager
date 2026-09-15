@@ -94,31 +94,27 @@ func (s *PostmortemService) GenerateReport(ctx context.Context, w io.Writer, ass
 	return data, nil
 }
 
-// fetchIP 从 asset_networks 表取 IPv4（优先）/IPv6
-// 资产可能有多个网卡，取第一个非空的 IPv4，否则第一个 IPv6
+// fetchIP 从 asset_networks 表取主 IP 给报告头：v4 优先, 否则 v6。
+//
+// M63: 判据不再在这里各写一份 —— 委托到 `primaryIP`（与资产列表/详情注入 `ip_address`
+// 是同一份实现、同一批数据的同一个地址）。这里只保留「报告头要的是字符串、空值编码成 ""」
+// 这一层差异（renderer 的 ReportData.IPAddress 是 string，没有 null）。
+//
+// 只 Select 两列（不拉整行）是刻意的：报告只要这个地址，网卡的外键/描述与本处无关。
+// 注意列名由 **Go 字段名**推导（`IPv6Address` → `ipv6_address`），与 JSON tag 的
+// `ipv_address` 无关 —— 后者只影响前端 payload。
 func (s *PostmortemService) fetchIP(ctx context.Context, assetID uuid.UUID) (string, error) {
-	type ipRow struct {
-		IPv4Address string `gorm:"column:ipv4_address"`
-		IPv6Address string `gorm:"column:ipv6_address"` // GORM 由字段名 IPv6Address 推导: ipv6_address（不是 JSON tag 的 ipv_address）
-	}
-	var rows []ipRow
+	var networks []models.AssetNetwork
 	if err := s.db.WithContext(ctx).
 		Table("asset_networks").
 		Select("ipv4_address, ipv6_address").
 		Where("asset_id = ?", assetID).
-		Order("created_at ASC").
-		Scan(&rows).Error; err != nil {
+		Order("created_at ASC, id ASC").
+		Scan(&networks).Error; err != nil {
 		return "", err
 	}
-	for _, r := range rows {
-		if r.IPv4Address != "" {
-			return r.IPv4Address, nil
-		}
-	}
-	for _, r := range rows {
-		if r.IPv6Address != "" {
-			return r.IPv6Address, nil
-		}
+	if ip := primaryIP(networks); ip != nil {
+		return *ip, nil
 	}
 	return "", nil
 }

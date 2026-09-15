@@ -57,6 +57,19 @@ type Asset struct {
 	NetBoxID *int   `json:"netbox_id" gorm:"uniqueIndex"`
 	Source   string `json:"source" gorm:"size:50"` // netbox, zabbix, manual
 
+	// M63 (G-UI-AssetIpPersistence): `ip_address` 是**虚拟字段**，不是列（`gorm:"-"`）。
+	//
+	// IP 的真身在 `asset_networks.ipv4_address` / `.ipv6_address`（一个资产多张网卡），
+	// List/Get 把「第一张网卡的主 IP」投影到这里（v4 优先，否则 v6，见
+	// asset_service.pickPrimaryIP）—— 前端 `Asset.ip_address`（列 + Ping/Traceroute 按钮）
+	// 与 openapi Asset schema 一直声明着这个字段，本轮之前没有任何写入方，故列表里恒为空。
+	//
+	// 为什么用 `gorm:"-"` 而不是真加一列：IP 属于网卡，不属于资产；两份存储必然漂移
+	// （退役改的是 `asset_networks`，见 B4）。写库路径是 G-Asset-NetworksPersist 的事。
+	//
+	// 放在末尾、且与列之间空一行，是为了让「这不是一列」一眼可见。
+	IpAddress *string `json:"ip_address" gorm:"-"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
