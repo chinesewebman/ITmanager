@@ -286,7 +286,7 @@ func TestAssetService_Create_成功(t *testing.T) {
 	mock.ExpectCommit()
 
 	asset := &models.Asset{Name: "db-01", AssetTag: "AT-002"}
-	err := svc.Create(context.Background(), asset)
+	err := svc.Create(context.Background(), asset, nil)
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
@@ -296,10 +296,10 @@ func TestAssetService_Create_空name返回ErrInvalidInput(t *testing.T) {
 	svc := NewAssetService(gormDB)
 
 	// 空 name 早返, 不打 DB
-	err := svc.Create(context.Background(), &models.Asset{Name: "  "})
+	err := svc.Create(context.Background(), &models.Asset{Name: "  "}, nil)
 	assert.ErrorIs(t, err, ErrInvalidInput)
 
-	err2 := svc.Create(context.Background(), nil)
+	err2 := svc.Create(context.Background(), nil, nil)
 	assert.ErrorIs(t, err2, ErrInvalidInput)
 }
 
@@ -965,9 +965,14 @@ func newCapturingDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock, *sqlCapture) {
 	return gormDB, mock, cap
 }
 
-// M63: `ip_address` 是虚拟字段 —— POST 绑得进来（handler 层用例钉 JSON 绑定），
-// 但**不进 INSERT**：gorm:"-" 让它在 schema 解析阶段就被排除在 Fields 之外。
-func TestM63_AssetService_Create_ip_address不进INSERT(t *testing.T) {
+// M63/M64: `ip_address` 是虚拟投影字段 —— 它既不进 `assets` 的 INSERT（`gorm:"-"` 让它在
+// schema 解析阶段就被排除在 Fields 之外），也**不是写入路径**：M64 起 IP 由 Create 的显式
+// 入参 `ipAddress` 给出（handler 从同一个 JSON 键取，见 asset_handler.CreateAsset）。
+//
+// 本用例钉的正是这条分工：把值塞进模型上的虚拟字段（其余入参为 nil）**什么都不该发生**。
+// 它是 M63 那个 bug（表单里的 IP 写完没影）的机制本身 —— 现在这个机制无害化了，
+// 因为真写入走的是另一条显式通道。
+func TestM63_AssetService_Create_虚拟字段不进INSERT也不建网卡(t *testing.T) {
 	gormDB, mock, cap := newCapturingDB(t)
 	svc := NewAssetService(gormDB)
 
@@ -975,11 +980,13 @@ func TestM63_AssetService_Create_ip_address不进INSERT(t *testing.T) {
 	mock.ExpectQuery(`.*`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
-	err := svc.Create(context.Background(), &models.Asset{Name: "web-01", IpAddress: strPtr("10.0.0.1")})
+	err := svc.Create(context.Background(), &models.Asset{Name: "web-01", IpAddress: strPtr("10.0.0.1")}, nil)
 	require.NoError(t, err)
 
 	require.True(t, cap.has(`INSERT INTO "assets"`), "Create 必须发出 INSERT：%v", cap.stmts)
 	assert.False(t, cap.has("ip_address"), "assets 表没有 ip_address 列，INSERT 不得带上它：%v", cap.stmts)
+	assert.False(t, cap.has(`INSERT INTO "asset_networks"`),
+		"虚拟字段不是写入路径 —— 入参 ipAddress 为 nil 时不得建网卡：%v", cap.stmts)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

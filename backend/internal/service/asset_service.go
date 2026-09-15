@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"time"
 
@@ -45,7 +46,9 @@ type AssetService interface {
 	// ListAll 返回全部资产（导出专用，不分页、不计数）。语义与 List 不同，见实现处注释。
 	ListAll(ctx context.Context) (items []models.Asset, err error)
 	Get(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
-	Create(ctx context.Context, asset *models.Asset) error
+	// Create 建资产。ipAddress 非空（trim 后）时在**同一事务**里补一张网卡：
+	// IPv4 落 ipv4_address、IPv6 落 ipv6_address（M64 / G-Asset-NetworksPersist）。
+	Create(ctx context.Context, asset *models.Asset, ipAddress *string) error
 	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error)
 	Delete(ctx context.Context, id string) error
 	// B4: 软退役 — 把 AssetNetwork.IP* 清空, 存档到 Asset.LastKnownIP*, 释放 IP 给新设备用
@@ -215,17 +218,60 @@ func (s *assetService) injectPrimaryIPs(ctx context.Context, items []models.Asse
 	return nil
 }
 
-func (s *assetService) Create(ctx context.Context, asset *models.Asset) error {
+// Create 建资产（M64 / G-Asset-NetworksPersist：表单的 `ip_address` 落第一张网卡）。
+//
+// 为什么 IP 是**独立入参**而不是 `models.Asset` 上的字段：`assets` 表没有 `ip_address` 列
+// —— IP 属于网卡，两份存储必然漂移（退役改的是 `asset_networks`，见 B4）；
+// `models.Asset.IpAddress` 是 `gorm:"-"` 的只读投影字段。绑定进模型 = 被 GORM 静默丢掉
+// （M63 之前的现状：前端表单里的 IP 写完没影）。
+//
+// 为什么 v4/v6 分列写：两列并存**正是为区分族**。把 v6 塞进 `ipv4_address` 会让
+// `pickPrimaryIP` 的判据（先第一个非空 v4，否则第一个非空 v6）读出错误结果 ——
+// 列表/详情显示 v6 时被当成 v4。
+//
+// 为什么包事务：资产行与网卡行必须同生。分两次写时第二条失败会留下「资产建了、IP 丢了」
+// 的半落状态，而调用方拿到 500 会当整条失败去重试 → 撞上 name 唯一约束（409）。
+func (s *assetService) Create(ctx context.Context, asset *models.Asset, ipAddress *string) error {
 	if asset == nil || strings.TrimSpace(asset.Name) == "" {
 		return ErrInvalidInput
 	}
-	if err := s.db.WithContext(ctx).Create(asset).Error; err != nil {
-		if isUniqueViolation(err) {
-			return ErrAlreadyExists
-		}
-		return err
+	// 空串与未提供同义（可选字段）：不建网卡。
+	var ip string
+	if ipAddress != nil {
+		ip = strings.TrimSpace(*ipAddress)
 	}
-	return nil
+	parsed := net.ParseIP(ip)
+	if ip != "" && parsed == nil {
+		// handler 已用同一判据挡在入口（422）。这里再判一次是给**直接调用方**
+		// （tests/db_smoke_test.go、将来的导入器）兜底：宁可报错，也不要把脏 IP 写进网卡表。
+		return ErrInvalidInput
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(asset).Error; err != nil {
+			if isUniqueViolation(err) {
+				return ErrAlreadyExists
+			}
+			return err
+		}
+		if parsed == nil {
+			return nil
+		}
+		network := &models.AssetNetwork{
+			AssetID:       asset.ID,
+			InterfaceName: "eth0",
+			InterfaceType: "ethernet",
+			Status:        "unknown",
+		}
+		if v4 := parsed.To4(); v4 != nil {
+			// To4() 对 **4-in-6 映射形式**（`::ffff:1.2.3.4`）也非 nil —— 那种地址本来就是
+			// 一个 IPv4，落 ipv4_address 并归一成 `1.2.3.4` 是正确读法（net.ParseIP 让它
+			// To4() 非 nil 的语义就是「这个地址可以当 v4 用」）。
+			network.IPv4Address = v4.String()
+		} else {
+			network.IPv6Address = parsed.String()
+		}
+		return tx.Create(network).Error
+	})
 }
 
 func (s *assetService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error) {

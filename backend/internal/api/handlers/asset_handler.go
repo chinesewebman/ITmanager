@@ -89,13 +89,16 @@ func (h *AssetHandler) GetAsset(c *gin.Context) {
 }
 
 // CreateAsset 创建资产
+//
+// M64 中间态：service.Create 已改签名为 (asset, ipAddress)，此处暂传 nil
+// （handler 侧接 `ip_address` 的改动落在下一个 commit）。
 func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	var asset models.Asset
 	if err := c.ShouldBindJSON(&asset); err != nil {
 		apierr.BadRequest(c, "请求参数错误")
 		return
 	}
-	if err := h.svc.Create(c.Request.Context(), &asset); err != nil {
+	if err := h.svc.Create(c.Request.Context(), &asset, nil); err != nil {
 		if errors.Is(err, service.ErrAlreadyExists) {
 			apierr.Conflict(c, "资产已存在")
 			return

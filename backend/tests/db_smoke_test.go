@@ -3474,7 +3474,7 @@ func TestDBSmoke_G21_JSONBUpdateReject(t *testing.T) {
 	uid := uuid.NewString()
 	require.NoError(t, svc.Create(ctx, &models.Asset{
 		ID: uuid.MustParse(uid), Name: "smoke-g21", AssetType: "server",
-	}))
+	}, nil))
 
 	// ② service.Update 写 custom_fields={} — 应该成功 (handler 规范化后通过)
 	updated, err := svc.Update(ctx, uid, map[string]interface{}{
