@@ -323,6 +323,116 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M63 — G-Asset-IpPersistence 资产 IP 投影（List/Get 注入 ip_address）+ Update 防 500（M62 派生 TODO）（2026-09-15）
+
+**摩擦（M62 审查派生，本轮结案）**: M62 给资产表单的 `ip_address` 加了格式闸之后追查
+「这个值去哪了」，结论是**读取侧根本没有投影**、**写入侧还会把请求打成 500**：
+
+1. **读**: `GET /assets` 从不返回 `ip_address` —— 前端 `AssetTable.tsx:105` 的「IP 地址」列
+   与 `:149/:159` 的 Ping / Traceroute 按钮（`disabled={!record.ip_address}`）在生产数据上
+   **整列空转且按钮恒灰**；测试之所以全绿，是因为 `Assets.test.tsx` 的 mock 数据里带了 IP
+   （「mock 里有 = 手上有」是这一类缺陷的固定遮罩）。
+2. **写**: `PUT /assets/:id` 把整张 map 交给 `db.Updates(map)`，而 GORM v1.30.0 对**模型里
+   不存在**的键**不丢弃**（`callbacks/update.go`：`LookUpField` 未命中时照样
+   `append(clause.Assignment{Column:{Name:k}})`）→ 生成 `SET "ip_address"=$n` →
+   PG `42703`（`assets` 无此列）→ handler 走 `apierr.Internal` → **500**。
+   本轮把这条从「源码级核实」升级为**实测**（见下 mutation ①，捕获到的 SQL 原文）。
+3. **POST**: `ShouldBindJSON(&models.Asset)` 绑定阶段丢弃该键（模型无此字段），
+   本轮**保持**这一行为（虚拟字段不进 INSERT，见 mutation ③ 的断言）。
+
+**改动**（backend 5 files，commit `33cec6d` → `215b69c` → `ccf086e` → `be5c3da`）:
+
+- **`backend/internal/models/asset.go`**: `Asset` 加 `IpAddress *string json:"ip_address" gorm:"-"`
+  虚拟字段 —— **不是列**，放在末尾并与列空一行，让「这不是一列」一眼可见。
+- **`backend/internal/service/asset_ip.go`**（新建）: `pickPrimaryIP(networks) (v4, v6 *string)` +
+  `primaryIP(networks) *string`（v4 优先，否则 v6，都没有 → `nil`）。判据只此一份。
+- **`backend/internal/service/asset_service.go`**:
+  - `List`: 一页资产用**一条 IN 查询**取回全部网卡，按 `asset_id` 分组后就地填
+    `items[i].IpAddress`。**不用 `Joins`**：1:N join 会把有 N 张卡的资产复制成 N 行，
+    页大小与 `total` 的含义当场改变（同一条资产在表格里出现多次）。空页早返，不发 `IN ()`。
+  - `Get`: 网卡已在手，直接 `primaryIP(networks)` 投影，**不再多发一条查询**。
+  - `retireCore`: 删掉第三份同判据的 for 循环，改调 `pickPrimaryIP`（见下「顺带」）。
+- **`backend/internal/service/postmortem_service.go`**: `fetchIP` 委托到 `primaryIP` ——
+  报告头的 IP 与资产列表的 IP 从此**同源**（此前各自写一遍循环，漂移的后果是
+  「列表显示 A、报告头写 B」）；排序口径补 `id` 决胜列与 `listNetworks` 对齐。
+- **`backend/internal/api/handlers/asset_handler.go`**: `UpdateAsset` 在 `normalizeJSONBFields`
+  之后加一行 `delete(updates, "ip_address")`（T-75）。**本轮的 `ip_address` 是只读投影字段**，
+  写入侧（第一张 `asset_networks`）留给 `G-Asset-NetworksPersist`；在那之前前端若把表单里的
+  IP 回传上来，应当被忽略，而不是把请求打成 500。
+
+**顺带（同一判据的唯一出口）**: `retireCore` 里「取 last_known_ip4/6」的循环是这条判据的
+**第三份**实现（`asset_ip.go` 注释里那份「唯一出口」在当时并不成立）。改为一处调用后，
+**Retire 存下的历史 IP、列表/详情投影的主 IP、复盘报告头的 IP 说的是同一个口径**。
+守卫是既有用例 `TestAssetService_Retire_成功_IP转移到last_known`（断言的是 UPDATE 的 **args**，
+不是「发过 UPDATE」）—— mutation ③ 让它与其余 7 个用例同时红。
+
+**关键决策**:
+
+- **虚拟字段而不是给 `assets` 加一列**: IP 属于**网卡**不属于资产（一个资产 N 张卡），
+  两份存储必然漂移（B4 退役改的是 `asset_networks`）。加列会让「资产表里的 IP」
+  与「网卡表里的 IP」在退役/恢复后不一致，且需要迁移与回填。
+- **`gorm:"-"` 而不是 `json:"-"`**: 字段要出现在 JSON 响应里（前端契约），只是不参与 schema。
+  代价是 POST/PUT 的入参里它会**静默通过绑定然后被忽略** —— 这正是 T-75 要在 handler 剥掉的原因
+  （绑定层不报错，DB 层报错）。
+- **投影值可以为 `null`**: 无网卡的资产 → `ip_address: null`（前端 `!record.ip_address` 正好
+  禁用 Ping/Traceroute）。而 `openapi.yaml` 的 `Asset.ip_address: type: string` 与
+  `AssetInput.required: [ip_address]` 与本轮实现**不完全一致**（前者不能为 null、后者 POST
+  根本不落库）—— 已登记为新 TODO（`G-Asset-IpPersistence-Contract`），本轮**不动**
+  openapi/前端类型：那会牵出 `gen:api` 重生成与 `Asset` 类型收窄，属独立一轮。
+- **一行 `delete` 而不是把 IP 写进 `asset_networks`**: brief 明确本轮只防 500；写路径要么
+  与「表单里没有网卡概念」一起设计，要么会做出「每次 PUT 都覆盖第一张卡」的隐式副作用。
+
+**Hard pass**:
+
+- backend `go test -count=1 ./...`: **27 packages ok** ✓
+- backend `gofmt -l`（本轮 7 个改动文件）: 干净；`go vet`（service/handlers/models）: 无新告警 ✓
+- frontend `npx tsc --noEmit`: **0 error**（本轮 frontend **0 改动**）✓
+- frontend `npx vitest run src/components/AssetTable.memo.test.tsx src/pages/Assets.test.tsx`:
+  **2 files / 27 tests PASS** ✓（无退化）
+- **mutation inversion 实证（3 处，全部红在断言上）**:
+  ① bypass `delete(updates, "ip_address")` → `TestM63_UpdateAsset_剥掉ip_address键` +
+     `TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200` **同时 FAIL**，且失败信息里是
+     **驱动实际收到的 SQL**：`UPDATE "assets" SET "ip_address"=$1,"name"=$2,"updated_at"=$3 …`
+     —— T-75（GORM 对模型外的键照发 SET）由此从推理变成**证据**；
+  ② `primaryIP` 反转优先级（v6 优先）→ `TestM63_PrimaryIP_单值投影` +
+     `TestM63_AssetService_List_投影ip_address` + `TestM63_AssetService_Get_投影ip_address` FAIL；
+  ③ 删掉 `pickPrimaryIP` 的 v4 分支 → **8 个用例同时红**：`TestFetchIP_IPv4优先` /
+     `TestGenerateReport_有IP_填入ReportData`（复盘报告头）、`TestAssetService_Retire_成功_IP转移到last_known`
+     （last_known 快照）、`TestM63_PickPrimaryIP_判据` / `TestM63_PrimaryIP_单值投影` /
+     List / Get 投影、以及既有 `TestAssetService_List_带keyword和status过滤`（其断言补上了投影值）。
+     还原后全绿。
+- 双轨分析: graphify **7065 nodes / 14542 edges / 453 communities**（M62 基线 7002 / 14420 / 453），
+  `diagnose multigraph` **0 anomalies**；codegraph 里 `primaryIP` 4 callers（两个 service 文件）
+  + `pickPrimaryIP` 2 callers + 测试边 —— 见 `M63-graph-analysis.md`。
+
+**行为变更（运维可见）**:
+
+1. `GET /assets` 的 `items[i]` 现在带 `ip_address`：**有 v4 用 v4**（第一张有非空 v4 的网卡），
+   否则第一张非空 v6，都没有则 `null`。前端 IP 列与 Ping / Traceroute 按钮**从此有数据**
+   （此前生产数据上恒空/恒灰）。
+2. `GET /assets/:id` 的 `data.asset.ip_address` 同规则注入（详情页头部）。
+3. `PUT /assets/:id` 带 `ip_address` **不再 500**，该键被忽略（返回 200，其它字段正常更新）。
+4. `POST /assets` 带 `ip_address` 仍然**不落库**（201 + 忽略），行为与 M63 之前一致 ——
+   写入路径是 `G-Asset-NetworksPersist` 的事。
+5. 复盘 PDF 报告头的 IP 与资产列表显示的是**同一个地址**（此前两处各判一遍）。
+
+**残余 / 未覆盖（如实登记）**:
+
+- **未在真 PG 上实测 42703**：本机无 PG 服务端（`postgresql-libs` 只有客户端，docker 不可用），
+  故「PUT 带 ip_address → 42703 → 500」的证据是：GORM 生成的 SQL **原文**（mutation ① 捕获）
+  + PG 错误码语义。与 M62 相比已从「源码级核实」推进到「渲染出的语句级证据」，但**不是**
+  真库往返。
+- **`ip_address` 只读**：POST/PUT 都忽略它（前端表单仍会把它放进 payload）。真正落库要等
+  `G-Asset-NetworksPersist`（写第一张网卡，v4 进 `ipv4_address`、v6 进 `ipv6_address`）。
+- **列表多一条查询**：每页 1 次 `asset_networks WHERE asset_id IN (…)`（≤500 个 id）。
+  换来的是行数语义不变；若将来列表要带 v4/v6 并列展示，`pickPrimaryIP` 已把两者都返回。
+- **`openapi.yaml` 与实现不一致**（见上「关键决策」），登记为 `G-Asset-IpPersistence-Contract`。
+- **`Assets.tsx:372/528` 的详情文案与弹窗预填**读的是同一个字段，本轮不动（0 前端改动）。
+
+**Out of scope**（留 future round）: `G-Asset-NetworksPersist`（form submit 写第一张网卡）、
+`G-Asset-BulkIpEdit`（批量改 IP）、退役/恢复时的 IP 联动（已有 B4 逻辑走 `last_known_ip*`）、
+实时 IP 校验（静态格式闸 M62 已 ship）。
+
 ### M62 — G-UI-AssetIpValidator 资产表单 IP 校验 + 规则唯一出口落地（M60 follow-up）（2026-09-15）
 
 **摩擦（multi-angle 审查新发现）**: `AssetFormModal.tsx:95` 的 `ip_address` 内联
