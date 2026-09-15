@@ -323,6 +323,123 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M64 — G-Asset-NetworksPersist 资产 IP 的写入路径（form submit → 第一张 `asset_networks`）（M63 派生 TODO）（2026-09-15）
+
+**摩擦（M63 派生，本轮结案）**: M63 把 `ip_address` 做成了**只读投影** —— `GET /assets` 与
+`GET /assets/:id` 会从「第一张网卡」把主 IP 算出来，`PUT /assets/:id` 也只会把它**剥掉**
+（T-76 防 42703 → 500）。于是生产上出现一个说不通的状态：**列表能显示 IP，但谁也写不进去**。
+前端 `AssetFormModal` 一直在送这个字段（`AssetFormValues.ip_address`，M62 还给它加了格式闸），
+后端从 M63 之前就一直静默丢：绑定进 `models.Asset.IpAddress` —— 那是个 `gorm:"-"` 的虚拟字段，
+GORM 在 schema 解析阶段就把它排除在 `Fields` 之外，`Create` 里连一行 SQL 都不会为它生成。
+**填了 IP 点创建 → 201 → 列表里那台设备的 IP 列是空的。**
+
+**改动**（backend 6 files，commit `2e3ba0f` → `ff3a230` → `e41598a` → `ae54415` + 台账；frontend **0 来源改动**，
+仅重跑 `gen:api` 的生成物）:
+
+- **`backend/internal/service/asset_service.go`**: `Create` 签名改
+  `Create(ctx, asset *models.Asset, ipAddress *string) error`，资产行与网卡行包在**同一事务**：
+  1. `ipAddress` 为 nil / 空串（trim 后）→ 只建资产行（**不建空网卡**）；
+  2. `net.ParseIP` 解析失败 → `ErrInvalidInput`（**早返，事务之前**，不留半落状态）；
+  3. v4（含 4-in-6 映射）落 `ipv4_address`、v6 落 `ipv6_address`，用 `ParseIP().String()`
+     归一（`2001:0DB8::0001` → `2001:db8::1`）；
+  4. 网卡行 `interface_name = "eth0"` / `interface_type = "ethernet"` / `status = "unknown"`。
+- **`backend/internal/api/handlers/asset_handler.go`**: `CreateAsset` 入参改成匿名嵌套结构
+  （`struct { models.Asset; IpAddress *string }` + tag `json:"ip_address"`），值走**独立入参**；
+  入口加 `invalidIPAddress` 校验 → **422 + `validation_failed`**。
+- **`backend/internal/apierr/apierr.go`**: 新增 `Unprocessable`（422）——
+  `CodeValidationFailed` 这个常量与前端 `ApiErrorCode.ValidationFailed` 早就声明，此前
+  **没有后端生产者**，本函数是第一个（+2 用例钉状态码 + code 字符串）。
+- **`backend/internal/api/openapi.yaml`**: `Asset.ip_address` 补 `nullable: true`
+  （无网卡时投影就是 null）+ 说明「只读投影、真身在 asset_networks」；
+  `AssetInput.ip_address` **从 `required` 摘掉**（不传 = 不建网卡，合法）+ 说明 422 口径。
+  重跑 `npm run gen:api`：`api.types.ts` 只有这两处（`string | null` / 必填 → 可选）。
+
+**关键决策**:
+
+- **IP 走独立入参而不是 `Asset` 上的字段**: 模型上的 `IpAddress` 是 `gorm:"-"` 的只读投影
+  （M63 的决定：IP 属于网卡，两份存储必然漂移）。绑定进模型 = 被 GORM 静默丢弃，就是本轮要修的
+  那个 bug 本身。嵌套 struct 里顶层字段在 JSON 展平时盖过嵌入结构的同名字段（深度浅者胜），
+  所以 `input.IpAddress` 与 `Asset.IpAddress` 不会互相串。
+- **包事务**: 资产行与网卡行必须同生。分两次写时第二条失败会留下「资产建了、IP 丢了」——
+  而调用方拿到 500 会当整条失败去重试，第二次撞 `name` 唯一约束变成 409，
+  **用户看到的是「资产已存在」而资产确实存在、只是没有 IP**。守卫见 mutation ④。
+- **v4/v6 分列**: 两列并存正是为区分地址族。把 v6 塞进 `ipv4_address` 会让 M63 的判据
+  （`pickPrimaryIP`：先第一个非空 v4，否则第一个非空 v6）读出错误结果 —— 列表把 v6 当 v4 显示。
+- **空串 = 未提供**: `AssetFormValues.ip_address` 是 `string` 不是可选，用户清空字段后送上来
+  就是 `""`；把它当「写了但写错了」会变成一个无法解释的 422。判据在 handler 与 service 两处
+  **逐字对齐**（nil / trim 后空串都算没提供）。
+- **422 而不是 400**: JSON 合法、字段名也对，只有取值不对；前端要按字段高亮而不是当成请求坏了。
+  挡在 handler 入口而不是只靠 service：service 的 `ErrInvalidInput` 已被映射成
+  「资产名称不能为空」的文案，把 IP 错误报成「名称不能为空」是**指错字段**。
+  两侧判据一致是刻意的（M28 的 T-52：安全/校验的两侧必须共享语义）—— 见「残余」里的
+  前端正则与 `net.ParseIP` 的差异。
+- **`Update`（PUT）本轮不动**: 仍是 M63 的 `delete(updates, "ip_address")`（防 500）。
+  PUT 写网卡是 `G-Asset-UpdateIpPersist` —— 它牵出「改 IP 是改第一张卡还是新建一张卡」
+  的产品决定，不该顺带做。
+
+**Hard pass**:
+
+- backend `go test -count=1 ./...`: **27 packages ok** ✓（本轮新增 `apierr` 用例的两个子测试）
+- backend `gofmt -l`（本轮 7 个改动文件）: 6 个干净；`tests/db_smoke_test.go` 是**既存**不干净文件
+  （HEAD 上同样不干净，Go 1.19+ 注释重排规则；本轮只改了一行调用签名）✓
+- frontend `npx tsc --noEmit`: **0 error** ✓（重跑 `gen:api` 后 `Asset.ip_address` 变
+  `string | null`；`types/index.ts` 的手写 `Asset` 与被消费的生成类型之间没有 `_Assert`，故不受影响）
+- frontend `npx vitest run src/components/AssetFormModal.test.tsx src/pages/Assets.test.tsx`:
+  **2 files / 30 tests PASS** ✓（frontend 0 来源改动，无退化）
+- frontend 全量 `npx vitest run`（`gen:api` 改了被 11 个源文件引用的生成物，故用全量替代推断）:
+  **47 files / 489 tests，488 passed / 1 failed** —— `src/pages/Settings.test.tsx` 一条 antd 校验弹窗断言
+  在同机并发跑「全量 frontend + 全量 backend」时超时；**单独复跑 58/58 PASS**，与 M61 retro 记录的同源
+  flake。**如实登记，不计入全绿**。
+- **mutation inversion 实证（4 处，全部红在断言上）**:
+  ① bypass `tx.Create(network)` → service **3 个**用例 + handler **2 个**用例 FAIL
+     （`IPv4落ipv4列` / `IPv6落ipv6列` / `网卡写失败时资产行一并回滚` /
+     `带ip_address_落成网卡行` / `带ip_address_assets无此列但网卡有行`）；
+  ② 去掉 v4/v6 分流（`v4 != nil || true`，即一律写 `ipv4_address`）→
+     `TestM64_AssetService_Create_IPv6落ipv6列` FAIL（断言读到 `ipv4_address` 里有值）；
+  ③ 关掉 handler 入口校验 → `TestM64_CreateAsset_非法ip_address_返回422` FAIL；
+  ④ 关掉 service 兜底（`if false && ip != "" && parsed == nil`）→
+     `TestM64_AssetService_Create_非法IP不落库` FAIL。四处还原后全绿。
+- 双轨分析: graphify **7143 nodes / 14690 edges / 454 communities**（M63 基线 7065 / 14542 / 453，净增
+  78 里代码只占 21 + 两条改名、其余是文档节点与重锚），`diagnose multigraph` **0 anomalies**；codegraph 里 `CreateAsset → Create` 的接线点
+  （接口 → 实现的 dynamic dispatch）、`assetService.Create` 的 blast radius 与两条测试边
+  —— 见 `M64-graph-analysis.md`。
+
+**行为变更（运维可见）**:
+
+1. `POST /assets` 带 `ip_address` **从此落库**：新建这张资产**并**建其第一张网卡
+   （`interface_name = eth0`），v4 进 `ipv4_address`、v6 进 `ipv6_address`。
+   紧接着 `GET /assets` 的 `ip_address` 就能显示出来（M63 的投影与 M64 的写入终于接上）。
+2. `POST /assets` 带**非法** `ip_address`（前端正则挡不住的形态，见「残余」）→ **422**
+   （`{"code":"validation_failed"}`），此前是 201 + 静默忽略。
+3. **存量资产不受影响**：本轮只改 `Create`，不迁移、不回填；已有资产仍然可能没有任何网卡
+   （`ip_address: null`）。
+4. `PUT /assets/:id` 行为**不变**（`ip_address` 仍被忽略）—— 编辑弹窗里改 IP 仍然不落库，
+   这是 `G-Asset-UpdateIpPersist` 的范围。
+
+**残余 / 未覆盖（如实登记）**:
+
+- **未在真 PG 上实测**：本机无 PG 服务端（`postgresql-libs` 只有客户端，docker 不可用）。
+  证据是 sqlite 真库（事务、列落点、回滚）+ sqlmock 捕获的 **SQL 原文**（`assets` 的列清单里
+  没有 `ip_address`，且确实发出 `INSERT INTO "asset_networks"`）。**不是**真库往返。
+- **前后端 IP 判据不等价（已登记 TODO `G-UI-AssetIpValidatorParity`）**：前端 `IPV4_PATTERN`
+  的 `OCTET`（`[01]?\d\d?`）接受**前导零**（`010.1.1.1` 能过表单），而 `net.ParseIP`
+  拒绝（Go 1.17 起）→ 用户填 `010.1.1.1` 会通过表单再吃一个 422。反方向也存在：
+  前端不接受 IPv4-mapped（`::ffff:1.2.3.4`）与 zone id（`fe80::1%eth0`），
+  而后端接受前者（落 `ipv4_address`，归一成 `1.2.3.4`）。
+- **422 的 body 是通用文案**（「IP 地址格式不合法」），前端 `Assets.tsx` 的
+  `onError: () => message.error('创建失败')` 目前把它显示成 topline 提示，**没有字段级高亮**
+  （`ApiErrorCode.ValidationFailed` 已被前端声明但还没有消费点）。属 frontend 改动，本轮 0 改动原则。
+- **同一 IP 可挂在多台资产上**：`asset_networks.ipv4_address` 只是普通索引（非唯一），
+  M64 之后表单第一次成为常规写入源，于是「两台设备填同一个 IP」从「不可能」变成「可能且无提示」。
+  这是产品决定（要不要拦、拦在写入还是巡检），本轮不擅自加约束 —— 记在下面 Out of scope。
+- **`interface_name = "eth0"` 是硬编码产品决定**：`AssetNetwork.InterfaceName` 是 `not null`，
+  建第一张卡必须给个值。真实接口名（`ens18`/`GigabitEthernet0/1`）与多网卡一起设计
+  （`G-Asset-MultiNetwork`）。
+
+**Out of scope**（留 future round）: `G-Asset-UpdateIpPersist`（PUT 写网卡）、
+`G-Asset-MultiNetwork`（interface_name / mac / 多网卡）、`G-Asset-NetworksCRUD`（独立的网卡增删改 API）、
+`G-Asset-IpConflictGuard`（重复 IP 守卫 / 体检）、openapi 全量 sync（本轮只对齐了 `ip_address` 两处）。
+
 ### M63 — G-Asset-IpPersistence 资产 IP 投影（List/Get 注入 ip_address）+ Update 防 500（M62 派生 TODO）（2026-09-15）
 
 **摩擦（M62 审查派生，本轮结案）**: M62 给资产表单的 `ip_address` 加了格式闸之后追查

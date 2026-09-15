@@ -984,6 +984,45 @@ R1/R2 的变异 M7 常量偏大 / M7b 常量偏小 只能在真 PG 上分辩)。
 
 ---
 
+### T-77. **投影/只读字段(如 `gorm:"-"`)当写入通道 —— 绑定层收下、schema 层排除, 接口返 201 而库里什么都没有**
+
+**状态**: FIXED (M64, 写入侧) | **类别**: ORM / 契约 / 静默丢弃
+
+**背景**: `models.Asset.IpAddress` 是 `gorm:"-"` 的**只读投影**(M63 为「IP 属于网卡」而这样设计: IP 真身在
+`asset_networks.ipv4_address/ipv6_address`, 资产列表/详情把它投影回来)。前端表单 `AssetFormModal` 从 M62 起
+一直在送 `ip_address`, 后端 `CreateAsset` 也一直绑得进来 —— 于是**填了 IP 点创建 → 201 → 列表里那台设备 IP 为空**。
+
+**根因(三层各自都「没错」)**:
+1. `c.ShouldBindJSON(&asset)`: 字段在、JSON 合法 → 绑定成功, 进内存 struct;
+2. `db.Create(asset)`: GORM 在 **schema 解析阶段**就把 `gorm:"-"` 字段排除在 `Fields` **之外** → 不报错、不警告,
+   生成的 INSERT 里**根本没有**这一列;
+3. handler 看到 `err == nil` → **201**。
+
+没有任何一层会报错, 日志也干净。危险点在它**长得像成功**。
+
+**检测线索**:
+1. 某个 JSON 字段在响应/GET 里读得到, 却在**任何** SQL 里都找不到 —— 用 `sqlCapture`(记录驱动**实际收到**的
+   语句, 见 `internal/service/asset_service_test.go` / `internal/api/handlers/asset_handler_test.go`)把它抄下来看,
+   **不要**靠「SQL 里应该没有吧」; 这只是 T-58 的具体化: 检查命令自己空转时, 它长得和「通过」一模一样。
+2. 该字段的 tag 是 `gorm:"-"` / `json:"-"` / 带 `->` 的只读关系 —— 这类字段**天然**是「绑定层收、持久层丢」的形状。
+3. 「改了内容但对象没变」的前后对比缺失: 只看接口返回的 201, 不看**目标表**里那一行。
+
+**同族(同一设计的两侧)**: **T-76** —— 同一个 `gorm:"-"` 字段在 **Update** 路径(`db.Updates(map)`)被**照单全收**
+并炸在 SQL 上(`SET "ip_address"=$n` → PG 42703 → 500, M63 修)。所以两条路径的结论合起来是:
+**虚拟字段不是写入通道; 写入必须有显式落点。**
+
+**修法(M64)**: 让值走**显式入参**, 而不是虚拟字段 ——
+handler 用匿名嵌套结构 `struct { models.Asset; IpAddress *string }`(JSON 展平里顶层字段胜出, 同名不冲突),
+`service.Create(ctx, asset, ipAddress)` 拿它建第一张网卡(`v4→ipv4_address` / `v6→ipv6_address`), 且**包同一事务**。
+回归网两件: ① 真库断言值到了目标表(读回 `ipv4_address`); ② 断言 `service` 收到的 `Asset.IpAddress` **必须为 nil**
+(即虚拟字段不是写入通道)。**不要**用「给模型加一列」绕过 —— 那会留下两份存储, 退役/恢复只改后者, 漂移立刻发生。
+
+**来源**: M63 引入该字段(读侧) → M64 结案(写侧): `intent-M64.md` / `TODO.md` G-Asset-NetworksPersist;
+commit `2e3ba0f`(service) + `ff3a230`(handler) + `e41598a`(测试); 详见 `M64-graph-analysis.md`「本轮 trap 记录」
+与 `M64-completion-report.md` §2/§7。
+
+---
+
 ## 四、历史 / 已修陷阱 (供考古)
 
 ### H-1. pre-commit hook 改 `cmd/server/main.go` 漏 build
@@ -1068,6 +1107,7 @@ R1/R2 的变异 M7 常量偏大 / M7b 常量偏小 只能在真 PG 上分辩)。
 | — (M33 轮) | T-61 | ACTIVE |
 | — (M50 轮) | T-62 | ACTIVE |
 | — (M50 轮) | T-63 | ACTIVE |
+| — (M64 轮) | T-77 | FIXED (写入侧) |
 
 ---
 
