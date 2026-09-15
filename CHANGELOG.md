@@ -323,6 +323,27 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M69 — G-Asset-IpConflictGuard-v6 跨资产同 IPv6 守卫（OMH ulw-loop 第 1 cycle, 2026-09-16）
+
+**摩擦**: M68 拍了 v4 守卫（`asset_networks.ipv4_address` 同 IP 跨资产 → 409），但 v6 没查。
+业务上同 IPv6 跨资产也是真摩擦（link-local `fe80::...` / 唯一本地 `fc00::.../7` / 全局单播都可能撞）。
+
+**改动**:
+- `service.updateFirstNetworkIP`: `parsed.To4() == nil` 分支加 v6 守卫
+  `SELECT id FROM asset_networks WHERE ipv6_address = ? AND asset_id <> ? AND ipv6_address <> '' LIMIT 1`
+- 复用 M68 v4 守卫的 self-exclude + ErrRecordNotFound 0-row 处理 + ErrIPConflict 复用 sentinel
+- handler 不变（M68 映 409 通用，不分 v4/v6）
+
+**测试**:
+- `TestM69_AssetService_v6_被其他资产占用_返ErrIPConflict` (NEW): 跨资产同 v6 → ErrIPConflict
+- `TestM68_AssetService_v6_不参与v4校验` (UPDATED): M68 旧口径"v6 跳过守卫"已失效，新期望 v6 守卫走 ipv6_address 字段（v4 守卫走 ipv4_address 字段，SQL 错位则 mock 不匹配测试 fail）
+
+**Mutation inversion 实证**:
+- bypass v6 guard → `TestM69_v6_被其他资产占用_返ErrIPConflict` FAIL ✓
+- restore → 全绿 ✓
+
+**verify**: `go build ./...` 0 err / `go test -count=1 ./...` 27 packages ok / mutation inversion red
+
 ### M67 — G-OMH-Workflow-Adoption 把"OMH 装上"升级到"OMH 真用上"（2026-09-16）
 
 **摩擦**: OMH v2.0.3 装好 (44/44 doctor PASS) 之后被当成"摆设", 真正起 round 时
