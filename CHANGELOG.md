@@ -323,6 +323,92 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M62 — G-UI-AssetIpValidator 资产表单 IP 校验 + 规则唯一出口落地（M60 follow-up）（2026-09-15）
+
+**摩擦（multi-angle 审查新发现）**: `AssetFormModal.tsx:95` 的 `ip_address` 内联
+`/^(\d{1,3}\.){3}\d{1,3}$/` —— 那是**形状**检查，不是**地址**检查：`256.0.0.1` /
+`999.999.999.999` 一路放行，只有后端才可能拦（实际也不拦）。IP 是运维拿去 ping、
+连 SNMP、对 NetBox 的定位键，填错的表现是**现场找不到设备**而不是「存不下」——
+比格式垃圾值更贵。M60 把 URL/email/port 规则提到 `utils/validators.ts` 时留了
+「其他页接入」的 follow-up，本轮把这页接上并补上 IP 规则。
+
+**改动**（frontend 4 files，commit `1e460fc` → `f738bc7` → `c592512` → `9be9576`）:
+
+- **`frontend/src/utils/validators.ts`**: 新增 `IPV4_PATTERN` / `IPV6_PATTERN` /
+  `IP_PATTERN` / `ipRules`。IPv4 四段严格 0-255（内网 `10.` / `172.16-31.` / `192.168.`
+  天然在值域内，无需特例）；IPv6 简版 = 「全写 1 种 + 带 `::` 的 9 种形状」（RFC 4291 §2.2），
+  **不**支持 zone id（`fe80::1%eth0`）、CIDR、IPv4-mapped（`::ffff:1.2.3.4`）—— 都是 out of scope。
+  `ipRules` = `required` + `pattern: IP_PATTERN`（格式文案给两个例子：`192.168.1.1` / `::1`）。
+- **`frontend/src/components/AssetFormModal.tsx`**: `ip_address` 的 `rules` 由内联两条换成
+  `rules={ipRules}`，删掉内联 pattern 与旧文案「IP 格式不正确」。**字段名 / required 文案
+  「请输入 IP 地址」/ 校验时机（`onOk` 里的 `validateFields`）均不变**。
+- **`frontend/src/utils/validators.test.ts`**（新建，55 用例）: IPv4 边界（含 `256.0.0.1` /
+  `1.2.3` / `1.2.3.4.5` / `192.168.1.1␠` / CIDR）、IPv6 边界（含 `zz::1` / `:::` / 两处 `::` /
+  9 组 / 5 位组 / zone id）、`IP_PATTERN` 双族、`ipRules` 文案与「格式规则引用的就是导出的
+  `IP_PATTERN`」；外加 **M60 四组既有规则对象**（`urlRules` / `emailRules` / `portRules` /
+  `arrayOfPatternRules`）的文案与约束逐条钉住（此前只在 UI 层被间接打到）。
+  不重复 M59 的 URL/EMAIL 正负样本表（那 16 条在 `Settings.test.tsx`，搬家后未改一字）。
+- **`frontend/src/components/AssetFormModal.test.tsx`**（新建，4 用例）: `192.168.1.1` 通过并
+  「带着该值走到 `onSubmit`」、`256.0.0.1` 显示格式错误且**不提交**、`::1` 通过、留空显示
+  必填文案（不是格式文案）。
+
+**关键决策：brief 的 IPv6 单行字面量**（`intent-M62.md` §1）**没有照抄**。把 10 条交替式
+压成一行时，`^([0-9a-fA-F]{1,4}:){1,7}:` 与 `:((:[0-9a-fA-F]{1,4}){1,7}|:)$` 这两条
+**缺自己那一侧的锚点**（前者无 `$`、后者无 `^`）—— 粘进 `new RegExp` 后整个 pattern 在
+standalone 使用下退化成**子串**匹配：实测 `IPV6_PATTERN.test('zz::1')` = `true`、
+`test(':::')` = `true`。本仓改成「10 条形状列成数组 + 外层统一 `^(?:…)$`」，
+边界不再依赖每一段自己写对。与 brief 字面量的差异用 **336,949 条样本**（长度 ≤7 的字母表穷举
++ 合法/非法种子做字符级扰动）核对：**方向单一** —— brief 版多收 24,753 条子串误判，
+本实现零误收、零漏收（IPv4 与 `IP_PATTERN` 两者判定逐条相同）。族里最易改错的
+「`::` 两侧组数上界」也因此可逐行核对（见 T-75）。
+
+**Hard pass**:
+
+- frontend `npx tsc --noEmit`: **0 error** ✓
+- frontend `npx vitest run src/utils/validators.test.ts`: **55 tests PASS** ✓
+- frontend `npx vitest run src/components/AssetFormModal.test.tsx`: **4 tests PASS** ✓
+- frontend `npx vitest run src/pages/Settings.test.tsx`: **58 tests PASS**（未触碰，无退化）✓
+- frontend 全量 `npx vitest run`: **47 files / 489 tests PASS**（M62 前基线 **45 files / 430 tests** ——
+  含他人 `dac8b05` 的 `App.render.test.tsx`；本轮 +2 文件 +59 测试，**零退化**）✓
+- eslint（改动 4 文件，`--max-warnings 0`）: 干净 ✓
+- **mutation inversion 实证（3 处，红在断言上）**:
+  ① `AssetFormModal` 的 `rules={ipRules}` 退回 required-only → `AssetFormModal.test.tsx`
+  **1 failed \| 3 passed**（`256.0.0.1` 那条）；
+  ② `OCTET` 放宽回 `\d{1,3}`（= 旧的形状检查）→ `validators.test.ts` **4 failed**（`256.0.0.1` /
+  `999.999.999.999` / `IP_PATTERN` 的 `256.0.0.1` / `ipRules` 自身能挡）**+** UI 层 **1 failed**
+  （同一条闸的两层输入）；
+  ③ `IPV6_PATTERN` 换回 brief 的单行字面量 → `validators.test.ts` **6 failed**（`zz::1` / `:::` /
+  `a::b::c` / `12345::1` / `gggg::1` / `fe80::1%eth0`）。还原后 59/59 全绿。
+- 双轨分析：graphify **7002 nodes / 14420 edges / 453 communities**（M61 基线 6968 / 14363 / 443），
+  `diagnose multigraph` **0 anomalies**（12 处 `producer_suppression_sites` 与 M59/M60/M61 同源）；
+  codegraph 新符号已入图（`ipRules` 2 callers in `AssetFormModal.tsx` + 测试边）——见 `M62-graph-analysis.md`
+
+**行为变更（运维可见）**: 资产新增/编辑弹窗的 IP 字段现在**前端即拒**越界段
+（`256.0.0.1` → 「IP 地址格式不正确 (IPv4: 192.168.1.1, IPv6: ::1)」），并**新接受** IPv6
+（此前 `::1` 会被旧 pattern 拒掉，而存储侧 `asset_networks.ipv6_address` 一直存在）。
+与旧闸的差别是**单向下收**：新闸只比旧闸更严（多拒「四段数字但段值越界」）或更宽（收 v6），
+不会放行旧闸挡下的 v4 形状。`asset_networks.ipv4_address` 是 `VARCHAR(45)`
+（`000013_schema_align` 从 `INET` 转过），**存储层不再做格式校验**，故这道表单闸是当前唯一
+的格式入口 —— 但**只覆盖走表单的路径**（API 直连不受约束，见 Out of scope）。
+
+**发现（本轮 scope 外，已登记 TODO，未修）**: 该字段的**值本身当前落不了库** ——
+`POST /assets` 把请求体绑进 `models.Asset`（**没有 `ip_address` 字段**，实测 JSON 往返里该键
+被静默丢弃），IP 实际存于 `asset_networks.ipv4_address` / `ipv6_address`；
+`PUT /assets/:id` 则把整张 map 交给 `db.Updates`，GORM v1.30.0 对**模型里不存在的键不丢弃**
+（`callbacks/update.go:211-232`）→ 生成 `SET ip_address = …` → PG `42703`（列不存在）→ 500。
+即：本轮修的是**表单能不能提交**，不是**值能不能存**；后者是独立一轮的后端工作
+（`GET /assets` 同样不投影 `ip_address`，前端 `Asset.ip_address` 列与 Ping/Traceroute 按钮
+在生产数据上是空转）。
+
+**Out of scope**（留 future）:
+
+- Oncall / Runbook / TicketForm 等其他页接入 `utils/validators`（Oncall 的 name / timezone 无
+  格式可校验，本轮不动）
+- CIDR（`192.168.1.0/24`）校验、hostname（FQDN）校验
+- IPv6 的 zone id / IPv4-mapped（`::ffff:1.2.3.4`）
+- `ws://` / `wss://`（M60 同一条 follow-up，未动）
+- 后端 `assets` 的 IP 字段校验（本轮纯前端：绕开表单的 API 直连不受此闸约束）
+
 ### M61 — G-User-AdminManagement 用户管理（admin 端启用/禁用/改角色）（2026-09-15）
 
 **G-4 摩擦（AUTHZ-CLOSURE §2 D-A 登记的那条）**: `users.status` / `users.role` 只能改库 ——
