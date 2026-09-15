@@ -510,7 +510,7 @@ func TestM63_GetAsset_投影ip_address(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", *resp.Data.Asset.IPAddress)
 }
 
-// M63 (T-75): handler 入口必须把 `ip_address` 从 updates 里**摘掉**再交给 service。
+// M63 (T-76): handler 入口必须把 `ip_address` 从 updates 里**摘掉**再交给 service。
 // 断言的观测点是 service 收到的 map（唯一能区分「剥了」与「没剥但库恰好没报错」的地方）。
 func TestM63_UpdateAsset_剥掉ip_address键(t *testing.T) {
 	var got map[string]interface{}
@@ -535,7 +535,7 @@ func TestM63_UpdateAsset_剥掉ip_address键(t *testing.T) {
 	assert.False(t, present, "ip_address 必须在进 service 前被剥掉（否则 PUT 撞 42703 → 500）")
 }
 
-// M63 (T-75) 路由级证据：真 service + 真 GORM 语句生成 + sqlmock 驱动，
+// M63 (T-76) 路由级证据：真 service + 真 GORM 语句生成 + sqlmock 驱动，
 // 走完 `PUT /assets/:id` 的完整链路，断言**驱动实际收到的 SQL 里没有 ip_address**。
 //
 // 为什么不能只靠上面那条 mock 用例：那条钉的是「handler 剥了键」，这条钉的是

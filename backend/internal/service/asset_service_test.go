@@ -983,7 +983,7 @@ func TestM63_AssetService_Create_ip_address不进INSERT(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-// M63 (T-75): Update 走的 `db.Updates(map)` **不丢弃**模型里没有的键 —— GORM v1.30.0 照样
+// M63 (T-76): Update 走的 `db.Updates(map)` **不丢弃**模型里没有的键 —— GORM v1.30.0 照样
 // 生成 `SET "ip_address"=$n`（callbacks/update.go: LookUpField 为 nil 时仍 append Assignment）。
 // 真 PG 上这是 42703 → 500。所以 handler 必须在入口剥掉这个键（asset_handler.UpdateAsset）。
 //

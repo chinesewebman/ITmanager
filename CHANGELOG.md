@@ -356,7 +356,7 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
   报告头的 IP 与资产列表的 IP 从此**同源**（此前各自写一遍循环，漂移的后果是
   「列表显示 A、报告头写 B」）；排序口径补 `id` 决胜列与 `listNetworks` 对齐。
 - **`backend/internal/api/handlers/asset_handler.go`**: `UpdateAsset` 在 `normalizeJSONBFields`
-  之后加一行 `delete(updates, "ip_address")`（T-75）。**本轮的 `ip_address` 是只读投影字段**，
+  之后加一行 `delete(updates, "ip_address")`（T-76）。**本轮的 `ip_address` 是只读投影字段**，
   写入侧（第一张 `asset_networks`）留给 `G-Asset-NetworksPersist`；在那之前前端若把表单里的
   IP 回传上来，应当被忽略，而不是把请求打成 500。
 
@@ -372,7 +372,7 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
   两份存储必然漂移（B4 退役改的是 `asset_networks`）。加列会让「资产表里的 IP」
   与「网卡表里的 IP」在退役/恢复后不一致，且需要迁移与回填。
 - **`gorm:"-"` 而不是 `json:"-"`**: 字段要出现在 JSON 响应里（前端契约），只是不参与 schema。
-  代价是 POST/PUT 的入参里它会**静默通过绑定然后被忽略** —— 这正是 T-75 要在 handler 剥掉的原因
+  代价是 POST/PUT 的入参里它会**静默通过绑定然后被忽略** —— 这正是 T-76 要在 handler 剥掉的原因
   （绑定层不报错，DB 层报错）。
 - **投影值可以为 `null`**: 无网卡的资产 → `ip_address: null`（前端 `!record.ip_address` 正好
   禁用 Ping/Traceroute）。而 `openapi.yaml` 的 `Asset.ip_address: type: string` 与
@@ -393,7 +393,7 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
   ① bypass `delete(updates, "ip_address")` → `TestM63_UpdateAsset_剥掉ip_address键` +
      `TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200` **同时 FAIL**，且失败信息里是
      **驱动实际收到的 SQL**：`UPDATE "assets" SET "ip_address"=$1,"name"=$2,"updated_at"=$3 …`
-     —— T-75（GORM 对模型外的键照发 SET）由此从推理变成**证据**；
+     —— T-76（GORM 对模型外的键照发 SET）由此从推理变成**证据**；
   ② `primaryIP` 反转优先级（v6 优先）→ `TestM63_PrimaryIP_单值投影` +
      `TestM63_AssetService_List_投影ip_address` + `TestM63_AssetService_Get_投影ip_address` FAIL；
   ③ 删掉 `pickPrimaryIP` 的 v4 分支 → **8 个用例同时红**：`TestFetchIP_IPv4优先` /

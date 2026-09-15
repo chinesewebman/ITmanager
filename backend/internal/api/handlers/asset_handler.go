@@ -127,7 +127,8 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		apierr.BadRequest(c, err.Error())
 		return
 	}
-	// M63 (T-75): 剥掉虚拟字段 `ip_address`。
+	// M63 (T-76; brief 里写作 T-75 —— 那个号在本仓已被 M61 的全站白屏与 M62 的 IPv6 锚点各占用
+	// 一次，见 M63-completion-report.md「trap 编号冲突」): 剥掉虚拟字段 `ip_address`。
 	//
 	// 它与 jsonb 那几列同源而不同因：`assets` 表里没有这一列，而 `db.Updates(map)`
 	// **不丢弃**模型里不存在的键（GORM v1.30.0 的 callbacks/update.go：LookUpField 为 nil
