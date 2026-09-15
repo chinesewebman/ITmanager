@@ -127,6 +127,19 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		apierr.BadRequest(c, err.Error())
 		return
 	}
+	// M63 (T-75): 剥掉虚拟字段 `ip_address`。
+	//
+	// 它与 jsonb 那几列同源而不同因：`assets` 表里没有这一列，而 `db.Updates(map)`
+	// **不丢弃**模型里不存在的键（GORM v1.30.0 的 callbacks/update.go：LookUpField 为 nil
+	// 时照样 append Assignment）→ 生成 `SET "ip_address"=$n` → PG 42703 → 500。
+	// 实测见 service 层 `TestM63_AssetService_Update_map含模型外列时GORM照发SET`；
+	// 路由级见 `TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200`。
+	//
+	// 为什么是「剥掉」而不是「写进 asset_networks」：本轮的 GET 投影让 `ip_address` 成为
+	// **只读投影字段**（M63 只修读取侧）；写入侧（第一张网卡）是 G-Asset-NetworksPersist 的
+	// 事，那一轮会把这里换成「取出来写网卡」。在那之前，前端若把表单里的 IP 回传上来，
+	// 应当被忽略，而不是把请求打成 500。
+	delete(updates, "ip_address")
 	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {

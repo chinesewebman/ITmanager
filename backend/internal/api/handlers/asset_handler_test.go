@@ -7,16 +7,21 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"network-monitor-platform/internal/api/handlers"
 	"network-monitor-platform/internal/models"
 	"network-monitor-platform/internal/service"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 // mockAssetService 手写 mock（避免引入 sqlmock / testify/mock）
@@ -436,4 +441,179 @@ func TestM58_批量退役路由_不被id_retire吞(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.True(t, bulkCalled, "bulk-retire 必须落到 BulkRetireAssets")
 	assert.False(t, retireCalled, "bulk-retire 不得被 /:id/retire 吞掉（id=bulk-retire）")
+}
+
+// ==================== M63: 资产 IP 投影 (G-UI-AssetIpPersistence) ====================
+
+// strPtr 取地址。Go 1.26 的 `new(值)` 要 1.26+，本模块 go.mod 仍是 1.25.0。
+func strPtr(s string) *string { return &s }
+
+// M63: 列表项上的 ip_address 必须出现在 HTTP 响应里 —— 字段名是前端契约
+// （AssetTable 列 + Ping/Traceroute 的 disabled 判据都读 `record.ip_address`）。
+// 只断言「items 里多了一个字段」不够：字段名拼错（如 ipAddress）在图上看不出来。
+func TestM63_ListAssets_投影ip_address(t *testing.T) {
+	withIP, withV6, noIP := uuid.New(), uuid.New(), uuid.New()
+	svc := &mockAssetService{
+		listFunc: func(ctx context.Context, f service.AssetFilter) ([]models.Asset, int64, error) {
+			return []models.Asset{
+				{ID: withIP, Name: "web-01", IpAddress: strPtr("10.0.0.1")},
+				{ID: withV6, Name: "web-02", IpAddress: strPtr("fe80::1")},
+				{ID: noIP, Name: "web-03"}, // 无网卡 → nil
+			}, 3, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/assets", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Items, 3)
+
+	assert.Equal(t, "10.0.0.1", resp.Data.Items[0]["ip_address"], "v4 优先")
+	assert.Equal(t, "fe80::1", resp.Data.Items[1]["ip_address"], "无 v4 时用 v6")
+	assert.Nil(t, resp.Data.Items[2]["ip_address"], "无网卡 → null（前端据此禁用 Ping/Traceroute）")
+}
+
+// M63: 详情响应的 asset.ip_address 同样注入（详情页头部也显示 IP）。
+func TestM63_GetAsset_投影ip_address(t *testing.T) {
+	id := uuid.New()
+	svc := &mockAssetService{
+		getFunc: func(ctx context.Context, got string) (*models.Asset, []models.AssetNetwork, error) {
+			return &models.Asset{ID: id, Name: "web-01", IpAddress: strPtr("10.0.0.1")},
+				[]models.AssetNetwork{{ID: uuid.New(), AssetID: id, IPv4Address: "10.0.0.1"}}, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/"+id.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp struct {
+		Data struct {
+			Asset struct {
+				IPAddress *string `json:"ip_address"`
+			} `json:"asset"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.Asset.IPAddress)
+	assert.Equal(t, "10.0.0.1", *resp.Data.Asset.IPAddress)
+}
+
+// M63 (T-75): handler 入口必须把 `ip_address` 从 updates 里**摘掉**再交给 service。
+// 断言的观测点是 service 收到的 map（唯一能区分「剥了」与「没剥但库恰好没报错」的地方）。
+func TestM63_UpdateAsset_剥掉ip_address键(t *testing.T) {
+	var got map[string]interface{}
+	svc := &mockAssetService{
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error) {
+			got = u
+			return &models.Asset{ID: uuid.New()}, nil
+		},
+	}
+	r := newTestRouter(svc)
+
+	body, _ := json.Marshal(map[string]any{"name": "web-02", "ip_address": "10.0.0.1"})
+	req := httptest.NewRequest(http.MethodPut, "/assets/"+uuid.New().String(), bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, got)
+	assert.Equal(t, "web-02", got["name"], "其它字段必须原样透传")
+	_, present := got["ip_address"]
+	assert.False(t, present, "ip_address 必须在进 service 前被剥掉（否则 PUT 撞 42703 → 500）")
+}
+
+// M63 (T-75) 路由级证据：真 service + 真 GORM 语句生成 + sqlmock 驱动，
+// 走完 `PUT /assets/:id` 的完整链路，断言**驱动实际收到的 SQL 里没有 ip_address**。
+//
+// 为什么不能只靠上面那条 mock 用例：那条钉的是「handler 剥了键」，这条钉的是
+// 「剥了之后整条链路真的不产生这一列」。两者缺一：只留前者，service 换实现（比如
+// 自己拼 map）后漂移不会被发现；只留后者，剥键被删掉时驱动的实际 SQL 会带上
+// `"ip_address"` → 本用例红（实测：去掉 delete 后此处 FAIL，见 M63-graph-analysis.md）。
+func TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200(t *testing.T) {
+	gormDB, mock, captured := newSQLCapturingDB(t)
+
+	id := uuid.New()
+	mock.ExpectQuery(`SELECT \* FROM "assets"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "asset_type", "created_at", "updated_at"}).
+			AddRow(id.String(), "web-01", "active", "server", time.Now(), time.Now()))
+	mock.ExpectBegin()
+	mock.ExpectExec(`.*`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	r := newTestRouter(service.NewAssetService(gormDB))
+	body, _ := json.Marshal(map[string]any{"name": "web-02", "ip_address": "1.2.3.4"})
+	req := httptest.NewRequest(http.MethodPut, "/assets/"+id.String(), bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s（42703 会走到这里变 500）", w.Body.String())
+	assert.Contains(t, captured.joined(), `UPDATE "assets" SET`, "必须真的发出 UPDATE")
+	assert.NotContains(t, captured.joined(), "ip_address",
+		"UPDATE 不得引用 assets 上不存在的列（PG 42703）")
+}
+
+// M63: POST /assets 带 ip_address —— JSON 绑定不报错（字段存在），但**不落库**：
+// `gorm:"-"` 让它在 schema 解析阶段就被排除，INSERT 语句里没有这一列。
+func TestM63_CreateAsset_带ip_address_JSON解析OK但不进INSERT(t *testing.T) {
+	gormDB, mock, captured := newSQLCapturingDB(t)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "assets"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	r := newTestRouter(service.NewAssetService(gormDB))
+	body, _ := json.Marshal(map[string]any{"name": "web-01", "asset_type": "server", "ip_address": "1.2.3.4"})
+	req := httptest.NewRequest(http.MethodPost, "/assets", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	assert.Contains(t, captured.joined(), `INSERT INTO "assets"`)
+	assert.NotContains(t, captured.joined(), "ip_address", "虚拟字段不得出现在 INSERT 的列清单里")
+}
+
+// sqlCapture 记录驱动**实际收到**的语句。
+//
+// 为什么需要它：sqlmock 的期望只能断言「某条 SQL 被发过」，无法断言「某列**没**被写」——
+// 而 M63 要证明的恰恰是后者（`assets` 没有 `ip_address` 列）。这里把期望放宽成 `.*`，
+// 把 actual SQL 抄下来供用例直接读。
+type sqlCapture struct{ stmts []string }
+
+func (c *sqlCapture) Match(_, actualSQL string) error {
+	c.stmts = append(c.stmts, actualSQL)
+	return nil
+}
+
+// joined 把捕获到的语句拼成一串，供 Contains / NotContains 直接断言。
+func (c *sqlCapture) joined() string { return strings.Join(c.stmts, "\n") }
+
+// newSQLCapturingDB 给 handler 测试一把「真 service + 真 gorm + sqlmock 驱动」的 DB。
+// 与 service 层 newMockDB 同一形态（postgres dialect，保证 SQL 语法和列名解析行为一致），
+// 差别只在 QueryMatcher 被换成记录器。
+func newSQLCapturingDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock, *sqlCapture) {
+	t.Helper()
+	cap := &sqlCapture{}
+	mockDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(cap))
+	require.NoError(t, err)
+
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: mockDB, PreferSimpleProtocol: true}), &gorm.Config{})
+	require.NoError(t, err)
+	return gormDB, mock, cap
 }
