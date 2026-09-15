@@ -6,8 +6,9 @@
 
 ## Graphify
 
-**`graphify update . --force`**: ✓
-- **6968 nodes / 14363 edges / 443 communities**（M60 基线 6843 / 13936 / 445）
+**`graphify update . --force`**: ✓（最终时点，含 M62 并行落地与白屏修复）
+- **7027 nodes / 14443 edges / 458 communities**（M60 基线 6843 / 13936 / 445；
+  M61-only 时点为 6968 / 14363 / 443）
 - AST extraction: 122/122 files（100%）
 - 社区集变化：445 → 443（-2）。`pages/Users.tsx` 自成一个前端页面社区；后端新增的
   `user_service.go` 写路径与前端的 `userApi` 写方法跨语言**不相邻**（Go 与 TS 各在自己社区里），
@@ -21,15 +22,16 @@
 - `unverified_code_nodes: 0`
 - `producer_suppression_sites: 12`（`seen_ids`/`seen_keys`/`seen_doc_refs` arity=unknown，与 M59/M60 同源，非本轮引入）
 
-> 本轮增量 +125 节点 / +427 边，来源集中在两处：① 后端 `user_service.go` 新增写路径
-> （`Update`/`UpdateStatus`/`UpdateRole`/`applyUserUpdate`/`checkUserUpdateGuards` 及其
+> 最终时点相对 M60 基线的增量同时含并行 M62（`utils/validators` 的 IP 规则 + AssetFormModal
+> 接线）；M61 自身增量约 +125 节点 / +427 边，来源集中在两处：① 后端 `user_service.go` 新增
+> 写路径（`Update`/`UpdateStatus`/`UpdateRole`/`applyUserUpdate`/`checkUserUpdateGuards` 及其
 > 事务/守卫调用边）与 `user_handler.go` 三条 handler + `decodeUserBody`/`userPathID`/`writeUser`；
-> ② 前端新页面 `pages/Users.tsx`（19 个符号）与两个新测试文件（`Users.test.tsx` 14 用例、
-> `App.menu.test.tsx` 5 用例的用例名节点）。
+> ② 前端新页面 `pages/Users.tsx`（19 个符号）与三个新测试文件（`Users.test.tsx` 14 用例、
+> `App.menu.test.tsx` 5 用例、`App.render.test.tsx` 2 用例的用例名节点）。
 
 ## CodeGraph
 
-**`codegraph sync`**: watcher 已在六笔 commit 后追上（explore 返回的是磁盘当前版本）
+**`codegraph sync`**: watcher 已在全部 commit 后追上（explore 返回的是磁盘当前版本）
 
 **`codegraph explore "UserService Update UpdateStatus UpdateRole checkUserUpdateGuards UpdateUser userPathID decodeUserBody buildMenuItems Users.tsx applyPatch rollback"`**
 → 50 symbols / 5 files，关键三条：
