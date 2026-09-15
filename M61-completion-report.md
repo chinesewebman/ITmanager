@@ -1,7 +1,7 @@
 # M61-completion-report — G-User-AdminManagement 用户管理（admin 端启用/禁用/改角色）
 
-**Shipped**: 2026-09-15（commits `4d7092c` feat service / `1c85490` test service / `5012582` feat handlers+契约 / `4a7f407` test 路由集成 / `969db3e` feat frontend / `5249fd9` test frontend；docs 本次）
-**Scope**: backend 5 files + frontend 7 files（含 `openapi.yaml` 与生成物 `api.types.ts`）
+**Shipped**: 2026-09-15（commits `4d7092c` feat service / `1c85490` test service / `5012582` feat handlers+契约 / `4a7f407` test 路由集成 / `969db3e` feat frontend / `5249fd9` test frontend / **`dac8b05` fix 全站白屏**；docs 本次）
+**Scope**: backend 5 files + frontend 8 files（含 `openapi.yaml`、生成物 `api.types.ts`、白屏回归用例）
 **摩擦**: **G-4**（multi-angle 审查，AUTHZ-CLOSURE §2 D-A 登记）—— `/users` 只有 `GET`、`UserService` 只有 `List`/`Get`、`userApi` 只有 `list`/`get`、全站无用户管理页。admin 想让离职员工登不进来、想把某人提成 `ops_admin`，只能自己进库 `UPDATE`：无校验、无审计、无人知道谁改过。M40 把「禁用即失效」做进了鉴权侧，但**没有人能触发禁用** —— 功能缺的是那只手。
 **Time**: ≤4h omp round
 
@@ -22,7 +22,8 @@
 | `backend/internal/service/user_service_test.go` | +13 用例（真 sqlite 为主，2 条 sqlmock 钉 SQL 文本） |
 | `backend/internal/api/routes_integration_test.go` | `gatedRoutes` +3 登记；+11 用例 / 28 sub-case |
 | `frontend/src/pages/Users.test.tsx`（新增） | 14 用例 |
-| `frontend/src/App.menu.test.tsx`（新增） | 5 用例 |
+| `frontend/src/App.menu.test.tsx`（新增） | 5 用例（侧边栏能力门禁） |
+| `frontend/src/App.render.test.tsx`（新增） | 2 用例（**全站白屏回归**，见「附带修复」） |
 
 ## Hard pass
 
@@ -35,10 +36,69 @@
 | frontend `npm run lint`（全量，`--max-warnings 0`） | 干净 ✓ |
 | frontend `npx vitest run src/pages/Users.test.tsx` | **14 tests PASS** ✓（M61 新增） |
 | frontend `npx vitest run src/App.menu.test.tsx` | **5 tests PASS** ✓（M61 新增） |
-| frontend 全量 `npx vitest run` | **44 files / 428 tests PASS** ✓（M60 基线 42/409 → +2 文件 +19 测试，零退化） |
+| frontend 全量 `npx vitest run` | **47 files / 489 tests PASS** ✓（M60 基线 42/409；+5 文件 +80 测试，含 M62 并行落地的 2 文件，零退化） |
+| frontend `src/App.render.test.tsx` | **2 tests PASS**（修复前 2 failed —— 复现同一条 invariant 异常）✓ |
 | `npm run validate:api` + `gen:api` 漂移 | valid ✓；生成物差异仅新增 path/schema 与 `UserList.data` 形状修正（CI 门禁 `git diff --exit-code` 覆盖） |
 | mutation inversion（5 处，全红在**断言**上，非编译） | ① 自我守卫短路 → service 3 条 + 集成 1 条 FAIL；② 守卫 count 去掉 `status='active'` → `_被禁用的管理员不算能自救` FAIL；③ 去掉 `CanonicalRole` 折叠 → 2 条 FAIL；④ 前端 bypass `statusMut.mutate` → `禁用账号…PATCH /users/:id/status` FAIL；⑤ 全部还原后复跑全绿 ✓ |
 | 双轨分析 | graphify 6968 nodes / 14363 edges / 443 communities，**0 anomalies**；codegraph 新符号入图（`Update → applyUserUpdate → checkUserUpdateGuards` 调用链）✓ |
+
+## 附带修复：全站白屏（P0，非本轮引入）
+
+验证 M61 页面时用真浏览器打开 dist 产物 → **纯白页**。查下去是本轮之前就存在的缺陷。
+
+**症状**：任意路由（含 `/login`）root 为空，仅一条未捕获异常
+`Error: useNavigate() may be used only in the context of a <Router> component`
+（`react-router` 的 `useNavigateUnstable` → `invariant`）。
+
+**根因**：`frontend/src/App.tsx` 把 `<CommandPalette />` 挂在 `<BrowserRouter>` **外面**，
+而 `CommandPalette`（`components/CommandPalette/index.tsx:132`）无条件调 `useNavigate()`
+（选中搜索结果要 `navigate(to)` 跳详情）→ 渲染期抛错 → React 卸载整棵树。
+
+**引入点与暴露面（实测，不是推断）**：
+- `git log -S'<CommandPalette />' -- frontend/src/App.tsx` → `f7e98eb`
+  （2026-06-17「小改进 #3 Cmd+K 全局搜索」），`git show f7e98eb:frontend/src/App.tsx:330-332`
+  显示当时就是 `<CommandPalette />` 紧邻 `<BrowserRouter>` 之外。此后十几轮未变。
+- **反证**：把 `/tmp` 下从 M60 状态（`34d40ec`）构建的同一份产物加载进同一个浏览器 →
+  **同一条异常、同样空白**。故与 M61 改动无关。
+
+**为什么此前无人发现**：**没有任何用例渲染过 `<App />` 整体**。
+`App.theme.test.tsx` 只测 `buildTheme` 的产物；`App.menu.test.tsx` 与各页用例都渲染
+`AppLayout`/页面本身并**自己包 Router**。全仓测试面里「应用能不能挂载」这一层是空的 ——
+于是每轮「frontend 全量 vitest PASS」都是真话，而产品在浏览器里是白的。
+
+**修法**（`dac8b05`）：`<CommandPalette />` 移进 `<BrowserRouter>`（一行位置变更 + 原位注释
+写明约束，防止后人再挪出去）。它本就依赖 Router 上下文，移进去是纠正而不是迁就。
+
+**回归钉子**：`frontend/src/App.render.test.tsx` —— 按**生产入口形状**（`QueryClientProvider`
++ `App`，同 `main.tsx` 的两层）渲染，断言未登录出登录页、已登录出侧边栏。
+修复前这两条在 jsdom 里复现同一条 invariant 异常（2 failed）；修复后 2 passed。
+（写用例时先跑出红、再改代码 ——「先复现后修」这条在本轮是字节级成立的。）
+
+**影响面（如实说）**：这是**产品级**缺陷，影响所有页面、所有用户，且已存在约三个月。
+M61 之前各轮报告里凡有「UI 已变更 / 界面已接上」类声明，其**浏览器级**验证依据都不存在；
+那些轮次的结论需要按「单测已验证、真机未验证」重新理解。本仓的测试面缺口是
+「入口形状未覆盖」，不是「用例写得不好」——修法是补一条覆盖入口形状的用例，而不是加断言密度。
+
+## 真浏览器验证（M61 交付物的验证依据）
+
+环境：本机**无 docker 权限、无 postgres**（`pg_isready` 无响应、`docker ps` permission denied），
+故起不了真后端。改用 `vite build` 产物 + 手写契约桩（按 openapi 三条新 path 的请求/响应形状），
+用真实 Chromium（Puppeteer，带 CDP）加载 —— 验证的是**真浏览器里的 React 行为**，
+桩只替代服务端。桩与静态服务都在 `/tmp`，**不入仓库**。
+
+| 场景 | 实测结果 |
+|---|---|
+| `/users` 首屏 | 侧边栏 12 项、`用户管理` 高亮；表格 3 行（admin/zhangsan/lisi），列 = 用户名（含昵称）/邮箱/角色/状态/最后登录/操作 |
+| 角色列 | 下拉 5 词表（超级管理员/运维管理员/运维人员/审计员/只读用户，带词表值后缀）；`admin`→`ops_admin` 变更后行内显示更新 |
+| 状态列 | Switch 受控：u2 启用 → 点开确认框（文案含被处置的用户名 + 「登录会话与 API Key 立即失效（最长 30s 生效）」） |
+| 禁用普通账号 | 确认 → `PATCH /api/users/u2/status body={"status":"inactive"}` → Switch 变「禁用」+ toast「状态已更新」+ 列表重取（桩日志逐条可核对） |
+| 改角色 | 选中即弹确认 → `PATCH /api/users/u2/role body={"role":"ops_admin"}` → toast「角色已更新」+ 列表重取 |
+| **自我禁用（后端 403）** | Switch 翻动后**回滚**为「启用」，toast 带服务端原因 `forbidden: 不能禁用自己的账号`（不止是拦截器的通用「没有权限访问」） |
+| 能力门禁 | `/__caps/read,write,manage`（无 `identity`）→ 侧边栏**没有**「用户管理」；`/auth/me` 返回的 `capabilities` 是唯一判据 |
+| 侧边栏截图 | 目视确认（4 张截图之一交给视觉模型复核）：12 项菜单、6 列表格、角色值无重复渲染 |
+
+**未能验证的部分（如实登记）**：真后端的守卫语义（403 的两种情形、`FOR UPDATE` 行锁、
+30s 缓存滞后）只由 Go 测试覆盖；桩是**按契约**实现的，不构成对后端行为的证明。
 
 ## 关键设计决策（含理由）
 
@@ -131,8 +191,29 @@ G-39 的「`NotifyChannels` 只写不读」同族）。
 - **实测未复现的观察（如实记录）**：本轮多次在**同一台机器上并发**跑 vitest + 两次 `go test`
   （N97 4 核），个别次出现 `Test Files 1 failed` 但复跑即绿 —— 与 M60 记录的是同一现象
   （M60 retro 已登记为「资源竞争下的偶发，未定位」）。本轮未做压测定位。
+  唯一一次具名红是并行 M62 落地期间 `AssetFormModal.test.tsx` 的 `IPv4 256.0.0.1` 用例
+  （同机并发两个套件时），单独复跑 4/4 PASS。
+- **「全量绿」不等于「产品能跑」**：本轮同一份代码库，`47 files / 489 tests PASS` 与
+  「任意路由白屏」同时成立。差别只在**验证面**：测试渲染的是零件（页面、layout、纯函数），
+  从没有人渲染过**入口形状**（`main.tsx` 那两层 + `<App />`）。
+  这不是断言不够密，而是**被断言的对象错了粒度** —— 补一条 2 用例的入口级用例，
+  就抓住了三个月里所有轮次都漏掉的东西。
+- **真机验证的价值在本轮是具体的**：白屏只有真浏览器（或入口级 jsdom 用例）能看见；
+  而「乐观更新失败回滚」「toast 带服务端原因」这两条只有真浏览器才证明得了
+  （jsdom 用例断的是 mock 被调用，真实 DOM 上的 Switch 回滚是另一回事）。
+  本机没有真后端，但**桩 + 真浏览器**依然足以覆盖前端行为 —— 缺的只是后端语义那一段，
+  而那段本来就有 Go 测试。
 
 ## Follow-up（留 future round）
+
+- **入口级用例应成为后续 round 的默认项**：白屏（T-75）暴露的不是「某条用例没写」，
+  而是「入口形状无人守」。建议后续任何改 `App.tsx` 层级/Provider 顺序的 round 都跑
+  `App.render.test.tsx`；若引入新的全局 Provider（如 i18n / 状态库），同一文件里补一条
+  按生产层数渲染的用例比在页面用例里加断言更有效。
+- **双重 toast（M61 引入的可观测副作用）**：403 时拦截器先弹通用「没有权限访问」，
+  页面再弹服务端原因（`forbidden: 不能禁用自己的账号`）—— 两条同时出现。
+  页面侧那条是行动指引（改什么参数都没用），拦截器那条是全站既有行为。
+  收敛需要改 `services/api.ts` 的拦截器（影响每一页），属独立一轮。
 
 - **创建账号**：后端缺 `POST /users`。需要密码策略、初始密码下发/强改密（M49 已有 `must_change_password`
   机制可复用）、审计与「谁能创建 admin」的判据。

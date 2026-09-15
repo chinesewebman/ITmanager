@@ -1,6 +1,6 @@
 # M61 双轨分析 (CodeGraph + Graphify)
 
-**Generated**: 2026-09-15 CST（M61 六笔 commit：`4d7092c` feat service / `1c85490` test service / `5012582` feat handler+契约 / `4a7f407` test 路由集成 / `969db3e` feat 前端页 / `5249fd9` test 前端）
+**Generated**: 2026-09-15 CST（M61 七笔 commit：`4d7092c` feat service / `1c85490` test service / `5012582` feat handler+契约 / `4a7f407` test 路由集成 / `969db3e` feat 前端页 / `5249fd9` test 前端 / `dac8b05` fix 全站白屏）
 **Scope**: M61 G-User-AdminManagement（backend 5 files + frontend 7 files，含 openapi.yaml 与生成物 api.types.ts）
 **Tools**: `graphify` v0.9.58, `codegraph` v1.6.0
 
@@ -113,7 +113,9 @@ flowchart LR
 | frontend `npm run lint`（全量 `--max-warnings 0`） | ✓ 干净 |
 | frontend `src/pages/Users.test.tsx` | ✓ 14 tests PASS |
 | frontend `src/App.menu.test.tsx` | ✓ 5 tests PASS |
-| frontend 全量 `npx vitest run` | ✓ **44 files / 428 tests PASS**（M60 基线 42/409 → +2 文件 +19 测试，零退化） |
+| frontend `src/App.render.test.tsx` | ✓ 2 tests PASS（**全站白屏回归**；修复前 2 failed，复现同一条 invariant 异常） |
+| frontend 全量 `npx vitest run` | ✓ **47 files / 489 tests PASS**（M60 基线 42/409；+5 文件 +80 测试，含 M62 并行落地 2 文件；`--reporter=json` 逐文件核对：**tracked 用例零遗漏**，见下） |
+| 真浏览器验证（dist + 契约桩 + Chromium） | ✓ 侧边栏门禁 / 列表 / 禁用 / 改角色 / 403 回滚 / 能力门禁 六项实测（见 completion report 的表格） |
 | mutation inversion ①（自我守卫短路） | ✓ 4 FAIL：`_自我禁用返回ErrForbidden` / `_自我降级admin返回ErrForbidden` / `_还有另一名启用admin时可禁用` + 集成 `_自我禁用返403` |
 | mutation inversion ②（守卫 count 去掉 `status='active'`） | ✓ 1 FAIL：`_被禁用的管理员不算能自救` |
 | mutation inversion ③（`Update` 去掉 `CanonicalRole` 折叠） | ✓ 2 FAIL：`_role首尾空白与大小写归一` / `_role遗留别名折叠后才落库` |
@@ -154,6 +156,23 @@ G-39（`AlertRule.NotifyChannels` 只写不读）。
 正确性（mutation ② 专门钉住它）。同族：`cmd/set-role` 的防自锁判据少了这层时也有同样的洞
 （该命令只判 role —— 但它跑在运维终端、无 HTTP 面，登记在 TODO「`cmd/set-role` 并发窗口」一行附近，
 本轮**不改**：减少的是人工路径的攻击面，不是自动路径）。
+
+**T-75（测试渲染的是零件，没人渲染入口）—— 本轮提取并固化**：
+`<CommandPalette />` 挂在 `<BrowserRouter>` 外却调用 `useNavigate()` → 渲染期抛
+react-router 的 invariant → React 卸载整棵树 → **任意路由纯白页**。自 `f7e98eb`
+（2026-06-17）起存在约三个月，横跨十几轮，而每一轮的「frontend 全量 vitest PASS」都是真的。
+原因不是断言密度不够，而是**被断言对象的粒度**：`App.theme.test.tsx` 测 `buildTheme` 的
+产物、`App.menu.test.tsx` 与各页用例渲染 `AppLayout`/页面并**自己包 Router** ——
+`<App />` 这个**入口形状**全仓无人渲染。修法两件：把 `<CommandPalette />` 移进 `BrowserRouter`
+（`dac8b05`），并补 `App.render.test.tsx`（按 `main.tsx` 的两层入口形状渲染，2 用例；
+修复前红、修复后绿）。
+**可推广的判据**：任何「页面级全绿」的结论都隐含「入口能挂载」这一前提；
+当测试普遍自己构造上下文（Router / Provider）时，生产入口的层数与顺序就没人守。
+
+**用例集完整性（本轮顺带核实）**：`npx vitest run --reporter=json` 的逐文件清单
+与 `git ls-files` 的 tracked 测试文件比对 → **`missing: []`，`extra: [新增的 App.render.test.tsx]`**。
+即 47 个文件全部真实执行，无静默跳过。顺带解释了此前几轮 summary 的文件数差异
+（`44 → 47`）：并行 M62 在同仓落地了 2 个测试文件，不是漏跑。
 
 ## 未覆盖的残余（如实登记，不假装完整）
 

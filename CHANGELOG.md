@@ -417,7 +417,7 @@ standalone 使用下退化成**子串**匹配：实测 `IPV6_PATTERN.test('zz::1
 JWT 拿到手就能用满 24h（G-5 的 M40 修复把「禁用即失效」做进了鉴权侧，但没人能触发禁用）；
 角色调整只有 `cmd/set-role` 这条直连 DB 的路径。
 
-**改动** (backend 5 files + frontend 7 files，commit `4d7092c` → `1c85490` → `5012582` → `4a7f407` → `969db3e` → `5249fd9`):
+**改动** (backend 5 files + frontend 8 files，commit `4d7092c` → `1c85490` → `5012582` → `4a7f407` → `969db3e` → `5249fd9` → `dac8b05`):
 
 - **`backend/internal/service/user_service.go`**: 新增 `Update(ctx, id, UpdateUserInput, actor)` /
   `UpdateStatus` / `UpdateRole`。`UpdateUserInput` 三个字段全是**指针**（nil = 本次不动该列：
@@ -490,7 +490,12 @@ JWT 拿到手就能用满 24h（G-5 的 M40 修复把「禁用即失效」做进
 - frontend `npm run lint`（全量，`--max-warnings 0`）: 干净 ✓
 - frontend `src/pages/Users.test.tsx`: **14 tests PASS**（M61 新增）✓
 - frontend `src/App.menu.test.tsx`: **5 tests PASS**（M61 新增）✓
-- frontend 全量 `npx vitest run`: **44 files / 428 tests PASS**（M60 基线 42/409 → +2 文件 +19 测试，零退化）✓
+- frontend `src/App.render.test.tsx`: **2 tests PASS**（M61 新增，白屏回归；修复前 2 failed）✓
+- frontend 全量 `npx vitest run`: **47 files / 489 tests PASS**（M60 基线 42/409；+5 文件 +80 测试，
+  其中 M62 并行同仓落地 2 文件；零退化。唯一一次红是 `AssetFormModal.test.tsx` 在
+  负载下（同机并发跑两个套件）的偶发，单独复跑 4/4 PASS —— 与 M60 retro 记录的同源现象一致）✓
+- **真浏览器验证**（`vite build` 产物 + 契约桩 API，本地 8101；见下方白屏修复段）：
+  侧边栏入口、列表 3 行、禁用/启用、改角色、403 回滚、能力门禁逐项实测通过，附截图 ✓
 - **mutation inversion 实证（5 处，全部红在断言上）**:
   ① 短路自我守卫（`self := false`）→ `TestUserService_Update_自我禁用返回ErrForbidden` /
   `_自我降级admin返回ErrForbidden` / `_还有另一名启用admin时可禁用` FAIL + 集成
@@ -500,6 +505,27 @@ JWT 拿到手就能用满 24h（G-5 的 M40 修复把「禁用即失效」做进
   ④ 前端 bypass `statusMut.mutate`（只改本地状态）→ `禁用账号…PATCH /users/:id/status` FAIL；
   ⑤ 全部还原后逐个复跑全绿 ✓
 - 双轨分析: graphify + codegraph，见 `M61-graph-analysis.md` ✓
+
+**顺带修复：全站白屏（P0，非本轮引入，自 `f7e98eb` 起一直存在）**
+
+真浏览器验证 M61 页面时发现**应用根本起不来**：任意路由打开都是纯白页，root 为空，
+只有一条未捕获异常 `useNavigate() may be used only in the context of a <Router> component`。
+
+- **根因**：`<CommandPalette />` 挂在 `<BrowserRouter>` **外面**，而它内部无条件调
+  `useNavigate()`（选中搜索结果要 `navigate(to)` 跳详情）→ react-router 的 invariant 抛错 →
+  React 卸载整棵树。引入点是 `f7e98eb`（2026-06-17「小改进 #3 Cmd+K 全局搜索」）。
+- **为什么十几个 round 都没发现**：**没有任何用例渲染过 `<App />` 整体**。
+  `App.theme.test.tsx` 只测 `buildTheme` 的产物；`App.menu.test.tsx` 与各页用例都渲染
+  `AppLayout` 或页面本身、并自己包了 Router。于是「应用挂载即崩」这件事全仓零守卫，
+  而每一轮的「frontend 全量 vitest PASS」都是真的 —— 它只是没覆盖这个粒度。
+- **修法**（`dac8b05`）：把 `<CommandPalette />` 移进 `<BrowserRouter>`（一行位置变更），
+  并在原位留注释写明约束。它本来就依赖 Router 上下文，移进去是纠正而非将就。
+- **回归钉子**：`frontend/src/App.render.test.tsx` 按**生产入口形状**（`QueryClientProvider`
+  + `App`，同 `main.tsx`）渲染，断言未登录出登录页、已登录出侧边栏。修复前在 jsdom 里复现
+  同一条 invariant 异常（2 failed），修复后 2 passed。
+- **影响面如实登记**：这是**产品级**缺陷（前端所有页面在浏览器里都是白屏），不是 M61 引入的；
+  M61 只是第一次真的用浏览器打开它。**M61 之前各轮报告里的「UI 已变更」类声明，
+  其真实验证依据需要重新审视** —— 那些 round 的浏览器级结论从未被本仓的测试面支撑。
 
 **行为突变告知（运维需知）**:
 
