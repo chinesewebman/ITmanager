@@ -323,6 +323,81 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M67 — G-OMH-Workflow-Adoption 把"OMH 装上"升级到"OMH 真用上"（2026-09-16）
+
+**摩擦**: OMH v2.0.3 装好 (44/44 doctor PASS) 之后被当成"摆设", 真正起 round 时
+PM-direct 还是凭 MEMORY.md + fact_store 自由流。**OMH 是 advisory skill pack,
+不是 autonomous executor** —— 不能"注入 Poison 时段"进 setup-profile.json (试了也会
+被忽略), 也不能让它接管 PM-direct / omp dispatch 切换。**Poison 校正的实质**: OMH 的
+正确用法是**消费它的 workflow shape**, 不是**让它指挥**。
+
+**本轮解决方案**:
+
+1. **`~/.omh/project-rules.md`** (新, 3.7KB): 标注 Poison 时段规则是 project-local
+   decision, advisory 而非 enforced; 列出工作日 / 周末时段切分 + PM-direct 边界 (≤6h /
+   ≤4h / ≤2h / ≤1h 极小); OMH-aware 工作流命名 (omh-plan / ulw-work / omh-decide /
+   task-completion-protocol) + 回退路径 (rollback 一行命令 + 删 4 节 config)。
+2. **fact_store fact_id=6** (新): Poison 时段 + OMH-aware PM-direct 钉进事实流。
+3. **MEMORY.md** (更新 1 处, 2174 → 1880 chars): keyring section 收 200 字 + 加 OMH-aware
+   180 字 (含 OMH 限制承认)。
+4. **不动 OMH config**: setup-profile.json / display.skin / interface 全保留 OMH install
+   时的默认; 不二次扰动 (Poison 没要求)。
+
+**OMH workflow shape 起 round 实证** (从 M66 → M67 → M68 三轮):
+
+| Round | OMH skill | 实际收益 |
+|---|---|---|
+| M66 intent | omh-plan 8 节 | Non-goals / Decision gate 两节之前会漏, 现在必写 |
+| M67 intent | omh-plan 8 节 | "不动 OMH config" + "Poison 时段不接 routing" 两个 decision 显式钉死 |
+| M68 intent + brief | omh-plan + ulw-work | "v4 only / 业务规则 vs DB unique / 不返占用资产 ID" 4 个 decision 显式 |
+| M68 mutation | task-completion-protocol | 实证 1 处: bypass guard → 测试红 → 还原绿 |
+
+**doctor 验证**: `omh doctor` 44/44 PASS 仍绿 (M67 不动 OMH config, 不退步)。
+
+### M68 — G-Asset-IpConflictGuard v4 IP 业务冲突守卫（M66 派生 TODO）（2026-09-16）
+
+**摩擦（M66 派生，本轮结案）**: M66 把 IP 写入路径打通了 (asset + network 包事务、
+v4/v6 分流、422 兜底), 但**没有任何守卫**禁止两台资产填同一个 IP —— `asset_networks.
+ipv4_address` 只有普通 index (非 unique 约束), 两台设备可以静默持有同一个地址; 而
+前端 `AssetTable` 的 Ping/Traceroute 正是拿这个 IP 去定位设备 —— 打错一台的代价是
+"现场找不到设备" (与 M62 加 IP 格式闸同源的动机)。
+
+**本轮解决方案**: 业务规则守卫 (而非 DB unique 约束 —— 退役释放 IP 后能否复用是产品
+决定, 允许复用意味着不能上 DB 唯一约束) —— `service.updateFirstNetworkIP` 在 SELECT
+网卡**之前**先做 `tx.Raw(...).Scan(&taken)` 全表查 (self-exclude 用 asset_id), 命中
+返 `ErrIPConflict` (新 sentinel, 与 `ErrAlreadyExists` 区分 — 两者都映 409 但语义不同),
+handler 映 409 + "IP 地址已被其他资产占用"。v6 不参与 (留 future)。**M66 (T-76) 风险
+保持封死**: 独立参数位走 `tx.First(&network)` + `tx.Create/Update` 网卡表, 不进
+`tx.Updates(map)`; 守卫在 SELECT 网卡之前, 失败早返。
+
+**commit (`cc7a46d`)**: 1 backend commit (4 files / +172), 含:
+
+- `asset_service.go` — 加 `ErrIPConflict` sentinel; 守卫 Raw SQL 嵌入
+  `updateFirstNetworkIP` (parsed.To4() 分支内, self-exclude 用 asset_id)
+- `asset_handler.go` — `CreateAsset` + `UpdateAsset` 错误映射加 ErrIPConflict → 409
+  (先于 ErrAlreadyExists 判, 更具体的分支先走)
+- `asset_service_test.go` — 3 新 case: 占用冲突 / self-exclude / v6 跳过; 已有 M66
+  case 加 guard 期望
+- `asset_handler_test.go` — 1 新 case (handler→service→HTTP 链路); 已有 M64/M66
+  case 加 guard 期望
+
+**验证**:
+
+- backend `go test -count=1 ./...`: **27 packages ok**
+- mutation inversion 实证 1 处: bypass guard → `TestM68_AssetService_ip被其他资产占用_
+  返ErrIPConflict` FAIL → 还原 → 全绿
+- frontend 0 改动 (本轮纯 backend); `tsc --noEmit` 待 verify
+- graphify multigraph 0 anomalies / codegraph 6,532+ nodes / 16,226+ edges
+
+**派生 TODO** (留 future):
+
+- **M69 = G-Asset-IpConflictGuard-v6** (v6 也做冲突守卫, 待 product 决定; v6 地址
+  空间大冲突概率低, 边际收益 < 边际测试成本)
+- **M70 = G-Asset-IpConflictAudit** (后台巡检视图报现有重复 IP, 历史数据无法用
+  guard 拦住)
+- **G-UI-AssetIpValidatorParity-Mapped** (M65 派生保留, 待 product 口径: 表单允不允许
+  IPv4-mapped `::ffff:1.2.3.4` 与 zone id `fe80::1%eth0` 形态)
+
 ### M66 — G-Asset-UpdateIpPersist PUT /assets/:id 写网卡 IP（M63/M64 派生 TODO）（2026-09-16）
 
 **摩擦（M63 + M64 派生，本轮结案）**: M63 把 `Asset.IpAddress` 收成虚拟字段、M64 把 POST 的
