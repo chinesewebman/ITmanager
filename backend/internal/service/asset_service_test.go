@@ -309,18 +309,17 @@ func TestAssetService_Update_成功(t *testing.T) {
 	svc := NewAssetService(gormDB)
 
 	id := uuid.New()
-	// 1) First 拿 record — gorm 发 2 args (id, LIMIT 1)
+	// tx 包 First + UPDATE; ipAddress=nil → updateFirstNetworkIP 直接返 nil，不发任何 SQL
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
-	// 2) Model.Updates 走 UPDATE
-	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "assets" SET`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	updates := map[string]interface{}{"status": "maintenance"}
-	asset, err := svc.Update(context.Background(), id.String(), updates)
+	asset, err := svc.Update(context.Background(), id.String(), updates, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, asset)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -339,7 +338,7 @@ func TestAssetService_Update_空updates只Get不写DB(t *testing.T) {
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
-	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{})
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, asset)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -350,12 +349,14 @@ func TestAssetService_Update_不存在返回ErrNotFound(t *testing.T) {
 	svc := NewAssetService(gormDB)
 
 	id := uuid.New()
-	// First 找不到 — gorm 发 2 args (id, LIMIT 1)
+	// tx 包 First — 找不到返 ErrNotFound
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 空
+	mock.ExpectRollback()
 
-	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "x"})
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"name": "x"}, nil)
 	assert.Nil(t, asset)
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -367,15 +368,15 @@ func TestAssetService_Update_唯一冲突返ErrAlreadyExists(t *testing.T) {
 	svc := NewAssetService(gormDB)
 
 	id := uuid.New()
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets" WHERE id = \$1`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
-	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "assets" SET`).
 		WillReturnError(errors.New(`ERROR: duplicate key value violates unique constraint "idx_assets_net_box_id" (SQLSTATE 23505)`))
 	mock.ExpectRollback()
 
-	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"net_box_id": 42})
+	asset, err := svc.Update(context.Background(), id.String(), map[string]interface{}{"net_box_id": 42}, nil)
 	assert.Nil(t, asset)
 	assert.ErrorIs(t, err, ErrAlreadyExists, "唯一冲突应映射成 409，不是原样 500")
 	assert.NoError(t, mock.ExpectationsWereMet())
@@ -995,28 +996,41 @@ func TestM63_AssetService_Create_虚拟字段不进INSERT也不建网卡(t *test
 // 生成 `SET "ip_address"=$n`（callbacks/update.go: LookUpField 为 nil 时仍 append Assignment）。
 // 真 PG 上这是 42703 → 500。所以 handler 必须在入口剥掉这个键（asset_handler.UpdateAsset）。
 //
-// 本用例钉的是**这条 trap 本身**（不是我们期望的行为）：哪天 GORM 改成丢弃未知键，它会红，
-// 那时 handler 的 delete 就可以删掉。
-func TestM63_AssetService_Update_map含模型外列时GORM照发SET(t *testing.T) {
+// **M66 重写**：本轮不再走「handler 剥键 → Update 走 db.Updates(map)」这条路，
+// 改成「handler 抽键 → 单独走 updateFirstNetworkIP 写网卡」。`updates` map 里不再含 `ip_address`。
+// 本用例钉的是「updates map 不含 ip_address 即不发出 SET ip_address=」 —— 真 PG 上既不会
+// 撞 42703（键没了），又会让网卡表收到 IP（走 tx 另一条路径）。
+func TestM66_AssetService_Update_ipAddress_走独立参数不混进map(t *testing.T) {
 	gormDB, mock, cap := newCapturingDB(t)
 	svc := NewAssetService(gormDB)
 
 	id := uuid.New()
-	// First() 在事务之外（service.Update 先读后写）
+	// tx 包 First(asset) + UPDATE + 网卡查 + 网卡 INSERT
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(assetSampleRows(id.String()))
-	mock.ExpectBegin()
-	mock.ExpectExec(`.*`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "assets"`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// 网卡先查再写
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// GORM tx.Create(...) 在 PG 是 RETURNING Query —— sqlmock ExpectQuery 而不是 ExpectExec
+	mock.ExpectQuery(`INSERT INTO "asset_networks"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
+	ip := "10.0.0.1"
 	_, err := svc.Update(context.Background(), id.String(), map[string]interface{}{
-		"name":       "web-02",
-		"ip_address": "10.0.0.1", // 模型里只有虚拟字段，没有这一列
-	})
+		"name": "web-02",
+		// 故意不再带 ip_address —— M66 后它走独立参数
+	}, &ip)
 	require.NoError(t, err)
-	assert.True(t, cap.has(`"ip_address"`),
-		"GORM 未丢弃模型外的键 → 真 PG 会报 42703，handler 入口必须剥掉它：%v", cap.stmts)
+	assert.False(t, cap.has(`"ip_address"`),
+		"updates map 不应再含 ip_address（否则 handler 没剥，仍会撞 42703）：%v", cap.stmts)
+	assert.True(t, cap.has(`INSERT INTO "asset_networks"`),
+		"ip_address 独立参数应触网卡表写入：%v", cap.stmts)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

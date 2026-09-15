@@ -31,7 +31,7 @@ type mockAssetService struct {
 	listAllFunc    func(ctx context.Context) ([]models.Asset, error)
 	getFunc        func(ctx context.Context, id string) (*models.Asset, []models.AssetNetwork, error)
 	createFunc     func(ctx context.Context, a *models.Asset, ip *string) error
-	updateFunc     func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error)
+	updateFunc     func(ctx context.Context, id string, u map[string]interface{}, ip *string) (*models.Asset, error)
 	deleteFunc     func(ctx context.Context, id string) error
 	retireFunc     func(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
 	bulkRetireFunc func(ctx context.Context, ids []string, reason string, userID uuid.UUID) ([]string, map[string]string, error)
@@ -50,8 +50,8 @@ func (m *mockAssetService) Get(ctx context.Context, id string) (*models.Asset, [
 func (m *mockAssetService) Create(ctx context.Context, a *models.Asset, ip *string) error {
 	return m.createFunc(ctx, a, ip)
 }
-func (m *mockAssetService) Update(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error) {
-	return m.updateFunc(ctx, id, u)
+func (m *mockAssetService) Update(ctx context.Context, id string, u map[string]interface{}, ip *string) (*models.Asset, error) {
+	return m.updateFunc(ctx, id, u, ip)
 }
 func (m *mockAssetService) Delete(ctx context.Context, id string) error {
 	return m.deleteFunc(ctx, id)
@@ -234,7 +234,7 @@ func TestDeleteAsset_成功_返回200(t *testing.T) {
 
 func TestUpdateAsset_不存在_返回404(t *testing.T) {
 	svc := &mockAssetService{
-		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error) {
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}, ip *string) (*models.Asset, error) {
 			return nil, service.ErrNotFound
 		},
 	}
@@ -511,13 +511,16 @@ func TestM63_GetAsset_投影ip_address(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", *resp.Data.Asset.IPAddress)
 }
 
-// M63 (T-76): handler 入口必须把 `ip_address` 从 updates 里**摘掉**再交给 service。
-// 断言的观测点是 service 收到的 map（唯一能区分「剥了」与「没剥但库恰好没报错」的地方）。
-func TestM63_UpdateAsset_剥掉ip_address键(t *testing.T) {
-	var got map[string]interface{}
+// M63 (T-76) → M66 重写：handler 现在不剥 `ip_address`，而是抽出来走 service.Update 的
+// 独立参数位（`*string`）。这条 mock 用例钉的是「service.Update 收到的 updates map 不含
+// ip_address，但 ip 参数收到了值」 —— 抽键不是删键。
+func TestM66_UpdateAsset_抽出ip_address到独立参数位(t *testing.T) {
+	var gotU map[string]interface{}
+	var gotIP *string
 	svc := &mockAssetService{
-		updateFunc: func(ctx context.Context, id string, u map[string]interface{}) (*models.Asset, error) {
-			got = u
+		updateFunc: func(ctx context.Context, id string, u map[string]interface{}, ip *string) (*models.Asset, error) {
+			gotU = u
+			gotIP = ip
 			return &models.Asset{ID: uuid.New()}, nil
 		},
 	}
@@ -530,29 +533,38 @@ func TestM63_UpdateAsset_剥掉ip_address键(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
-	require.NotNil(t, got)
-	assert.Equal(t, "web-02", got["name"], "其它字段必须原样透传")
-	_, present := got["ip_address"]
-	assert.False(t, present, "ip_address 必须在进 service 前被剥掉（否则 PUT 撞 42703 → 500）")
+	require.NotNil(t, gotU)
+	assert.Equal(t, "web-02", gotU["name"], "其它字段必须原样透传")
+	_, present := gotU["ip_address"]
+	assert.False(t, present, "ip_address 必须在进 service 前从 updates map 抽出（否则 PUT 撞 42703 → 500）")
+	require.NotNil(t, gotIP, "ip_address 必须作为独立参数 ip *string 传给 service.Update")
+	assert.Equal(t, "10.0.0.1", *gotIP, "抽出的 IP 值必须原样透传")
 }
 
-// M63 (T-76) 路由级证据：真 service + 真 GORM 语句生成 + sqlmock 驱动，
-// 走完 `PUT /assets/:id` 的完整链路，断言**驱动实际收到的 SQL 里没有 ip_address**。
+// M63 (T-76) → M66 重写：handler 现在不剥 `ip_address`，而是抽出来走 service.Update 的
+// 独立参数位（`*string`）。这条路由级用例钉的是**整条链路的行为**：
+//   - `assets` 表的 UPDATE SQL 不带 ip_address 列（M63 的 42703 风险仍未出现）；
+//   - `asset_networks` 表多一条 INSERT（IP 真落网卡）；
+//   - 业务上 `service.Update` 收到的 updates map 不含 ip_address。
 //
-// 为什么不能只靠上面那条 mock 用例：那条钉的是「handler 剥了键」，这条钉的是
-// 「剥了之后整条链路真的不产生这一列」。两者缺一：只留前者，service 换实现（比如
-// 自己拼 map）后漂移不会被发现；只留后者，剥键被删掉时驱动的实际 SQL 会带上
-// `"ip_address"` → 本用例红（实测：去掉 delete 后此处 FAIL，见 M63-graph-analysis.md）。
-func TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200(t *testing.T) {
+// 为什么不能只靠上面那条 mock 用例：那条钉的是「handler 抽了键」，这条钉的是
+// 「抽了之后整条链路既不撞 42703、又真把 IP 写进网卡表」。两者缺一不可。
+func TestM66_UpdateAsset_带ip_address_assets无该列但网卡有行(t *testing.T) {
 	gormDB, mock, captured := newSQLCapturingDB(t)
 
 	id := uuid.New()
+	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT \* FROM "assets"`).
 		WithArgs(id.String(), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "asset_type", "created_at", "updated_at"}).
 			AddRow(id.String(), "web-01", "active", "server", time.Now(), time.Now()))
-	mock.ExpectBegin()
-	mock.ExpectExec(`.*`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "assets" SET`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
+		WithArgs(id.String(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`INSERT INTO "asset_networks"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
 	r := newTestRouter(service.NewAssetService(gormDB))
@@ -562,10 +574,13 @@ func TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200(t *testing.T)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "body=%s（42703 会走到这里变 500）", w.Body.String())
-	assert.Contains(t, captured.joined(), `UPDATE "assets" SET`, "必须真的发出 UPDATE")
-	assert.NotContains(t, captured.joined(), "ip_address",
-		"UPDATE 不得引用 assets 上不存在的列（PG 42703）")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s（M63 的 42703 风险或网卡写失败）", w.Body.String())
+	joined := captured.joined()
+	assert.Contains(t, joined, `UPDATE "assets" SET`, "必须真的发出 UPDATE")
+	assert.NotContains(t, joined, "ip_address",
+		"assets 表的 UPDATE 不得引用这一列（PG 42703 → M63 trap 重现）")
+	assert.Contains(t, joined, `INSERT INTO "asset_networks"`,
+		"网卡表必须收到一条 INSERT（M66 把 IP 真写进去）")
 }
 
 // M64: POST /assets 带 ip_address —— 它**不进 assets 的 INSERT**（`assets` 表没有这一列，
@@ -579,9 +594,16 @@ func TestM63_UpdateAsset_带ip_address不产生该列的SQL_返200(t *testing.T)
 func TestM64_CreateAsset_带ip_address_assets无此列但网卡有行(t *testing.T) {
 	gormDB, mock, captured := newSQLCapturingDB(t)
 
+	assetID := uuid.New()
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO "assets"`).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(assetID))
+	// M66: updateFirstNetworkIP（Create 和 Update 复用）先 SELECT 资产已有的网卡，没网卡才 INSERT。
+	// SQL mock 的 RETURNING 不会回写 asset.ID —— 必须用**真 UUID**让 assetID 与 SELECT 的 arg 匹配。
+	// 返回 ErrRecordNotFound 让 First() 走 ErrRecordNotFound 分支 → isNew=true → INSERT 分支。
+	mock.ExpectQuery(`SELECT \* FROM "asset_networks"`).
+		WithArgs(assetID, 1).
+		WillReturnError(gorm.ErrRecordNotFound)
 	mock.ExpectQuery(`INSERT INTO "asset_networks"`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()

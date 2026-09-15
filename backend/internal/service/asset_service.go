@@ -49,7 +49,9 @@ type AssetService interface {
 	// Create 建资产。ipAddress 非空（trim 后）时在**同一事务**里补一张网卡：
 	// IPv4 落 ipv4_address、IPv6 落 ipv6_address（M64 / G-Asset-NetworksPersist）。
 	Create(ctx context.Context, asset *models.Asset, ipAddress *string) error
-	Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error)
+	// Update 部分更新。ipAddress 非 nil 且 trim 后非空时，在**同一事务**里把第一张网卡的 IP
+	// 改成这个值（v4 落 ipv4_address、v6 落 ipv6_address）；nil/空串 = 不改（M66 / G-Asset-UpdateIpPersist）。
+	Update(ctx context.Context, id string, updates map[string]interface{}, ipAddress *string) (*models.Asset, error)
 	Delete(ctx context.Context, id string) error
 	// B4: 软退役 — 把 AssetNetwork.IP* 清空, 存档到 Asset.LastKnownIP*, 释放 IP 给新设备用
 	Retire(ctx context.Context, id string, reason string, userID uuid.UUID) (*models.Asset, []models.AssetNetwork, error)
@@ -235,16 +237,13 @@ func (s *assetService) Create(ctx context.Context, asset *models.Asset, ipAddres
 	if asset == nil || strings.TrimSpace(asset.Name) == "" {
 		return ErrInvalidInput
 	}
-	// 空串与未提供同义（可选字段）：不建网卡。
-	var ip string
+	// 与 handler 同款兜底：handler 已用 invalidIPAddress 422 挡在入口；这里再判一次是给
+	// **直接调用方**（tests/db_smoke_test.go、将来的导入器）—— 宁可报错，也不要把脏 IP 写进网卡表。
 	if ipAddress != nil {
-		ip = strings.TrimSpace(*ipAddress)
-	}
-	parsed := net.ParseIP(ip)
-	if ip != "" && parsed == nil {
-		// handler 已用同一判据挡在入口（422）。这里再判一次是给**直接调用方**
-		// （tests/db_smoke_test.go、将来的导入器）兜底：宁可报错，也不要把脏 IP 写进网卡表。
-		return ErrInvalidInput
+		ip := strings.TrimSpace(*ipAddress)
+		if ip != "" && net.ParseIP(ip) == nil {
+			return ErrInvalidInput
+		}
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(asset).Error; err != nil {
@@ -253,48 +252,108 @@ func (s *assetService) Create(ctx context.Context, asset *models.Asset, ipAddres
 			}
 			return err
 		}
-		if parsed == nil {
-			return nil
-		}
-		network := &models.AssetNetwork{
-			AssetID:       asset.ID,
+		return s.updateFirstNetworkIP(tx, asset.ID, ipAddress)
+	})
+}
+
+// updateFirstNetworkIP 在 tx 内更新（或创建）指定资产的第一张网卡的 IP。
+//
+//   - ipAddress == nil 或空字符串：不改网卡（未提供/明确不改）。
+//   - ipAddress 非空但 net.ParseIP 失败：返 ErrInvalidInput（handler 映 422）。
+//   - 资产无网卡：创建 eth0（与 Create 对齐）。
+//   - 有网卡：v4/v6 分流落 IPv4Address/IPv6Address，另一列清空（避免「v4 字段残留 v6 历史」）。
+//
+// 第一张网卡的判据沿用 M45 T-45：`created_at ASC, id ASC`，与 listNetworks 一致，
+// 否则「更新的是这张、读取的是那张」的漂移面又会出现。
+//
+// M66：从 Create 抽出供 Update 复用 —— POST/PUT 的 IP 写入路径走同一函数，
+// 同一判据不再有两份实现。
+func (s *assetService) updateFirstNetworkIP(tx *gorm.DB, assetID uuid.UUID, ipAddress *string) error {
+	if ipAddress == nil {
+		return nil
+	}
+	ip := strings.TrimSpace(*ipAddress)
+	if ip == "" {
+		return nil
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ErrInvalidInput
+	}
+	var network models.AssetNetwork
+	err := tx.Where("asset_id = ?", assetID).
+		Order("created_at ASC, id ASC").
+		First(&network).Error
+	isNew := false
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		network = models.AssetNetwork{
+			AssetID:       assetID,
 			InterfaceName: "eth0",
 			InterfaceType: "ethernet",
 			Status:        "unknown",
 		}
-		if v4 := parsed.To4(); v4 != nil {
-			// To4() 对 **4-in-6 映射形式**（`::ffff:1.2.3.4`）也非 nil —— 那种地址本来就是
-			// 一个 IPv4，落 ipv4_address 并归一成 `1.2.3.4` 是正确读法（net.ParseIP 让它
-			// To4() 非 nil 的语义就是「这个地址可以当 v4 用」）。
-			network.IPv4Address = v4.String()
-		} else {
-			network.IPv6Address = parsed.String()
-		}
-		return tx.Create(network).Error
-	})
+		isNew = true
+	} else if err != nil {
+		return err
+	}
+	// To4() 对 **4-in-6 映射形式**（`::ffff:1.2.3.4`）也非 nil —— 那种地址本来就是
+	// 一个 IPv4，落 ipv4_address 并归一成 `1.2.3.4` 是正确读法。
+	if v4 := parsed.To4(); v4 != nil {
+		network.IPv4Address = v4.String()
+		network.IPv6Address = ""
+	} else {
+		network.IPv4Address = ""
+		network.IPv6Address = parsed.String()
+	}
+	if isNew {
+		return tx.Create(&network).Error
+	}
+	return tx.Model(&models.AssetNetwork{}).
+		Where("id = ?", network.ID).
+		Updates(map[string]interface{}{
+			"ipv4_address": network.IPv4Address,
+			"ipv6_address": network.IPv6Address,
+		}).Error
 }
 
-func (s *assetService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Asset, error) {
-	if len(updates) == 0 {
+func (s *assetService) Update(ctx context.Context, id string, updates map[string]interface{}, ipAddress *string) (*models.Asset, error) {
+	if len(updates) == 0 && ipAddress == nil {
 		asset, _, err := s.Get(ctx, id)
 		return asset, err
 	}
-	var asset models.Asset
-	if err := s.db.WithContext(ctx).First(&asset, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	assetUUID, err := uuid.Parse(id)
+	if err != nil {
+		return nil, ErrInvalidInput
 	}
-	if err := s.db.WithContext(ctx).Model(&asset).Updates(updates).Error; err != nil {
-		// net_box_id 上的唯一索引（migrations/000015）让 PATCH 也能撞 23505：
-		// 与 Create 一致映射成 409，别让客户端看到 500（审计 F-8）。
-		if isUniqueViolation(err) {
-			return nil, ErrAlreadyExists
+	var result *models.Asset
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var asset models.Asset
+		if err := tx.First(&asset, "id = ?", assetUUID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
 		}
-		return nil, err
+		if len(updates) > 0 {
+			if err := tx.Model(&asset).Updates(updates).Error; err != nil {
+				// net_box_id 上的唯一索引（migrations/000015）让 PATCH 也能撞 23505：
+				// 与 Create 一致映射成 409，别让客户端看到 500（审计 F-8）。
+				if isUniqueViolation(err) {
+					return ErrAlreadyExists
+				}
+				return err
+			}
+		}
+		if err := s.updateFirstNetworkIP(tx, asset.ID, ipAddress); err != nil {
+			return err
+		}
+		result = &asset
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
-	return &asset, nil
+	return result, nil
 }
 
 func (s *assetService) Delete(ctx context.Context, id string) error {

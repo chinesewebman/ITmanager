@@ -170,8 +170,30 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 	// **只读投影字段**（M63 只修读取侧）；写入侧（第一张网卡）是 G-Asset-NetworksPersist 的
 	// 事，那一轮会把这里换成「取出来写网卡」。在那之前，前端若把表单里的 IP 回传上来，
 	// 应当被忽略，而不是把请求打成 500。
+	// M63 (T-76): 取出 ip_address —— 现在它不再是被剥掉的虚拟字段，而要送进 service.Update 写
+	// 第一张网卡（M66 / G-Asset-UpdateIpPersist）。
+	//
+	// ip_address 在 `assets` 表里**没有**这一列，`db.Updates(map)` 不丢模型外键
+	// （GORM v1.30.0 callbacks/update.go：LookUpField 为 nil 时照样 append Assignment）
+	// → 会生成 `SET "ip_address"=$n` → PG 42703 → 500。所以这里**先取出**、再删键、再单独送进
+	// service.Update 的新参数位。
+	var ipPtr *string
+	if raw, ok := updates["ip_address"]; ok {
+		if raw == nil {
+			ipPtr = nil
+		} else if s, ok := raw.(string); ok {
+			ipPtr = &s
+		} else {
+			apierr.BadRequest(c, "ip_address 必须是字符串")
+			return
+		}
+	}
 	delete(updates, "ip_address")
-	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates)
+	if invalidIPAddress(ipPtr) {
+		apierr.Unprocessable(c, "IP 地址格式不合法")
+		return
+	}
+	asset, err := h.svc.Update(c.Request.Context(), c.Param("id"), updates, ipPtr)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			apierr.NotFound(c, "资产不存在")
