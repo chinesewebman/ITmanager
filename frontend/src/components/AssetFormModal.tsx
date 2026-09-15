@@ -1,5 +1,6 @@
 import { Modal, Form, Input, Select } from 'antd'
 import { useEffect } from 'react'
+import { ipRules } from '../utils/validators'
 import type { Asset } from './AssetTable'
 
 const ASSET_TYPES = [
@@ -87,13 +88,11 @@ export function AssetFormModal({ open, editing, submitting, onCancel, onSubmit }
         >
           <Select options={ASSET_TYPES} placeholder="选择类型" />
         </Form.Item>
+        {/* M62：原内联 /^(\d{1,3}\.){3}\d{1,3}$/ 只查形状（`256.0.0.1` 能过），改用共享 `ipRules` */}
         <Form.Item
           name="ip_address"
           label="IP 地址"
-          rules={[
-            { required: true, message: '请输入 IP 地址' },
-            { pattern: /^(\d{1,3}\.){3}\d{1,3}$/, message: 'IP 格式不正确' },
-          ]}
+          rules={ipRules}
         >
           <Input placeholder="192.168.1.10" />
         </Form.Item>
