@@ -41,6 +41,11 @@ describe('M62 IPV4_PATTERN 边界', () => {
     '::1', // v4 pattern 不认 v6
     'not-an-ip',
     '',
+    // M65: 前导零（除单 0）按 RFC 6943 + Go net.ParseIP 口径拒；M64 422 误伤的根因
+    '010.1.1.1', // 单前导零 —— Go net.ParseIP 拒
+    '00.0.0.0', // 双前导零 —— Go net.ParseIP 拒
+    '192.168.001.1', // 中段前导零 —— Go net.ParseIP 拒
+    '001.002.003.004',
   ]
 
   it.each(ok)('接受 %s', (ip) => {

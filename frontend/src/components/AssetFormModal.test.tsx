@@ -58,4 +58,17 @@ describe('M62 AssetFormModal IP 校验', () => {
     expect(screen.queryByText(IP_ERROR)).not.toBeInTheDocument()
     expect(onSubmit).not.toHaveBeenCalled()
   })
+
+  // M65: 前导零（除单 0）按 RFC 6943 + Go net.ParseIP 口径拒；M64 422 误伤的根因
+  it('IPv4 010.1.1.1 → 前导零（与 net.ParseIP 口径一致）显示格式错误且不提交', async () => {
+    await fillForm('010.1.1.1')
+    expect(await screen.findByText(IP_ERROR)).toBeInTheDocument()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('IPv4 00.0.0.0 → 双前导零（与 net.ParseIP 口径一致）显示格式错误且不提交', async () => {
+    await fillForm('00.0.0.0')
+    expect(await screen.findByText(IP_ERROR)).toBeInTheDocument()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
 })
