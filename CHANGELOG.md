@@ -323,6 +323,57 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M66 — G-Asset-UpdateIpPersist PUT /assets/:id 写网卡 IP（M63/M64 派生 TODO）（2026-09-16）
+
+**摩擦（M63 + M64 派生，本轮结案）**: M63 把 `Asset.IpAddress` 收成虚拟字段、M64 把 POST 的
+IP 写通了 —— 但 PUT 还停在 M63 的 `delete(updates, "ip_address")` 上：表单在编辑态改 IP，
+提交后字段静默丢，卡表还是原来的 IP，UI 上的输入又跟 GET 回来的 IP 对不上。这是 M63
+防 42703 的代价（不让模型外键进 `db.Updates(map)`），同时是 M64 留下的"POST/PUT 不对称"。
+
+**本轮解决方案**: handler 把 `ip_address` 从 `updates map` 抽出 → 走 `service.Update` 的独立
+参数位 `ipAddress *string`；service 在 `tx` 内复用 M64 的 `updateFirstNetworkIP`（POST/PUT
+共用），SELECT 网卡 → 写 v4/v6 分流。同时把 `updateFirstNetworkIP` 从 `Create` 抽出成
+service 方法，避免 M64/M66 两份实现漂移。
+
+**关键设计变化**:
+
+- `service.AssetService.Update(ctx, id, updates map[string]interface{}, ip *string)`
+  —— 多一个独立参数位（`*string`：nil = 不动网卡；空串 = 不动；非空 = 真写）
+- `updateFirstNetworkIP(tx, assetID, ipAddress)` —— M64/M66 唯一入口；
+  - nil/空串：no-op（不查网卡、不写库）；非空非法：返 `ErrInvalidInput`（handler 映 422）
+  - v4/v6 分流同 M64（`parsed.To4()` 非 nil 落 `ipv4_address`，清 `ipv6_address` 反之亦然）
+  - 第一张网卡判据沿用 M45 T-45（`created_at ASC, id ASC`），与 `listNetworks` 对齐
+- handler `UpdateAsset`: `ip_address` 从 updates map **抽出**（不是 M63 的 `delete`）→
+  `service.Update(ctx, id, updates, &ip)`
+- M63 (T-76) 风险保持封死：`assets` 表的 UPDATE SQL **仍不带** `ip_address` 列
+  （独立参数位走 `tx.First(&network)` + `tx.Create/Update` 网卡表，不是 `tx.Updates(map)`）
+
+**commit (`a63a7d`)**: 1 backend commit（4 files / +206 / -89），含：
+
+- `asset_service.go` — 抽出 `updateFirstNetworkIP` 给 Create/Update 复用；`Update` 加
+  `ipAddress *string` 参数位；tx 包整批（含网卡 SELECT/UPDATE）
+- `asset_handler.go` — `UpdateAsset` 从 updates map 抽 ip_address（删 M63 `delete` 兜底）
+- `asset_service_test.go` — `TestM66_*` 抽键走独立参数；旧 5 callers 改 4 参签名；M63 的
+  "Updates map 不带 ip_address" 钉子保留并改名 `TestM66_走独立参数不混进map`
+- `asset_handler_test.go` — `TestM63_*` 两条 → `TestM66_*`：mock 路径断言 map 不含
+  ip_address 但独立参数位收到值；路由级钉子断言 UPDATE assets 不带 ip_address + INSERT
+  asset_networks 多一条
+
+**验证**:
+
+- backend `go test -count=1 ./...`: **27 packages ok**（10 个 packages 含 service /
+  handlers / api 全绿；M66 mutation inversion 实证：bypass `updateFirstNetworkIP` → 测试
+  立刻红 → 还原 → 全绿）
+- 前端未动；`tsc --noEmit`: 0 错（无 frontend 文件改动）
+- graphify multigraph 0 anomalies / codegraph 6,532 nodes / 16,226 edges
+
+**派生 TODO**（留 future）:
+
+- G-UI-AssetIpConflictGuard: 同 IP 多资产校验（M63 `pickPrimaryIP` 不去重；M66 写网卡
+  不查重 —— 两条网卡都拿同一 IP 不会报错，要靠这条 future 兜）
+- G-UI-AssetIpValidatorParity-Mapped（M65 派生保留）：IPv4-mapped `::ffff:1.2.3.4` +
+  zone id `fe80::1%eth0` 口径（M66 复用 M64 的 v4/v6 分流，覆盖同款 `To4()` 行为）
+
 ### M65 — G-UI-AssetIpValidatorParity IP regex 与 Go `net.ParseIP` 口径一致（M64 派生 TODO）（2026-09-15）
 
 **摩擦（M64 派生，本轮结案）**: M64 把 IP 走通了写入路径 —— POST /assets 含 `ip_address` 现在真
