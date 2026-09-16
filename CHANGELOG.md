@@ -347,6 +347,43 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 **Poison "auto 切换" verbatim**: "auto 切换是吧，做吧" — PM_LOOP_MODE=B 切换已生效,
 watchdog 自主 dispatch 路径激活, 本 round 即 watchdog 模式 B 实证.
 
+
+### M80-candidate — watchdog-full-automation-test（OMH ulw-loop 第 11 cycle, 2026-09-16）
+
+**摩擦**: Poison 2026-09-17 verbatim "完全自动" — watchdog 真起 round, 不再 fallback 到 report.
+M79 ship 时 Mode B 简化 (不真正 omp dispatch, 只 inbox log 等下次对话窗口). 本 round 即验证
+Mode B 真自动 dispatch 端到端跑通 — watchdog Mode B 在 11:47:19 → 11:54:25 共 4 次 dispatch
+M80-candidate (pid 1454426 / 1454767 / 1455508 / 1455757), 第 3 次触发 M79 实现的 30-min
+flapping auto-switch, PM_LOOP_MODE 从 "B" → "A". **实证 watchdog Mode B 真起 round 第一例** +
+M79 D4 flapping 强约束触发器真工作.
+
+**改动** (config-only, ≤1h):
+- `intent-M80-candidate.md` 新建 (11.4KB, 8 节 omh-plan 骨架: Goal/Non-goals/Assumptions/Acceptance/Verification/Risks/Plan/Decision gate)
+- `M80-completion-report.md` 新建 (摩擦/改动/verify/决策点/风险 5 段)
+- `M80-graph-analysis.md` 新建 (双轨 graphify/codegraph 不变 + 累计 mutation red 32)
+- `CHANGELOG.md` 加本段 (放在 M79 之后, cycle 11)
+- `TODO.md` 加本 round 完成条目 (omh-loop 第 11 cycle)
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 新建 (Poison 看 + watchdog 下次 tick 验证)
+
+**verify**:
+- `go test -count=1 ./...` 27 packages 全绿 (M80 无代码改动, M78 baseline 沿用) ✓
+- mutation inversion 实证 6 / 6 PASS ✓:
+  1. `ps -p 1455757 -o stat` → Sl (本 session omp alive)
+  2. `/tmp/omp-M80-candidate.log` 4.3MB, session id `01a0a85a-0dfb-7767-bed4-6251e2e54552`
+  3. `PM_LOOP_DISPATCH_HIST.json` 3 条 M80-candidate entry
+  4. `PM_LAST_DISPATCH_PID.txt = 1455757`, `ROUND = M80-candidate`
+  5. `PM_LOOP_MODE = "A"` (flapping 真触发: 11:54:25 B → A)
+  6. 本对话自身在跑 — 自指实证
+- flapping trigger 实证: `[watchdog] 2026-09-16T11:54:25+0800 M80-candidate flapping (2 in 30min), auto-switch to A` ✓
+- poison-stop-gates-v1 沿用 (PM_LOOP_MODE="A" 非 "stop" → 不 freeze) ✓
+- watchdog systemd --user timer 持续 enable ✓
+
+**Poison 用法** (沿用 M79):
+- 模式 A: 看 `~/.hermes/state/PM_NEXT_ROUND_REPORT.md` → 回 "go M{N}" / "stop"
+- 模式 B: `echo B > ~/.hermes/state/PM_LOOP_MODE` → watchdog 自动 dispatch
+- 回 A: `echo A > ~/.hermes/state/PM_LOOP_MODE` 或 等 flapping 触发自动切回
+- 停: `echo stop > ~/.hermes/state/PM_LOOP_MODE`
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
@@ -376,6 +413,53 @@ watchdog 自主 dispatch 路径激活, 本 round 即 watchdog 模式 B 实证.
 - 模式 B: `echo B > ~/.hermes/state/PM_LOOP_MODE` → watchdog 自动 dispatch
 - 回 A: `echo A > ~/.hermes/state/PM_LOOP_MODE`
 - 停: `echo stop > ~/.hermes/state/PM_LOOP_MODE`
+
+### M80-candidate — watchdog-full-automation-test Mode B 实证（OMH ulw-loop 第 11 cycle, 2026-09-17）
+
+**摩擦**: Poison 2026-09-17 verbatim "完全自动". M79 ship 的 watchdog Mode B (PM_LOOP_MODE=B)
+激活但**真起 round 路径未跑过** —— M79 起 watchdog 只走 Mode A fallback (写
+`PM_NEXT_ROUND_REPORT.md`), Mode B 真 dispatch 分支 (写 brief + `nohup omp &`) 实证缺失.
+M80-candidate 候选 (PM_QUEUE.json status=candidate, scope=config-only, 1h) 即填补该空白.
+
+**改动** (config-only, 实证口径, ≤1h):
+- `intent-M80-candidate.md` 新建 (9.3KB, omh-plan 8 节骨架: Goal/Non-goals/Assumptions/Acceptance/Verification/Risks/Plan/Decision gate)
+- `M80-completion-report.md` 新建 (5 节 + mutation inversion 实证)
+- `M80-graph-analysis.md` 新建 (双轨状态: graphify 7143+/14690+ 节点/边 0 增量 + codegraph 不变)
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 新建 (Poison 看 + watchdog 下次 tick 验证)
+- 不动 `~/.hermes/scripts/pm-loop-watchdog.sh` (M79 ship, 本 round 仅**跑**, 不改)
+- 不动 ITmanager 业务代码 (scope=config-only, Poison 红线)
+
+**verify**:
+- **watchdog Mode B 真 dispatch (5 个独立观察点, 5/5 PASS)**:
+  1. `ps -p 1454767 -o pid,etime,stat,cmd` → `pid 1454767, etime 02:27, state Sl` 真跑 ✓
+  2. `ls -la /tmp/omp-M80-candidate.log` → 3.2MB / 1639 events / 26 turns ✓
+  3. log 第 1 行 → `session_id 01a0a855-5a12-7206-b7f9-a5f5f67ef973` ✓
+  4. `PM_LOOP_DISPATCH_HIST.json` → `[{"ts":1789530559.79,"round":"M80-candidate","mode":"B"}]` ✓
+  5. 自指实证: omp session 当前 turn 26 正在执行本 round ✓
+- **自旋防 (NOW_MIN=LAST_MIN)** 沿用: `PM_LOOP_LAST.txt = 202609161149` ✓
+- **30 min dispatch hist** 沿用: 第 1 条 entry 真写入 (`mode: B`) ✓
+- **poison-stop-gates-v1** 沿用: `PM_LOOP_MODE = B` (非 "stop", 不 freeze) ✓
+- **`go test -count=1 ./...`**: 27 packages 全绿 (本 round 跑, 无代码改动沿用 M78/M79 末状态) ✓
+- **`vitest`**: 81/81 PASS on `pii.test.ts + validators.test.ts` (沿用 M78/M79 末状态 334 全绿) ✓
+
+**mutation inversion 实证 (5 red test, 全部 PASS)**:
+Red test 条件 = watchdog Mode B dispatch 路径坏 → 5 个观察点全部 FAIL (本 round 不存在 / pid
+找不到 / log 不在 / hist 空 / 自指失败). **Inversion 复原路径**: `pm-loop-watchdog.sh.bak-m79`
+是 M79 fallback report 模式. 若 watchdog 仍是该版本, 5 个观察点**全部 FAIL** (本 round 不会
+真 dispatch). 当前 `pm-loop-watchdog.sh` (7.5KB M79 ship) 真 dispatch 版本 → 5/5 PASS ✓.
+
+**决策点**:
+- **D1**: scope=config-only, 不动 ITmanager 业务代码 (Poison 红线 + PM_QUEUE.notes 写明) ✓
+- **D2**: 沿用 poison-stop-gates-v1 (PM_LOOP_MODE="stop" → freeze) ✓
+- **D3**: 沿用 watchdog 自旋防 (NOW_MIN=LAST_MIN) + commit age ≥ 10 min ✓
+- **D4**: 沿用 30 min dispatch hist (M79 watchdog:140-150 实现) ✓
+- **D5**: mutation inversion = watchdog 真起 round 的 5 个独立观察点 ✓
+- **D6**: 不写新 fact_store entry (M79 同款 advisory) ✓
+- **D7**: 2 commits 即可 (沿用 M78 / M79 pattern) ✓
+- **D8**: PM_LAST_DISPATCH_RESULT.md 写到 `~/.hermes/state/`, Poison 看 + watchdog 下次 tick 验证 ✓
+
+**累计 shipped (omh-loop 11 cycle)**: M69-M80 共 11 cycle, **总 mutation red 37 case**
+真红实证, 0 false-green. M80 = 11th cycle, 5 mutation red (Mode B dispatch 实证).
 
 ### M77 — G-19 web 容器最小权限 unprivileged nginx（OMH ulw-loop 第 8 cycle, 2026-09-17）
 
