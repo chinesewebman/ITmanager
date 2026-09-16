@@ -196,6 +196,8 @@ func TestValidate_ReleaseMode_GLPIAppToken_Missing_ReturnsError(t *testing.T) {
 	cfg := minimalValidConfig()
 	cfg.Server.Mode = "release"
 	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	// G-15 / M78：glpi 校验改 URL-aware。URL 配置了才校验 token。
+	cfg.Integrations.GLPI.URL = "http://glpi"
 	cfg.Integrations.GLPI.AppToken = "" // 缺失
 	cfg.Integrations.GLPI.UserToken = "user-tok"
 	err := cfg.Validate()
@@ -208,6 +210,7 @@ func TestValidate_ReleaseMode_GLPIUserToken_Missing_ReturnsError(t *testing.T) {
 	cfg := minimalValidConfig()
 	cfg.Server.Mode = "release"
 	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.URL = "http://glpi"
 	cfg.Integrations.GLPI.AppToken = "app-tok"
 	cfg.Integrations.GLPI.UserToken = "" // 缺失
 	err := cfg.Validate()
@@ -220,6 +223,7 @@ func TestValidate_ReleaseMode_BothGLPITokensMissing_SingleError(t *testing.T) {
 	cfg := minimalValidConfig()
 	cfg.Server.Mode = "release"
 	cfg.Integrations.Netbox.Token = "real-netbox-token-123"
+	cfg.Integrations.GLPI.URL = "http://glpi"
 	// AppToken + UserToken 都空
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -228,7 +232,57 @@ func TestValidate_ReleaseMode_BothGLPITokensMissing_SingleError(t *testing.T) {
 		"两个 GLPI token 都缺应只报 1 条（不重复）")
 }
 
+// ==================== G-15 / M78：URL-aware 集成校验 ====================
+
+func TestValidate_ReleaseMode_NetboxURL_Empty_NoTokenRequired(t *testing.T) {
+	// G-15：netbox URL 未配置 → 整个集成视为禁用 → 跳过 token 校验
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.URL = "" // 未配置
+	cfg.Integrations.Netbox.Token = "" // 空 token 也 OK（集成可选）
+	cfg.Integrations.GLPI.URL = "" // GLPI 也禁用
+	cfg.Integrations.GLPI.AppToken = ""
+	cfg.Integrations.GLPI.UserToken = ""
+	assert.NoError(t, cfg.Validate(), "URL 未配置时集成可选，token 校验跳过")
+}
+
+func TestValidate_ReleaseMode_NetboxPlaceholder_ReturnsError(t *testing.T) {
+	// G-15：netbox URL 配置 + 占位 token → 拒启（不能放过占位值）
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.URL = "http://netbox"
+	cfg.Integrations.Netbox.Token = "your-secret-token-here"
+	cfg.Integrations.GLPI.URL = "" // GLPI 禁用
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "占位值")
+}
+
+func TestValidate_ReleaseMode_GLPIPlaceholder_ReturnsError(t *testing.T) {
+	// G-15：glpi URL 配置 + 占位 token → 拒启
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.URL = "" // netbox 禁用
+	cfg.Integrations.GLPI.URL = "http://glpi"
+	cfg.Integrations.GLPI.AppToken = "change-in-production-app-tok"
+	cfg.Integrations.GLPI.UserToken = "user-tok-real"
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "占位值")
+}
+
 // ==================== v2.2: Zabbix release-mode 校验 ====================
+
+func TestValidate_ReleaseMode_GLPIURL_Empty_NoTokenRequired(t *testing.T) {
+	// G-15 / M78：glpi URL 未配置 → 整个集成视为禁用 → 跳过 token 校验
+	cfg := minimalValidConfig()
+	cfg.Server.Mode = "release"
+	cfg.Integrations.Netbox.URL = "" // netbox 也禁用
+	cfg.Integrations.GLPI.URL = "" // 未配置
+	cfg.Integrations.GLPI.AppToken = "" // 空 token 也 OK
+	cfg.Integrations.GLPI.UserToken = ""
+	assert.NoError(t, cfg.Validate(), "URL 未配置时集成可选，token 校验跳过")
+}
 
 func TestValidate_ReleaseMode_ZabbixDefault_AdminZabbix_ReturnsError(t *testing.T) {
 	cfg := minimalValidConfig()

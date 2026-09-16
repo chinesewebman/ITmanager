@@ -82,9 +82,11 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       - NMP_SERVER_HOST=0.0.0.0
-      # 生产必须显式设 release：debug 下弱集成凭据不会被启动期拒绝、
-      # 登录 cookie 的 Secure 也不会开。当前默认 debug 的原因见 R-5（G-15 解耦后可翻）。
-      - NMP_SERVER_MODE=${NMP_SERVER_MODE:-debug}
+      # G-15 / M78：release 模式校验解耦（netbox / glpi 改 URL-aware）后，
+      # compose 默认翻 release —— debug 下的「弱集成凭据不拒」/「登录 cookie
+      # Secure 不开」两条都不再需要兜底。若集成真未启用，把对应 NMP_INTEGRATIONS_*_URL
+      # 留空即可（详见 08-部署运维.md §8.3.2）。
+      - NMP_SERVER_MODE=${NMP_SERVER_MODE:-release}
       - NMP_DATABASE_HOST=postgres
       - NMP_DATABASE_PORT=5432
       - NMP_DATABASE_USER=nmp

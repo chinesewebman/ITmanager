@@ -229,11 +229,23 @@ func (c *Config) Validate() error {
 
 	// 生产模式额外校验集成 token
 	if c.Server.Mode == "release" {
-		if c.Integrations.Netbox.Token == "" {
-			errs = append(errs, "integrations.netbox.token 在 release 模式下不能为空")
+		// G-15 / M78：netbox / glpi 改 URL-aware 校验（与 zabbix 一致）：
+		//   URL 未配置 → 整个集成视为禁用 → 跳过 token 校验
+		//   URL 配置了 → token 必须真填, 占位值也拒
+		// 这解耦了 release 与「集成必须启用」, compose 默认可翻 release.
+		if c.Integrations.Netbox.URL != "" { // 未配置则跳过（集成可选）
+			if c.Integrations.Netbox.Token == "" {
+				errs = append(errs, "integrations.netbox.token 在 release 模式下不能为空（通过 NMP_INTEGRATIONS_NETBOX_TOKEN 注入）")
+			} else if isPlaceholderToken(c.Integrations.Netbox.Token) {
+				errs = append(errs, "integrations.netbox.token 仍为占位值（首次部署必须修改）")
+			}
 		}
-		if c.Integrations.GLPI.AppToken == "" || c.Integrations.GLPI.UserToken == "" {
-			errs = append(errs, "integrations.glpi.*_token 在 release 模式下不能为空")
+		if c.Integrations.GLPI.URL != "" { // 未配置则跳过（集成可选）
+			if c.Integrations.GLPI.AppToken == "" || c.Integrations.GLPI.UserToken == "" {
+				errs = append(errs, "integrations.glpi.*_token 在 release 模式下不能为空（通过 NMP_INTEGRATIONS_GLPI_APP_TOKEN / NMP_INTEGRATIONS_GLPI_USER_TOKEN 注入）")
+			} else if isPlaceholderToken(c.Integrations.GLPI.AppToken) || isPlaceholderToken(c.Integrations.GLPI.UserToken) {
+				errs = append(errs, "integrations.glpi.*_token 仍为占位值（首次部署必须修改）")
+			}
 		}
 		// v2.2: Zabbix 用 user.login 鉴权，user/password 是真凭据；占位/默认密码必须拒掉
 		if c.Integrations.Zabbix.URL != "" { // 未配置则跳过（集成可选）
@@ -261,6 +273,18 @@ func trimTrustedProxies(list []string) []string {
 		out[i] = strings.TrimSpace(raw)
 	}
 	return out
+}
+
+// isPlaceholderToken (G-15 / M78)：识别 netbox / glpi token 的占位值。
+// 与 auth.jwt.secret 占位检测 (L202-204) 同思路：占位特征是「看上去像模板」的字符串。
+// 不做穷举 (会漏)，只抓最常见：含 "your-" / "change-in-production" / "placeholder" / "example"
+// 这四种特征任一即拒 —— 真实凭据不会带这些子串。
+func isPlaceholderToken(token string) bool {
+	low := strings.ToLower(token)
+	return strings.Contains(low, "your-") ||
+		strings.Contains(low, "change-in-production") ||
+		strings.Contains(low, "placeholder") ||
+		strings.Contains(low, "example")
 }
 
 // validateTrustedProxies 校验 server.trusted_proxies 的每一项（G-7）。
