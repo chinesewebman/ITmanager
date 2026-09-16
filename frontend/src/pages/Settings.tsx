@@ -3,6 +3,7 @@ import { Card, Tabs, Form, Input, InputNumber, Button, Switch, Select, Table, Ta
 import { PlusOutlined, BellOutlined, ApiOutlined, KeyOutlined, ReloadOutlined, ThunderboltOutlined, ApiFilled, AuditOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { notificationApi, integrationApi, apiKeyApi, authApi, type APIKey } from '../services/api'
+import { SYNC_KEY_ZABBIX_TRUNCATED } from '../services/syncKeys'
 import { formatDateTime } from '../utils/time'
 import { EMAIL_PATTERN, urlRules, emailRules, portRules, arrayOfPatternRules } from '../utils/validators'
 import { PageHeader } from '../components/PageHeader'
@@ -291,7 +292,8 @@ function Settings() {
       // 0/1 标志，写成「另有 ${truncated} 条未导入」会把「静默丢票」反转成「少报丢票」：
       // 源侧 6000 条时 UI 显示「另有 1 条」，运维看到 1 就不会去查那 1000 条。
       // 注意与 handleSyncGLPI 的差别是有意的：那边插值的 glpi_skipped **是条数**。
-      const truncated = res?.data?.data?.synced?.zabbix_truncated ?? 0
+      // G-41/M81：跨语言键名走 services/syncKeys 常量, 防拼写漂移静默失效。
+      const truncated = res?.data?.data?.synced?.[SYNC_KEY_ZABBIX_TRUNCATED] ?? 0
       // M33/D-6 残余：被截断的字段处数（不是条数、不是 0/1 标志）必须露出来。
       // zabbix_truncated 标志 → 源侧条数上限（0/1）；zabbix_field_truncations → 字段级
       // 截断处数（潜在数据完整性问题）。两者语义不同，必须分别露出来。

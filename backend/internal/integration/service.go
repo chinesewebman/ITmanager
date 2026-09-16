@@ -625,9 +625,9 @@ func (s *IntegrationService) SyncAll(ctx context.Context) (map[string]int, error
 		errs = append(errs, fmt.Errorf("zabbix: %w", err))
 	} else {
 		results["zabbix"] = n
-		// M27/D-6：截断标志一并透出 —— 静默丢告警比同步报错更难发现。
+		// G-41/M81: 跨语言裸字符串 → 常量, 防改名静默失效 (前端 ?? 0 兜底看不到丢告警)。
 		// 失败分支刻意不写：与 glpi_skipped 同形（失败时连键都没有，前端 ?? 0 兜住）。
-		results["zabbix_truncated"] = trunc
+		results[KeyZabbixTruncated] = trunc
 		// M33/G-45：键名带 _field_truncations 以区别于上面那个 0/1 标志（D-5）。
 		results["zabbix_field_truncations"] = ft
 	}

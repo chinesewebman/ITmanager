@@ -84,8 +84,9 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 	case "zabbix":
 		// M27/D-6：truncated 是 0/1 标志（不是条数），与 glpi_skipped 同位置透出。
 		// M33/G-45：field_truncations 是字段处数，与之并列但语义不同（D-5 的键名区分）。
+		// G-41/M81：zabbix_truncated 走 integration.KeyZabbixTruncated 常量, 跨语言契约守住。
 		count, truncated, ft, e := h.svc.SyncFromZabbix(ctx)
-		results = map[string]int{"zabbix": count, "zabbix_truncated": truncated, "zabbix_field_truncations": ft}
+		results = map[string]int{"zabbix": count, integration.KeyZabbixTruncated: truncated, "zabbix_field_truncations": ft}
 		err = e
 	case "zabbix_metrics":
 		// v2.3: Zabbix 兜底采集，单独走 item.get → metric_snapshots
