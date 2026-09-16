@@ -323,6 +323,28 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M75 — PII 脱敏 Users.tsx 表格 username/email 默认脱敏（OMH ulw-loop 第 7 cycle, 2026-09-17）
+
+**摩擦**: `/users` admin 页表格里 `username` / `email` 直接打明文. 旁观者路过屏幕 /
+远程协助 / 屏幕录制就泄露 PII — 这是 admin 操作页常见反模式.
+
+**改动** (frontend-only, ≤2h):
+- 新文件 `frontend/src/utils/pii.ts` (~2.4KB) — 导出 `maskEmail` + `maskUsername`
+- 新文件 `frontend/src/utils/pii.test.ts` — 14 cases (含 mutation 反证)
+- `frontend/src/pages/Users.tsx` — import maskEmail/maskUsername + 表格列 (2 处) +
+  Popconfirm (4 处) 全部走脱敏
+- `frontend/src/pages/Users.test.tsx` — 14 assertion 改 masked 期望
+
+**verify**:
+- `vitest run src/utils/pii.test.ts` 14/14 PASS
+- `vitest run src/pages/Users.test.tsx` 14/14 PASS
+- `tsc --noEmit` 0 错
+- **mutation inversion 12 red** (revert maskUsername in cell → 12 tests FAIL)
+- **mutation inversion 4 red** (revert maskUsername function → 4 pii tests FAIL)
+
+**T-80 (新 trap)**: 渲染层脱敏必须走 `utils/pii` 唯一出口, 不在 page 内联字符串
+(`v.slice(0,2) + '*'.repeat(...)` 是漂移源头).
+
 ### M74 — IntentSpec Author Skill 骨架升级（OMH ulw-loop 第 6 cycle, 2026-09-17）
 
 **摩擦**: OMH 没有 `intent-spec-author` skill. 起新 round 时 (e.g. "起 M75 = PII 脱敏")

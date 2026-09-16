@@ -384,7 +384,9 @@ cd frontend && npm run dev
 - [x] **M74 = intent-spec-author skill 骨架升级 (OMH ulw-loop 第 6 cycle, 2026-09-17)** — 新建 `~/.omh/skills/planner/intent-spec-author/SKILL.md` (7KB, 9 节), `phase: intent`, `role: planner`, `quality_tier: acceptance-gated`, see_also model-calibration + omh-plan. 不动 omh-plan body (omh install --force 风险). 钉 8 节骨架: Goal/Non-goals/Assumptions/Acceptance/Verification/Risks/Plan/Decision gate. Round ID + scope + budget 第一段必填, vague acceptance 拒绝.
  (M65 派生, ≤2h frontend, OMH ulw-loop 第 4 cycle)** — IPv4-mapped `::ffff:1.2.3.4` + zone id `fe80::1%eth0` 口径. frontend validators + AssetFormModal 接受 mapped 形式.
  (T-73 派生, ≤1h frontend, OMH ulw-loop 第 3 cycle)** — T-73 修了 admin 用户能通过 CommandPalette 访问 /audit 但 UI 仍隐. 给 admin sidebar 加 Audit 链接. Assets / Alerts 已 ship 同款 sidebar link, 复制模式.
-（OMH ulw-loop 第 2 cycle）**（2026-09-16, 待起）— M68/M69 之后业务库里仍可能存在历史同 IP 跨资产数据（守卫只在写入时检查）. 范围：≤2h, PM-direct backend-only. 写一次性脚本 SELECT 跨资产同 ipv4_address / ipv6_address, 输出报告不自动修（Poison 拍决策）. 复用 ErrIPConflict 语义做报告.
+（OMH ulw-loop 第 2 cycle）**（2026-09-16, 待起）— M68/M69 之后业务库里仍可能存在历史同 IP 跨资产数据（守卫只在写入时检查）. 范围：≤2h, PM-direct backend-only. 写一次性脚本 SELECT 跨资产同 ipv4_address / ipv6_address, 输出报告不自动修（Poison 拍决策）. 复用 ErrIPConflict 语义做报告.- [x] **M75 = PII 脱敏（OMH ulw-loop 第 7 cycle, 2026-09-17）** — `frontend/src/utils/pii.ts` 新建 (maskEmail/maskUsername) + 14 vitest cases + Users.tsx 表格列 (2) + Popconfirm (4) 全部走脱敏 + Users.test.tsx 14 assertion 改 masked 期望. 28 vitest PASS + tsc 0 错 + mutation inversion 12 red (Users.test) + 4 red (pii.test). T-80 新 trap: 渲染层脱敏必须走 `utils/pii` 唯一出口, 不在 page 内联字符串拼接.
+
+
 
 - [x] **G-UI-AssetIpValidatorParity-Mapped IPv4-mapped IPv6 前端口径对齐（OMH ulw-loop 第 4 cycle）**（2026-09-17, 已 ship M72）— M65 派生 TODO 闭环. `IPV6_BODIES` 加 dotted-quad 形式 `::ffff:${IPV4_BODY}`, hex-hex 形式已被现有第 9 条意外覆盖. mutation inversion 2 red (`::ffff:1.2.3.4` 真红). 累计 26 round ship (M47-M72).
 
