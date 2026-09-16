@@ -323,6 +323,27 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M77 — G-19 web 容器最小权限 unprivileged nginx（OMH ulw-loop 第 8 cycle, 2026-09-17）
+
+**摩擦**: `web` 容器是**唯一对外入口**, 但当前以 root 运行 + 无最小权限. nginx master
+以 root 跑会保留不必要的特权面 (cap_chown / cap_dac_override 全开) — 安全审计 P3.
+
+**改动** (docker + docs, ≤2h):
+- `frontend/Dockerfile`: `nginx:1.27-alpine` → `nginxinc/nginx-unprivileged:1.27-alpine` (UID 101) + EXPOSE 8080 + HEALTHCHECK 探 8080
+- `frontend/nginx.conf`: `listen 80` → `listen 8080` (unprivileged 不能绑 < 1024)
+- `docker-compose.yml` web 服务: ports `127.0.0.1:3000:80` → `127.0.0.1:3000:8080` + 6 项硬化 (read_only + 3 tmpfs + cap_drop [ALL] + security_opt [no-new-privileges])
+- `08-部署运维.md` §8.3.1 同步端口 + 加 G-19 段 + TLS 模板约束说明
+- **新文件** `backend/scripts/test_m77_compose_hardening.py` — 8 个钉死硬化项, mutation inversion 反证
+
+**verify**:
+- `docker compose config` 解析 0 错, web 服务 6 项硬化全部展开 ✓
+- `python3 backend/scripts/test_m77_compose_hardening.py` **8/8 PASS** ✓
+- **mutation inversion 6 red** (revert read_only/cap_drop/security_opt/port/Dockerfile/listen → 6 tests FAIL) ✓
+- 保留 G-7 静态 IP `172.28.0.10` 不破 ✓
+
+**TLS 模板冲突说明**: `nginx-tls.conf.example` 的 `listen 80/443` 需要 root, 用户挂载时
+**切回 `nginx:1.27-alpine` (root 镜像)**. doc 同步写明.
+
 ### M75 — PII 脱敏 Users.tsx 表格 username/email 默认脱敏（OMH ulw-loop 第 7 cycle, 2026-09-17）
 
 **摩擦**: `/users` admin 页表格里 `username` / `email` 直接打明文. 旁观者路过屏幕 /
