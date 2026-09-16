@@ -324,7 +324,7 @@ func (s *alertService) Acknowledge(ctx context.Context, id, userID string) error
 	}
 	// v1.1: 状态变更触发通知 trigger — 落 notification_logs (pending)
 	// 实际发送 (dingtalk/email) 由 v1.2 异步 worker 消费
-	return s.writeNotificationTrigger(ctx, alert.ID, "acknowledged", userID)
+	return s.writeNotificationTrigger(ctx, alert, "acknowledged", userID)
 }
 
 func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
@@ -378,7 +378,7 @@ func (s *alertService) Resolve(ctx context.Context, id, userID string) error {
 		payload.NotifyChannelIDs = s.loadRuleNotifyChannelIDs(ctx, *alert.AlertRuleID)
 	}
 	s.publish(eventbus.TopicAlertResolved, payload)
-	return s.writeNotificationTrigger(ctx, alert.ID, "resolved", userID)
+	return s.writeNotificationTrigger(ctx, alert, "resolved", userID)
 }
 
 // BulkAcknowledge C-P6: 批量确认告警（单条 SQL）。
@@ -486,7 +486,16 @@ func (s *alertService) BulkDelete(ctx context.Context, ids []string) (int64, err
 // writeNotificationTrigger v1.1 P2-B-3: 告警状态变更 → 落 notification_logs (pending).
 // 实际发送 (dingtalk/email) 是 v1.2 异步 worker 的事，这里只做 trigger + 落库。
 // 失败仅 log，不影响主流程 — 主调用方 (Acknowledge/Resolve) 已成功改 status。
-func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uuid.UUID, newStatus, userID string) error {
+//
+// M82: 按 alert.AlertRuleID 加载 rule.NotifyChannels 过滤推送渠道，
+// 语义与 worker.handleAlertEvent (M37-A + M38-B bus 路径) 完全对齐：
+//   - alert.AlertRuleID nil (历史 alert) → 推全启用 channels (兼容)
+//   - rule 加载失败 / parse 失败 → 推全启用 channels (fallback, 不漏告警)
+//   - rule.NotifyChannels 显式空数组 → 推 0 次 (运维主动清空语义)
+//   - 解析成功但 UUID 在 DB 找不到对应 channel → 推 0 次 (与 worker 端语义对齐)
+//
+// 历史 alert (alert_rule_id NULL) 与 M37-A ship 前行为完全一致 (全启用 fallback)。
+func (s *alertService) writeNotificationTrigger(ctx context.Context, alert *models.Alert, newStatus, userID string) error {
 	// 拿所有启用的 channel (去重 by ID)，给每个 channel 落一行 pending log
 	var channels []models.NotificationChannel
 	if err := s.db.WithContext(ctx).
@@ -496,15 +505,27 @@ func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uui
 		slog.Warn("notification trigger: query channels failed", slog.String("err", err.Error()))
 		return nil
 	}
+	// M82: 按 rule.NotifyChannels 过滤 (与 worker bus 路径对齐)
+	if alert.AlertRuleID != nil {
+		notifyIDs := s.loadRuleNotifyChannelIDs(ctx, *alert.AlertRuleID)
+		// loadRuleNotifyChannelIDs 返回 nil (rule 不存在 / parse 失败) → 不过滤 (fallback 全启用)
+		// 返回 []string{} (rule 显式空) → 过滤后 0 个 channel → 推 0 次
+		if notifyIDs != nil {
+			channels = filterNotificationChannelsByIDs(channels, notifyIDs)
+			if len(channels) == 0 {
+				return nil
+			}
+		}
+	}
 	if len(channels) == 0 {
 		return nil
 	}
 	now := time.Now()
 	logs := make([]models.NotificationLog, 0, len(channels))
-	content := fmt.Sprintf("Alert %s → %s by user %s", alertID, newStatus, userID)
+	content := fmt.Sprintf("Alert %s → %s by user %s", alert.ID, newStatus, userID)
 	for _, ch := range channels {
 		logs = append(logs, models.NotificationLog{
-			AlertID:     alertID,
+			AlertID:     alert.ID,
 			ChannelID:   ch.ID,
 			ChannelName: ch.Name,
 			Content:     content,
@@ -517,6 +538,29 @@ func (s *alertService) writeNotificationTrigger(ctx context.Context, alertID uui
 		return nil
 	}
 	return nil
+}
+
+// filterNotificationChannelsByIDs M82: 保留在 wantIDs 列表里的 channel (UUID 字符串比对)
+//
+// 与 notification.filterChannelsByIDs (M37-A ship) 语义对齐 — 两包不互相依赖, 重复 ~15 行
+// helper 是合理的隔离 (notification 包不能反向依赖 service 包)。
+// 顺序保留输入顺序 (运维 UI 通常按勾选顺序展示, 用户期望推送顺序稳定)。
+func filterNotificationChannelsByIDs(channels []models.NotificationChannel, wantIDs []string) []models.NotificationChannel {
+	if len(wantIDs) == 0 {
+		return nil
+	}
+	wantSet := make(map[string]struct{}, len(wantIDs))
+	for _, id := range wantIDs {
+		wantSet[id] = struct{}{}
+	}
+	out := make([]models.NotificationChannel, 0, len(wantIDs))
+	for i := range channels {
+		ch := &channels[i]
+		if _, ok := wantSet[ch.ID.String()]; ok {
+			out = append(out, *ch)
+		}
+	}
+	return out
 }
 
 func (s *alertService) Stats(ctx context.Context) ([]SeverityStat, []HourlyStat, error) {
