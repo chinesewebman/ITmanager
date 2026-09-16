@@ -323,6 +323,26 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M72 — G-UI-AssetIpValidatorParity-Mapped IPv4-mapped IPv6 前端口径对齐（OMH ulw-loop 第 4 cycle, 2026-09-17）
+
+**摩擦**: backend `service.updateFirstNetworkIP` 用 `net.ParseIP(ip)` 解析, 收 IPv4-mapped
+形式 `::ffff:1.2.3.4` (To4() 非 nil, 落 v4 分流). 但前端 `IPV6_PATTERN` 当前 10 条交替式
+不含 IPv4-mapped dotted-quad 形式, 业务表单填 `::ffff:1.2.3.4` 会前端红 → 后端通 = 假阳性.
+
+**改动** (frontend-only, ≤2h):
+- `utils/validators.ts`: `IPV6_BODIES` 数组加 1 条交替式 `::ffff:${IPV4_BODY}` 锚 dotted-quad 形式.
+  hex-hex 形式 (`::ffff:0:0` / `::ffff:ffff:ffff`) 已被现有第 9 条 `:(?::HEX){1,7}` 意外覆盖
+  (mutation 反证: 删新增后 hex-hex 用例仍 PASS).
+- `utils/validators.test.ts`: 新 describe "M72 IPv4-mapped IPv6" — 3 ok case +
+  4 bad case + 1 IP_PATTERN 二选一 case, 钉与 backend net.ParseIP 一致.
+
+**测试**: 67/67 PASS (M62 baseline 59 + M72 new 8). AssetFormModal 6/6 PASS 不受影响.
+
+**Mutation inversion 实证**: bypass 新分支 → `::ffff:1.2.3.4` 2 个 case FAIL ✓
+(hex-hex 形式因现有分支意外覆盖仍 PASS, 注释里说明)
+
+**verify**: `tsc --noEmit` 0 err / `vitest run` 73/73 PASS / mutation inversion 2 red
+
 ### M71 — Audit Sidebar 入口（OMH ulw-loop 第 3 cycle, 2026-09-16）
 
 **摩擦**: T-73 修了 admin 能访问 `/audit` 但 sidebar 仍隐 — 用户只能通过 CommandPalette 访问.
