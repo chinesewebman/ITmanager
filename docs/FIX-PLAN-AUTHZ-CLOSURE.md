@@ -199,6 +199,12 @@ protected.PUT("/integrations/glpi",   middleware.RejectAPIKeyAuth(), canManage, 
 1. 不把 `/auth/api-keys*`、`/notification-channels`、`/integrations/*` 补进 `openapi.yaml`（独立工作项）。
 2. 不做用户管理 CRUD（**G-4**：禁用/启用/重置密码/`cmd/disable-user`）——本轮只记录。
 3. 不改 JWT「不查库」的架构（**G-5**：禁用账号对已签发会话最长 24h 才生效）。
+   **2026-09-13 M40 (commit `6172977`) + 2026-09-16 M87 (commit 见 `M87-candidate-completion-report.md`) 联合 ship, 此条结案**:
+   M40 把方向反转为「JWT 路径查 DB + 30s TTL cache」（≤30s 全副本生效, M40 §edges 已记 trade-off）;
+   M87 接 `user_service.applyUserUpdate` commit 后调 `middleware.InvalidateAuthStatusCacheForUser(id)` 主动失效 hook,
+   把该副本的 lag 收口到 ≈0s。多副本部署下其他副本仍走 30s TTL（M40 trade-off 本质）;
+   真要全局近 0s 需 Redis pub/sub 广播 invalidation, 登记 **G-5-2 followup**（**不**在本 round scope）。
+   详见 `M87-candidate-completion-report.md` + `intent-M87-candidate.md`。
 4. 不改 `apiKeyAllows` 的「按 HTTP 方法判定 scope」语义（细粒度 scope 属独立任务）。
 5. 不改 `GET /integrations/status` 回传 URL + Zabbix 用户名（不含 token，见 TODO）。
 6. 不给 API Key 加角色/能力字段；不做密码过期策略。

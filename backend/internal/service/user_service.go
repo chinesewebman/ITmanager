@@ -133,7 +133,7 @@ func (s *userService) UpdateRole(ctx context.Context, id, role string, actor Act
 	return s.Update(ctx, id, UpdateUserInput{Role: &role}, actor)
 }
 
-// applyUserUpdate 事务内核：持锁读旧值 → 守卫 → UPDATE → 回读。
+// applyUserUpdate 事务内核：持锁读旧值 → 守卫 → UPDATE → 回读 → 主动清鉴权 cache。
 //
 // 为什么守卫必须和写入同事务、且旧值要加锁读：两道守卫（自我禁用/降级、
 // 最后一名管理员）都是**读-判-写**，不加锁时两个并发请求可以各自读到
@@ -141,6 +141,12 @@ func (s *userService) UpdateRole(ctx context.Context, id, role string, actor Act
 // 真 PG 上是行锁；sqlite 基座不渲染 FOR UPDATE（driver 明说不支持行级锁），
 // 故单测只能验路径，锁本身靠 postgres dialector + sqlmock 的 SQL 文本钉住
 // （同 ticket_service.Update 的口径）。
+//
+// M87：事务 commit 成功后立即清 JWT 路径 status cache，让该副本的下一请求不走
+// cache，把 M40 ship 的 ≤30s 全副本生效 trade-off 收口为「该副本 ≈0s 生效」。
+// 其他副本仍走 30s TTL（M40 trade-off 本质；真要全局近 0s 需 Redis pub/sub 广播，
+// 登记 G-5-2 followup，**不**在本 round scope）。失败路径（事务回滚）不调 ——
+// DB 没改，cache 不必清。
 func (s *userService) applyUserUpdate(
 	ctx context.Context, id string, updates map[string]interface{}, actor Actor,
 ) (*models.User, error) {
@@ -173,6 +179,10 @@ func (s *userService) applyUserUpdate(
 	if err != nil {
 		return nil, err
 	}
+	// M87 active invalidation: 写成功后立即清鉴权 cache，让 victim 的下一请求
+	// 必读 DB 拿到最新 status（该副本 ≈0s 生效）。`invalidate` 是纯 map 操作，
+	// 不会失败也不 panic —— 兜底仍是 30s TTL。
+	middleware.InvalidateAuthStatusCacheForUser(id)
 	out.Role = middleware.CanonicalRole(out.Role)
 	return &out, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"network-monitor-platform/internal/middleware"
 	"network-monitor-platform/internal/models"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -445,4 +446,76 @@ func TestUserService_Update_持锁读旧值(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "inactive", got.Status)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ==================== M87 active invalidation 实证 ====================
+
+// TestUserService_Update_成功后清鉴权statusCache 验证 M87 的核心契约：
+// applyUserUpdate 事务 commit 成功后必须调 InvalidateAuthStatusCacheForUser，
+// 把 JWT 路径的 status cache 抹掉，让 victim 的下一请求必读 DB 拿到最新 status。
+// 钉住「commit 后 cache.get(id) == false」（AC-M87-1）。
+func TestUserService_Update_成功后清鉴权statusCache(t *testing.T) {
+	// 每轮 fresh：singleton cache 不能跨 test 污染（与 M40 TestMain 同款）。
+	middleware.ResetAuthStatusCacheForTest()
+	t.Cleanup(middleware.ResetAuthStatusCacheForTest)
+
+	db := newUserSQLiteDB(t)
+	svc := NewUserService(db)
+	ctx := context.Background()
+
+	target := seedUserRow(t, db, "alice", "ops_user", "active")
+	actor := seedUserRow(t, db, "root", "admin", "active")
+
+	// 预填 cache：模拟「JWT 路径先前已查过该用户 (cache 写入 active)」
+	middleware.SetAuthStatusCacheForTest(target.String(), "active")
+	if got, ok := middleware.GetAuthStatusCacheForTest(target.String()); !ok || got != "active" {
+		t.Fatalf("预填失败: cache.get(%s) = (%q, %v), want (active, true)", target, got, ok)
+	}
+
+	// M87 关键路径：admin 把 alice 禁掉
+	got, err := svc.UpdateStatus(ctx, target.String(), "inactive", actorOf(actor, "root"))
+	require.NoError(t, err)
+	require.Equal(t, "inactive", got.Status)
+
+	// M87 契约：commit 成功后 cache 必须被清（不是 inactive，是「条目没了」 —
+	// 下次 lookupUserStatus 必走 DB 拿真值，避免被 30s TTL 的 stale 缓存坑）。
+	if _, ok := middleware.GetAuthStatusCacheForTest(target.String()); ok {
+		t.Fatalf("M87 契约违反: svc.UpdateStatus commit 后 cache.get(%s) 仍命中 — invalidation hook 没在门",
+			target)
+	}
+
+	// 副作用：DB 已落库（与 cache 无关，独立验证）
+	assert.Equal(t, "inactive", readUser(t, db, target).Status)
+}
+
+// TestUserService_Update_空输入不调invalidate 钉住 D21：空 updates（零字段）走
+// 「回读当前值」分支（user_service.go:122-124），等价于 Get —— 没改 DB，
+// 不必调 invalidate。这避免 cache 被无意义抹掉，防止 victim 的下一次请求
+// 多走一次 DB（虽然 TTL 30s 不算浪费，但语义上不应副作用）。
+func TestUserService_Update_空输入不调invalidate(t *testing.T) {
+	middleware.ResetAuthStatusCacheForTest()
+	t.Cleanup(middleware.ResetAuthStatusCacheForTest)
+
+	db := newUserSQLiteDB(t)
+	svc := NewUserService(db)
+	ctx := context.Background()
+
+	target := seedUserRow(t, db, "bob", "ops_user", "active")
+	actor := seedUserRow(t, db, "root", "admin", "active")
+
+	// 预填 cache：模拟 alice 上次 JWT 请求 cache miss 后写入了 active
+	middleware.SetAuthStatusCacheForTest(target.String(), "active")
+
+	// 调 Update 但零字段（Status / Role / MustChangePassword 都是 nil）
+	got, err := svc.Update(ctx, target.String(), UpdateUserInput{}, actorOf(actor, "root"))
+	require.NoError(t, err)
+	require.NotNil(t, got, "零字段走 Get 分支，必须返回当前值")
+	assert.Equal(t, "active", got.Status, "DB 当前 status 应仍是 active（空 updates 没改）")
+
+	// D21 关键：空 updates 不应抹掉 cache
+	got2, ok := middleware.GetAuthStatusCacheForTest(target.String())
+	if !ok || got2 != "active" {
+		t.Fatalf("D21 违反: 空 updates 不应调 invalidate，但 cache.get(%s) = (%q, %v)",
+			target, got2, ok)
+	}
 }

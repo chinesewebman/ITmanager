@@ -2118,6 +2118,56 @@ func TestRoutes_禁用账号后JWT立即失效(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "重新启用后应恢复: %s", w.Body.String())
 }
 
+// TestRoutes_主动清鉴权statusCache_下次JWT立即401 M87 端到端：service 层在事务
+// commit 后自动调 InvalidateAuthStatusCacheForUser，victim 的下一请求必须立即
+// 401（不依赖 30s TTL 自然过期，不依赖测试代码手动 invalidate）。
+//
+// 与 TestRoutes_禁用账号后JWT立即失效（M61 ship）对比：M61 测试在 PATCH 后手动
+// `middleware.InvalidateAuthStatusCacheForUser(victim)` 模拟「cache 自然过期」
+// —— 那是因为 M61 ship 时 user_service.Update 还**没有**接 hook。M87 接上 hook
+// 后这条手动 invalidate 应该删掉，本测试就是「删除手动 invalidate 后仍然 PASS」
+// 的实证。若 hook 被剥，本测试会**红**（cache 仍 active → 200，期望 401）。
+//
+// 额外校验：cache miss 路径（PATCH 后**未**预热 cache，victim 下一次请求必走 DB）
+// 也能 401 —— 证明「主动失效后第一次 DB 读」与「30s TTL 后第一次 DB 读」行为等价。
+func TestRoutes_主动清鉴权statusCache_下次JWT立即401(t *testing.T) {
+	r := setupTestRouter(t)
+	admin := seedUserForDispose(t, "active-admin", "admin", "active")
+	adminToken := genTokenForUser(t, admin, "admin")
+	// 第二个 admin：避免把 admin 自己卷进「最后一名管理员」守卫
+	seedUserForDispose(t, "active-admin-2", "admin", "active")
+
+	victim := seedUserForDispose(t, "active-victim", "ops_user", "active")
+	victimToken := genTokenForUser(t, victim, "ops_user")
+
+	// 步骤 1: 预热 cache —— victim 的 JWT 路径 lookupUserStatus cache miss → DB
+	// 读 active → cache.set(active)。此后 cache 里就有 stale "active" 了。
+	w := doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, "预热：受害者会话应有效: %s", w.Body.String())
+
+	// 步骤 2: admin 禁用 victim。**关键**：本步骤**不**调任何手动 invalidate。
+	// M87 的 user_service.applyUserUpdate 会在 commit 后自动清 cache。
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+victim+"/status", adminToken,
+		map[string]any{"status": "inactive"})
+	require.Equal(t, http.StatusOK, w.Code, "PATCH 自身必须成功: %s", w.Body.String())
+
+	// 步骤 3: victim 再请求 —— 若 M87 hook 真在门，cache 已被清 → cache miss →
+	// DB 读 → inactive → 401。若 hook 被剥，cache 仍 active → 200。
+	w = doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code,
+		"M87 契约违反：PATCH 后未手动 invalidate，victim 下一请求应 401 但实得 %d (body=%s)",
+		w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "禁用")
+
+	// 步骤 4: 反向 —— 重新启用后 token 又能用（证明上一条拒绝来自 status 而非
+	// 其他原因如 token 过期/黑名单）。
+	w = doJSONAs(t, r, http.MethodPatch, "/api/users/"+victim+"/status", adminToken,
+		map[string]any{"status": "active"})
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	w = doJSONAs(t, r, http.MethodGet, "/api/assets", victimToken, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "重新启用后应恢复: %s", w.Body.String())
+}
+
 // TestRoutes_用户处置_强改密标志可置位 第三个字段的端到端：置 must_change_password
 // 后该账号的登录响应会带 must_change_password=true（前端据此强制跳改密页）。
 func TestRoutes_用户处置_强改密标志可置位(t *testing.T) {

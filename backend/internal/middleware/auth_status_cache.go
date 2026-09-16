@@ -78,7 +78,6 @@ func resetAuthStatusCache() {
 	defer defaultAuthStatusCache.mu.Unlock()
 	defaultAuthStatusCache.data = make(map[string]authStatusCacheEntry)
 }
-
 // ResetAuthStatusCacheForTest 跨包测试用：导出版 resetAuthStatusCache.
 // M41: 让 internal/api 包的 setupTestRouter cleanup 调用, 避免 cache
 // singleton 跨 test 污染. 生产代码不应调用.
@@ -86,11 +85,41 @@ func ResetAuthStatusCacheForTest() {
 	resetAuthStatusCache()
 }
 
-// InvalidateAuthStatusCacheForUser 测试用：清掉指定 user_id 的 cache 条目，
-// 用于「模拟 cache 自然过期」的测试场景（真 PG db_smoke 不能 sleep 31s）。
+// SetAuthStatusCacheForTest 测试用：预填指定 user_id 的鉴权 status cache 条目。
 //
-// 生产代码不应调用此函数；运维封禁场景的 cache 滞后 30s 是设计取舍
-//（FIX-PLAN-M40 §edges「多副本部署下 cache 是 per-process」）。
+// 生产代码不应调用此函数 —— 真生产路径写 status 是 user_service.applyUserUpdate，
+// 它内部调 InvalidateAuthStatusCacheForUser 而不是预填 cache。本 helper 只让
+// service / handler 测试在调 svc.Update 前预置一个「已 cache 的 active」状态，
+// 然后验证 applyUserUpdate 是否真的把它清掉（AC-M87-1：commit 后 cache.get == false）。
+func SetAuthStatusCacheForTest(userID, status string) {
+	defaultAuthStatusCache.set(userID, status)
+}
+
+// GetAuthStatusCacheForTest 测试用：读指定 user_id 的鉴权 status cache 条目。
+// 返回 (status, true) 表示命中且未过期；(, false) 表示 miss / 已过期 / 未 set。
+//
+// 生产代码不应调用此函数 —— 真生产路径读 status 是 middleware.AuthMiddleware
+// 经 lookupUserStatus 走，cache 状态是它内部的事。本 helper 只让跨包测试断言
+// 「service 层 invalidate 是否真把 cache 抹掉」。
+func GetAuthStatusCacheForTest(userID string) (string, bool) {
+	return defaultAuthStatusCache.get(userID)
+}
+
+// InvalidateAuthStatusCacheForUser 清掉指定 user_id 的鉴权 status cache 条目。
+//
+// 历史（M40 ship）：本函数原仅用于测试，原注释「生产代码不应调用此函数；
+// 运维封禁场景的 cache 滞后 30s 是设计取舍」。
+//
+// M87 起改为**生产路径 hook**：user_service.applyUserUpdate 在事务 commit
+// 成功后调本函数，让 victim 的下一请求必读 DB 拿到最新 status（该副本 ≈0s
+// 生效，把 M40 30s TTL trade-off 收口到该副本近 0s）。
+//
+// 多副本部署下只对**处理 update 请求的副本**生效；其他副本仍走 30s TTL。
+// 这是 M40 ship 时登记的本质 trade-off，真要全局近 0s 需 Redis pub/sub 广播
+// invalidation（G-5-2 followup，**不**在本 round scope）。
+//
+// 仍可被测试用：`db_smoke_test.go` / `auth_status_cache_test.go` 都用本函数
+// 模拟「cache 自然过期」（避免 sleep 31s）。
 func InvalidateAuthStatusCacheForUser(userID string) {
 	defaultAuthStatusCache.invalidate(userID)
 }
@@ -99,6 +128,13 @@ func InvalidateAuthStatusCacheForUser(userID string) {
 //
 // 调用点：AuthMiddleware JWT 路径 cache miss 时。返回 ("", err) 表示 DB 错误
 // —— 该错误由调用方决定降级策略（当前实现：DB 错误 = 拒绝请求，避免放行）。
+//
+// Cache 生命周期（M40 ship 30s TTL；M87 加 active invalidation）：
+//   - 30s TTL 是 **fallback**：cache 命中 → 直接返回，不查 DB
+//   - 写路径（M87 起 `user_service.applyUserUpdate` commit 后）会主动
+//     `InvalidateAuthStatusCacheForUser(id)` → 该副本下一次 cache miss → 读 DB
+//   - 其他副本（多副本部署）仍走 30s TTL 自然过期 —— 这是 M40 登记的
+//     trade-off，本质；真要全局近 0s 需 Redis pub/sub 广播（G-5-2 followup）
 //
 // nil DB：返回 "active" + nil，**仅用于测试场景**（setupAuthEnv(t, nil)）。
 // 生产路径 database.DB 由 cmd/server/main.go 启动时必装，永远非 nil。
