@@ -323,6 +323,28 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M71 — Audit Sidebar 入口（OMH ulw-loop 第 3 cycle, 2026-09-16）
+
+**摩擦**: T-73 修了 admin 能访问 `/audit` 但 sidebar 仍隐 — 用户只能通过 CommandPalette 访问.
+M49/M61 已 ship `/audit` 路由 + audit_logs 接口, 但 UI 入口缺失.
+
+**改动** (frontend-only, ≤1h):
+- `App.tsx`:
+  - import 加 `AuditOutlined` (antd 5.x)
+  - `buildMenuItems(hasIdentity, hasAudit)` 加第二参数, 在 `/users` 之后 + `/settings` 之前加
+    `...(hasAudit ? [{key:'/audit', icon:<AuditOutlined />, label:'审计日志'}] : [])`
+  - 抽 `hasAudit` state + useEffect extract `caps.includes('audit')` (复用 `hasIdentity` 模式)
+  - catch block `setHasAudit(false)` + call site 传两参
+- `App.menu.test.tsx`: M61 现有 case 加第二参 + 新 M71 describe 5 case
+  (buildMenuItems 纯函数 / admin → 渲染 / ops_admin → 不渲染 / /auth/me 失败 / capabilities 形状异常)
+
+**测试**: 10/10 PASS (M61 5 + M71 5)
+
+**Mutation inversion 实证**: 翻转 `hasAudit ? [...] : []` → `hasAudit ? [...] : [{key:'/audit',...}]`
+→ **5 M71 tests FAIL** ✓ (M61 tests 不受影响, 因 mutation 只动 audit 分支) → 还原 → 10/10 PASS
+
+**verify**: `tsc --noEmit` 0 err / `vitest run src/App.menu.test.tsx` 10/10 PASS / mutation inversion 5 red
+
 ### M70 — G-Asset-IpConflictAudit 跨资产同 IP 巡检（OMH ulw-loop 第 2 cycle, 2026-09-16）
 
 **摩擦**: M68/M69 守卫只在**写入时**检查 (POST/PUT → 409), 不查**历史数据**.
