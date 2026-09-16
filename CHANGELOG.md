@@ -323,6 +323,22 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M73 — OMH Model Calibration Paragraph（OMH ulw-loop 第 5 cycle, 2026-09-17）
+
+**摩擦**: Poison 默认两个 LLM provider (minimax + deepseek), 工具调用习惯与输出 shape 不同.
+写 spec/intent/brief 时若按一个模型自然形状写, 另一个模型可能不识别. **钉两个模型各 1 段
+do/don't, 让 PM-direct / omp dispatch 按当前实际跑的模型选 spec**.
+
+**改动** (config-only, ≤2h):
+- 新文件 `~/.omh/decisions/model-calibration.md` (3KB, 4 节: 背景 / minimax / deepseek / 时段规则)
+- `~/.omh/project-rules.md` 加 1 行 reference
+- `~/.omh/skills/planner/omh-plan/SKILL.md` frontmatter 加 `see_also: ["~/.omh/decisions/model-calibration.md"]`
+- `~/.omh/skills/operator/omh-decide/SKILL.md` frontmatter 同上
+- **不改**: skill 内容 / setup-profile.json / display.skin / interface / runtime/state.json / SOUL.md
+
+**verify**: YAML frontmatter parse 通过 (`tags` + `see_also` + `category` 都正确识别) /
+omh doctor 退 1 (pre-existing yaml module miss, 与 M73 无关)
+
 ### M72 — G-UI-AssetIpValidatorParity-Mapped IPv4-mapped IPv6 前端口径对齐（OMH ulw-loop 第 4 cycle, 2026-09-17）
 
 **摩擦**: backend `service.updateFirstNetworkIP` 用 `net.ParseIP(ip)` 解析, 收 IPv4-mapped
