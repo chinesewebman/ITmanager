@@ -26,6 +26,7 @@ import (
 	"network-monitor-platform/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func main() {
@@ -81,18 +82,26 @@ func runWithDeps(db *gorm.DB, username, role string) error {
 
 	// 写 users.role 与同步 user_roles 必须原子：中途失败会留下
 	// 「users.role 已改、user_roles 仍指向旧角色」的不一致状态。
+	//
+	// 防自锁守卫的并发语义（M85 收口）：两个并发进程各自 demote 一个 admin，
+	// 「排除目标」`AND id <> ?` 的写法让两个事务**锁不到共同行** —— 各自
+	// 都看到「另一个 admin 还在」，双双通过，把所有 admin 降级掉。修复：
+	// 锁**所有** admin 行（不排除目标），两个事务在 PG 上**串行** —— 第二
+	// 个事务等到第一个 commit 后才能读到新状态，count 才能反映「剩余 admin
+	// 数」。语义由 `otherAdmins == 0` 改为 `totalAdmins <= 1`（目标自身算 1）。
+	// 真 PG 上是行锁；sqlite 不渲染 FOR UPDATE（driver 明说不支持行级锁），
+	// 单测只能验路径与白盒 SQL 契约，锁本身靠 PG dialector DryRun 抓
+	// （沿用 internal/service/user_service.go:144-178 既有范本）。
 	err := db.Transaction(func(tx *gorm.DB) error {
 		// 防自锁：不允许把最后一个 admin 降级（否则无人能进 identity 路由自救）。
 		// 只在「当前是 admin 且要改成非 admin」时才检查 —— 非 admin 改角色不会减少管理员数。
 		if canonical != middleware.RoleAdmin && middleware.CanonicalRole(user.Role) == middleware.RoleAdmin {
-			var otherAdmins int64
-			// LOWER(TRIM(...)) 兜住存量脏值（' Admin '），避免误判「唯一管理员」。
-			if err := tx.Model(&models.User{}).
-				Where("LOWER(TRIM(role)) = ? AND id <> ?", middleware.RoleAdmin, user.ID).
-				Count(&otherAdmins).Error; err != nil {
+			total, _, err := countAdminUnderLock(tx)
+			if err != nil {
 				return fmt.Errorf("统计管理员失败: %w", err)
 			}
-			if otherAdmins == 0 {
+			// 目标自身已确认是 admin（if 条件），故 total <= 1 即「唯一管理员」。
+			if total <= 1 {
 				return fmt.Errorf("拒绝执行：%q 是唯一的管理员，降级后系统将没有 admin 可自救", username)
 			}
 		}
@@ -112,7 +121,25 @@ func runWithDeps(db *gorm.DB, username, role string) error {
 }
 
 // syncUserRoles 让 user_roles 关联表跟上 users.role。
-// user_roles 只在 roles 表里存在对应 code 时才有行（兜底角色 user 没有行）。
+
+// countAdminUnderLock 在指定事务里数 admin 行的总数，**锁全部 admin 行**
+// （不排除调用者）。锁集合必须相交 —— 这是让两个并发 demote-admin 事务
+// 在 PG 上串行的关键：两个事务都锁「全部 admin」，第二个事务等第一个
+// commit 后才能读到新状态，count 反映「剩余 admin 数」。
+//
+// 真 PG 上是行锁；sqlite 不渲染 FOR UPDATE（driver 明说不支持行级锁），
+// 单测只能验路径与白盒 SQL 契约，锁本身靠 PG dialector DryRun 抓。
+// 暴露给测试使用（白盒契约测试见 main_test.go 的 TestRunWithDeps_并发窗口*）。
+func countAdminUnderLock(tx *gorm.DB) (int64, *gorm.DB, error) {
+	var n int64
+	stmt := tx.Model(&models.User{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("LOWER(TRIM(role)) = ?", middleware.RoleAdmin).
+		Count(&n)
+	return n, stmt, stmt.Error
+}
+
+// syncUserRoles 让 user_roles 关联表跟上 users.role。
 func syncUserRoles(db *gorm.DB, userID, role string) error {
 	if err := db.Exec("DELETE FROM user_roles WHERE user_id = ?", userID).Error; err != nil {
 		return fmt.Errorf("清理 user_roles 失败: %w", err)
