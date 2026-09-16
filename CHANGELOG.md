@@ -659,6 +659,38 @@ PM_QUEUE M88-candidate = **G-14 迁移与运行时解耦（多副本部署前置
 
 见 `M88-candidate-completion-report.md` + `M88-candidate-graph-analysis.md`. PM_LAST_DISPATCH_RESULT.md 写 M88 closeout (Poison ≤4h 授权, watchdog 下次 tick 验证 status=shipped).
 
+### M89-candidate — G-17 aux 服务生产化（netbox/zabbix/glpi/graylog/elasticsearch/mongoDB）(OMH ulw-loop 第 19 cycle, 2026-09-16)
+
+PM_QUEUE M89-candidate = **G-17 aux 服务生产化（netbox/zabbix/glpi/graylog/elasticsearch/mongoDB）**（TODO.md L73 登记原状: 6 条致命缺陷, 本轮只做了 `profiles: ["aux"]` 隔离 + DB 密码与主链同源, 其余占位/不安全默认). M89 把 **3/4 致命缺陷 + 网络隔离 + 工具兜底一一收紧**, 残余 3 条留 M99+ chain:
+
+1. **aux 6 服务 image tag 全部钉精确次版本+补丁号** (`docker-compose.yml`) — `netboxcommunity/netbox:v4.0.3` / `zabbix/zabbix-server-pgsql:7.0.13-alpine` + 新增 `zabbix/zabbix-web-nginx-pgsql:7.0.13-alpine` / `linuxserver/glpi:3.0.11` / `graylog/graylog:6.0.3-1` / `docker.elastic.co/elasticsearch/elasticsearch:8.11.4` / `mongo:7.0.14`. 移除 `:latest` / `:6.0` / `:7` 等可变 tag. **zabbix 拆 server + web 双服务** — 原 `zabbix-server-pgsql:latest` 是 server 进程 (trapper 10051) 无 Web/API, 集成 URL `NMP_INTEGRATIONS_ZABBIX_URL=http://zabbix:8080` 必报连接失败, M89 加 `zabbix-web-nginx-pgsql` 与 server 同钉 `:7.0.13-alpine`, api URL 改 `http://zabbix-web:8080` 真能连到 JSON-RPC.
+2. **5 个占位值全部 `${VAR:?...}` 强制注入 fail-closed** — `netbox.SECRET_KEY` / `graylog.GRAYLOG_PASSWORD_SECRET` / `graylog.GRAYLOG_ROOT_PASSWORD_SHA2` / `graylog.GRAYLOG_ROOT_PASSWORD` (graylog 6.x 必须, 原状缺) / `elasticsearch.ELASTIC_PASSWORD`. 缺值 compose 直接拒启. `.env.example` 新增 aux 段 (含 `opensslll rand -hex 32` 生成命令 + `GRAYLOG_ROOT_PASSWORD_SHA2 = echo -n "$ROOT" | sha256sum | cut -d' ' -f1` 派生规则). 与 G-15 / M78 URL-aware 校验同源, fail-closed 不放示例值.
+3. **elasticsearch `xpack.security.enabled=true` 默认开** + 加 `ELASTIC_PASSWORD=${NMP_AUX_ELASTICSEARCH_PASSWORD:?...}` + 内置 `nmp` 用户. `graylog` env `GRAYLOG_ELASTICSEARCH_HOSTS` 改 `http://nmp:${NMP_AUX_ELASTICSEARCH_PASSWORD:?...}@elasticsearch:9200` (xpack on 后必须带 user:pass 段).
+4. **网络隔离 — 新增 `aux_net` bridge network** — `subnet 172.29.0.0/24` + `internal: true` (网络级隔离, 同 `default` 网络 `172.28.0.0/24` 不重叠, 避开 `172.31.0.0/16` AWS VPC). graylog / elasticsearch / mongoDB 三服务接 `aux_net` 隔离高敏感数据汇聚点 (graylog 含各类日志/ES 索引). netbox / zabbix-server / zabbix-web / glpi 4 服务**留 default** (api 集成通过 `http://netbox:8000` DNS 访问需要; 真要全 6 进 aux_net = M99+ DNS 别名桥接). **PM-direct 裁决**: 接受「4 服务留 default」微差, completion report §2.3 标.
+5. **新增 `scripts/compose-aux-config-check.sh`** — 4 类静态扫: 占位值字面 (`your-secret-key`/`your-password-secret`/`your-hashed-password`/`change-in-production`/`placeholder`/`example-value`/`nmp123`) / 可变 tag (`:latest` / `:X` / `:X.Y` 缺 Z) / `xpack.security.enabled=false` / aux 服务未接 `aux_net`. exit 0/1/2/3/4. 沿用 G-6 (`check-tls.sh`) + M88 mutation 范本. 默认 ./docker-compose.yml, 可指定路径.
+6. **新增 `scripts/compose-aux-config-check_test.sh`** — 4 场景: `test_compose_aux_config_check_passes_on_clean_compose` (exit 0) / `test_compose_aux_config_check_detects_placeholder_values` (exit 1 + "placeholder") / `test_compose_aux_config_check_detects_mutable_tags` (exit 2 + "mutable_tag") / `test_compose_aux_config_check_detects_xpack_disabled` (exit 3 + "xpack_disabled"). 4/4 PASS.
+7. **mutation inversion M1 + M2 双实证 PASS-FAIL-PASS**:
+   - **M1** (脚本守门) — 临时把 `is_placeholder_value` 函数体改成 `return 1` 永远视为非占位 → `test_compose_aux_config_check_detects_placeholder_values` 期望 exit 1 实得 exit 0 → 红 → 还原 → 4/4 PASS.
+   - **M2** (compose 守门) — 临时把 `zabbix-web` image tag 从 `:7.0.13-alpine` 改回 `:latest` → `compose-aux-config-check.sh docker-compose.yml` 期望 exit 0 实得 exit 2 (检测到 `mutable_tag`) → 红 → 还原 → exit 0.
+   - **范本 G (NEW) — 守门跨守: bash 函数 + compose yaml**. 既有 6 范本 (A=F 业务/CI/服务/middleware/条件极性) 都是单一代码层. 范本 G 是首个**双轨独立守门**实证.
+8. **3 commits + 全 push `origin/main`** — `e828a99` (intent spec, pre-this-session, PM-direct 自起) + `<M89-impl>` + `<M89-docs>`. branch_main 推到 M89-impl 的 HEAD = M89-docs 后父.
+9. **27 packages `go test -race -count=1 -timeout=180s ./...` 全绿不退化** — 本 round 无 backend Go 代码改动, 纯 compose + shell + 文档层收紧.
+10. **`docker compose config -q` 双层校验**: 主链 (`.env.test89`) exit 0 + aux profile (`.env.test89 --env-file .env.aux.test89 --profile aux`) exit 0 (11 服务全部). aux 5 个新 secret (`NMP_AUX_*`) 需 `--env-file .env.aux` 注入, 否则 compose 在插值阶段 fail.
+
+关键设计要点:
+- **`internal: true` 是网络级属性**: 写作每服务 `networks.aux_net.internal: true` 时 `docker compose config` 报 "additional properties 'internal' not allowed". 正确 = `networks.aux_net.internal: true` 在**网络定义**, 整网内部不暴露端口. 灰/es/mongoDB 接此网后只能互连 + 走 docker bridge 直出容器内.
+- **`GRAYLOG_ROOT_PASSWORD_SHA2` 派生而非预填**: graylog 启动期校验 SHA2 非法会拒启. `.env.example` 用生成命令 (`echo -n "$NMP_AUX_GRAYLOG_ROOT_PASSWORD" | sha256sum | cut -d' ' -f1`) 而非预填 SHA2, 沿用 G-15 / M78 占位值 fail-closed 范本 — 防止照抄即"已知哈希上线".
+- **`zabbix-server` 与 `zabbix-web` 同主版本**: 不同主版本会报 "API version mismatch". M89 同钉 `:7.0.13-alpine`, 文档明示上游发新版 → 改 compose → 跑 `compose-aux-config-check.sh` 校验 → push (避免任意自动 bump 把生产打挂).
+- **set -u 下空 stdin `unbound variable`**: `set -uo pipefail` + `while IFS= read -r w` 拿空 stdin 时循环体不执行, `$w` 未定义. 修法 = `if [ -n "$WARNINGS_RAW" ]; then while ... done <<< "$WARNINGS_RAW"; fi` 守卫. bash 4+ 在 set -u 下标准坑.
+
+文档翻新:
+- `08-部署运维.md` §8.3.5.5 新增 "Aux profile 启用 (G-17 / M89)" 段 — 4 步骤 (生成 aux secret / 静态校验 / `--profile aux up -d` / 沙箱 smoke `ps`) + 3 条残余 → M99+.
+- `TODO.md:73` `[ ]` → `[x]` + 描述更新 (M89 部分结案, 4 项收紧 + 3 项残余).
+- `M89-candidate-completion-report.md` (~12KB, 10 节: 摩擦/决策/改动/mutation 实证/验证/关键设计/派生 TODO/关联 commits/关联 reports/Truth stream) + `M89-candidate-graph-analysis.md` (~10KB, 10 节: 节点图/缺陷 trade-off/PM-direct 折中/M1+M2 调用链/范本 G (NEW)/docker 校验流程/改动图谱/节点 ↔ 文件/反转史/commits).
+
+见 `M89-candidate-completion-report.md` + `M89-candidate-graph-analysis.md`. PM_LAST_DISPATCH_RESULT.md 写 M89 closeout (Poison ≤4h 授权, watchdog 下次 tick 验证 status=shipped).
+
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 
