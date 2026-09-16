@@ -323,6 +323,30 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M78 — G-15 release 校验解耦（OMH ulw-loop 第 10 cycle, 2026-09-17）
+
+**摩擦**: `Config.Validate()` 在 release 下**无条件**要求 netbox/glpi token. compose 默认
+`debug` 才能起 — debug 下登录 cookie 不带 `Secure`、弱凭据不拒. 安全审计长期 R-5 待解.
+
+**改动** (backend + compose + docs, ≤2h):
+- `backend/internal/config/config.go` Validate: netbox / glpi 改 URL-aware (与 zabbix 一致) — URL 未配置则跳过 token 校验
+- 新增 `isPlaceholderToken` helper: 识别 `your-` / `change-in-production` / `placeholder` / `example` 占位值
+- `docker-compose.yml` api 服务: `NMP_SERVER_MODE=${NMP_SERVER_MODE:-release}` (默认 release)
+- `08-部署运维.md` §8.3.2 同步 default release + 占位值拒启说明
+- `backend/internal/config/config_test.go`: 4 新 cases (URL 空 + token 空 通过 / URL 配 + 占位 token 报错 / GLPI 镜像 / 既有 3 case 加 URL)
+
+**verify**:
+- `go build ./...` 0 err ✓
+- `go test -count=1 ./...` **27 packages 全绿** ✓
+- TestValidate_ReleaseMode 11 cases 全 PASS ✓
+- **mutation inversion 5 red**:
+  - revert netbox URL guard → NetboxURL_Empty_NoTokenRequired FAIL ✓
+  - revert glpi URL guard → GLPIURL_Empty_NoTokenRequired FAIL ✓
+  - revert isPlaceholderToken → NetboxPlaceholder + GLPIPlaceholder FAIL (2 红) ✓
+
+**Poison "auto 切换" verbatim**: "auto 切换是吧，做吧" — PM_LOOP_MODE=B 切换已生效,
+watchdog 自主 dispatch 路径激活, 本 round 即 watchdog 模式 B 实证.
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
