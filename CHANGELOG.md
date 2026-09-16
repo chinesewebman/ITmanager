@@ -547,6 +547,50 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 - **真 PG 并发 race window 测试**: M85 单测基于 sqlite `:memory:` sequential 模拟, 抓不到真并发 race (sqlite 单连接天然串行). 真 PG 上跑 `pg_try_advisory_lock` + 2 个独立 `*sql.DB` 实例并发 demote-admin 才是「真并发实证」. **M86+ 候选**, 加 `db_smoke` 真 PG 测试.
 - **mutation 范本写入 skill**: 「业务并发窗口 mutation inversion 范本 C」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」并列), 后续业务并发 round 复用.
 - **`db_smoke` 加并发窗口 PG 测试**: 沿用 M82 派生 TODO 模式, 加真 PG e2e 测试覆盖 cmd/set-role 并发窗口.
+### M86-candidate — `GET /api/integrations/status` URL + Zabbix 用户名收口 (canManage-gate, OMH ulw-loop 第 16 cycle, 2026-09-16)
+
+**摩擦**: PM_QUEUE M86-candidate 来自 TODO.md L60 "`GET /api/integrations/status` 回传集成 URL 与 Zabbix 用户名 — 不含 token，属读地板；若需收紧另立任务". TODO 多处独立登记: `docs/adr/0005-角色词表与权限矩阵.md:88` + `docs/FIX-PLAN-AUTHZ.md:56` + `docs/FIX-PLAN-AUTHZ-CLOSURE.md:203`. 不接受 "已登记 read floor" framing — 因为:
+1. TODO 描述承认是泄漏面 ("回传集成 URL 与 Zabbix 用户名" + "若需收紧另立任务"), 接受 framing 等于无限期搁置
+2. 修复路径已存在: P2-1 既有 `has_*` canManage-gate (`integration_handler.go:140-143` + `integration_handler_test.go:147-198` 7-角色矩阵), 沿用即可, 成本 ≤ 2h
+3. 沿用 P2-1 同款「`if canManage` 守卫 + 7 角色矩阵测试」结构, 不引入新设计
+4. watchdog 自举派工第 2 例 (M85 = 1, M86 = 2, ...): 沿用 M85 cycle 15 closeout 范本
+
+**决策**: 收紧 url/user 到 canManage, 沿用 P2-1 `has_*` 同款分级范本. 不接 "已登记 read floor" framing, 不动 route protection (端点本身对所有已认证 200, 响应按能力分级 — 与 P2-1 同款).
+
+**改动** (backend handler + tests + openapi + routes + routes_test, ≤2h):
+- `intent-M86-candidate.md` 新建 (21KB, 8 节 omh-plan 骨架, Goal 钉死「收紧 url/user」与「沿用 P2-1 has_* 范本」)
+- `backend/internal/api/handlers/integration_handler.go:117-155` 收紧 `GetIntegrationStatus`:
+  - `netbox["url"]` / `zabbix["url"]` / `zabbix["user"]` / `glpi["url"]` 从 gin.H literals 移到 `if canManage { ... }` 块内
+  - 注释更新为 M86 沿用 P2-1 范本 + mutation M1 反证命令原文
+- `backend/internal/api/handlers/integration_handler_test.go` 加 2 测试 + 改 2 既有测试:
+  - `TestIntegrationStatus_URL与ZabbixUser仅canManage可见` — 7 角色 × 3 字段 (netbox.url / zabbix.url / zabbix.user / glpi.url) 矩阵断言, 沿用 P2-1 既有 7 角色表 (admin/ops_admin/ops_user/auditor/readonly/user/空)
+  - `TestIntegrationStatus_URL与User不可见_不暴露配置拓扑` — readonly 角色配 secret URL, 断言 body **不**含 URL 字面 + 不含 `"url"` / `"user"` 键名 (防 G-28 脱敏绕过)
+  - `TestIntegrationStatus_ThreeIntegrationsReturnURL` 改用 `WithRole(cfg, "admin")` (收紧即收测试角色)
+  - `TestIntegrationStatus_凭据存在性仅canManage可见` 注释更新 + 移除 2 错断言 ("url/user 对所有人可见" → 改为 "url/user 单独由 URL与ZabbixUser仅canManage可见 钉死")
+- `backend/internal/api/openapi.yaml` 收紧 `/integrations/status` operation description + `IntegrationStatus` schema description + `required` 字段 (`[enabled, url]` → `[enabled]`): url/user property 保留, 但 `required` 缩小 + description 写明 "仅 canManage 可见 (M86)"
+- `backend/internal/api/routes.go:267-269` 注释从 "只读状态查询不限" → "只回 enabled; 配置详情限 manage — 与 P2-1 has_* 同款"
+- `backend/internal/api/routes_integration_test.go:839` route map 描述从 "集成连通状态（只回 URL/用户名，不含 token）" → "集成连通状态（仅 enabled 全可见; url/user 仅 canManage）"
+- `M86-candidate-completion-report.md` 新建 (20KB, 摩擦/决策/改动/mutation 实证/verify/派生 TODO/OMH workflow shape/注意事项)
+- `M86-candidate-graph-analysis.md` 新建 (13KB, handler 节点图 + 7-角色矩阵 + mutation inversion 调用链 + P2-1↔M86 范本对比 + M82↔M83↔M85↔M86 范本对比 + Settings form pre-fill 节点图)
+- `CHANGELOG.md` 加本段 (放在 M85 之后, cycle 16)
+- `TODO.md` L60 `- [ ]` → `- [x]`, 标 "已 ship M86-candidate (url/user canManage-gate + 7-角色矩阵 + mutation inversion M1)"
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 写 M86 closeout (Poison 看 + watchdog 下次 tick 验证)
+- `~/.hermes/state/PM_QUEUE.json` M86-candidate.status: `candidate` → **`shipped`** + append `shipped[]` registry (D10 实证)
+
+**verify**:
+- `grep -n '"url"\|"user":' backend/internal/api/handlers/integration_handler.go`: 全部在 `if canManage { ... }` 块内 ✓
+- `cd backend && go test -race -count=1 ./internal/api/handlers/`: **全绿** (含 2 M86 新测试 + 23 既有 handler 测试) ✓
+- `cd backend && go test -race -count=1 -timeout=180s ./...`: **27 packages ok** ✓ (0 退化, race detector 0 误报)
+- mutation inversion 实证 1 / 1 反证全红 → 还原全绿 ✓:
+  - M1: 把 `netbox["url"]` / `zabbix["url"]` / `zabbix["user"]` / `glpi["url"]` 从 `if canManage` 块移回 gin.H literals (无条件回传) → `TestIntegrationStatus_URL与ZabbixUser仅canManage可见` 7 角色中 5 角色 (ops_user/auditor/readonly/user/空) 红 (expected=不存在, actual=存在) + `TestIntegrationStatus_URL与User不可见_不暴露配置拓扑` 6 断言全红 (body 含 secret URL/用户名 字面 + 含 `"url"` / `"user"` 键) → `mv integration_handler.go.m86bak integration_handler.go` 还原 → 全绿
+- mutation 临时文件实证完**全部 mv 还原 + bak 文件 rm**, `git status --short` 仅 commit 2 (impl + docs-in-source) 才算闭环 (D9 实证: 临时文件不入 commit)
+
+**派生 (留 future)**:
+- **Settings 页菜单无 frontend gate**: `/settings` 在 `App.tsx:112` 无条件可见, non-admin 进 Settings 会看到 form pre-fill 空白. PUT /integrations/* 已被 canManage + RejectAPIKeyAuth 守住 (`routes.go:276-281`), non-admin 提交必 403. 加 frontend gate 是产品决策, 非本 round scope. **M87+ candidate 候选** (沿用 M61 用户管理页 capability-gate 范本).
+- **HTTP 路径 user_service.go 同样 TOCTOU 收口** (M85 cycle 15 派生): 仍是 M87+ 候选.
+- **真 PG 并发 race window 测试** (M85 cycle 15 派生): 仍是 M87+ 候选.
+- **mutation 范本写入 skill**: 「响应字段守卫 mutation inversion 范本 D」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」 + M85 范本 C 「业务并发窗口 mutation」并列), 后续响应字段 round 复用.
+- **既有 URL 断言测试更新范本**: 收紧即收测试角色 (M86 改了 `TestIntegrationStatus_ThreeIntegrationsReturnURL` → admin), 与 P2-1 fix 既有测试不动 (P2-1 是新增分级) 区分 — 这是范本 D 与范本 A/B/C 的设计要点差异, 写进 skill 时要明确.
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
