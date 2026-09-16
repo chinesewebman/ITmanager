@@ -114,26 +114,30 @@ func (h *IntegrationHandler) Sync(c *gin.Context) {
 }
 
 // GetIntegrationStatus 获取集成状态
+//
+// M86：响应字段按能力分级。沿用 P2-1 既有 `has_*` 分级范本 (`integration_handler_test.go:147-198` 7-角色矩阵)，
+// 把 `url` (netbox/zabbix/glpi) 与 `user` (zabbix) 从「所有已认证角色可见」收紧到「canManage（admin / ops_admin）可见」。
+// - 非 canManage 角色 (ops_user/auditor/readonly/user/空) 只看到 `enabled` 布尔：足够判断「集成是否启用」，
+//   不暴露内网 URL 拓扑与 Zabbix 用户名（已登记的读地板泄漏，TODO.md:60 / docs/adr/0005 §3.2）。
+// - canManage 角色看完整状态：供 Settings 配置页 pre-fill 表单 (`Settings.tsx:76-89`) + 显示「已配置/未配置」。
+// mutation 反证 M1：临时把 url/user 移出 `if canManage` 块 → 7-角色矩阵红 + URL 字面暴露红 → 还原绿。
 func (h *IntegrationHandler) GetIntegrationStatus(c *gin.Context) {
-	// P2-1/Pre-1：readonly/auditor/user 可看集成配置状态（enabled/url/user），
-	// 但不看凭据存在性（has_*）——那属敏感信息（boolean 泄露密码是否已配置）。
-	// canManage 角色（admin/ops_admin）看完整状态，供 Settings 配置页显示「已配置/未配置」。
 	canManage := middleware.Can(c.GetString("role"), middleware.CapManage)
 
 	netbox := gin.H{
 		"enabled": h.config.Integrations.Netbox.URL != "",
-		"url":     h.config.Integrations.Netbox.URL,
 	}
 	zabbix := gin.H{
 		"enabled": h.config.Integrations.Zabbix.URL != "",
-		"url":     h.config.Integrations.Zabbix.URL,
-		"user":    h.config.Integrations.Zabbix.User,
 	}
 	glpi := gin.H{
 		"enabled": h.config.Integrations.GLPI.URL != "",
-		"url":     h.config.Integrations.GLPI.URL,
 	}
 	if canManage {
+		netbox["url"] = h.config.Integrations.Netbox.URL
+		zabbix["url"] = h.config.Integrations.Zabbix.URL
+		zabbix["user"] = h.config.Integrations.Zabbix.User
+		glpi["url"] = h.config.Integrations.GLPI.URL
 		netbox["has_token"] = h.config.Integrations.Netbox.Token != ""
 		zabbix["has_password"] = h.config.Integrations.Zabbix.Password != ""
 		glpi["has_app_token"] = h.config.Integrations.GLPI.AppToken != ""

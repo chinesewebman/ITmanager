@@ -60,9 +60,12 @@ func minimalCfgForTest(netboxURL, zabbixURL, glpiURL string) *config.Config {
 
 // ==================== GetIntegrationStatus ====================
 
+// TestIntegrationStatus_ThreeIntegrationsReturnURL M86：url 仅 canManage 可见，用 admin 角色断言。
+// 收紧前默认 fail-safe 角色（""）即可看到 url；收紧后必须显式用 admin / ops_admin 才能看到。
+// M85 的 cmd/set-role 同款「收紧即收测试角色」范本。
 func TestIntegrationStatus_ThreeIntegrationsReturnURL(t *testing.T) {
 	cfg := minimalCfgForTest("http://netbox.local", "http://zabbix.local", "http://glpi.local")
-	r := newIntegrationTestRouter(cfg)
+	r := newIntegrationTestRouterWithRole(cfg, "admin")
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
@@ -142,8 +145,9 @@ func TestIntegrationStatus_不泄露Secret字段(t *testing.T) {
 	assert.NotContains(t, body, `"password"`)
 }
 
-// P2-1/Pre-1：readonly/auditor/user 可看集成配置状态（enabled/url/user），
-// 但不看凭据存在性（has_*）；canManage（admin/ops_admin）看完整状态。
+// P2-1/Pre-1：readonly/auditor/user 看凭据存在性（has_*）被拒；canManage（admin/ops_admin）看凭据存在性。
+// M86 扩展：url/user 也按 canManage 分级（同款分级范本）。
+// 配置详情（url / user）单独由 TestIntegrationStatus_URL与ZabbixUser仅canManage可见 钉死。
 func TestIntegrationStatus_凭据存在性仅canManage可见(t *testing.T) {
 	cfg := minimalCfgForTest("http://netbox.local", "http://zabbix.local", "http://glpi.local")
 	cfg.Integrations.Netbox.Token = "tok"
@@ -180,10 +184,6 @@ func TestIntegrationStatus_凭据存在性仅canManage可见(t *testing.T) {
 			zabbix := data["zabbix"].(map[string]interface{})
 			glpi := data["glpi"].(map[string]interface{})
 
-			// 配置状态（url/user）对所有人可见
-			assert.Contains(t, netbox, "url")
-			assert.Contains(t, zabbix, "user")
-
 			// 凭据存在性（has_*）仅 canManage 可见
 			_, nbHas := netbox["has_token"]
 			_, zbxHas := zabbix["has_password"]
@@ -197,7 +197,84 @@ func TestIntegrationStatus_凭据存在性仅canManage可见(t *testing.T) {
 	}
 }
 
-// ==================== BUG FIX 回归测试 ====================
+// M86：url / user 与 P2-1 has_* 同款按 canManage 分级。
+// 7 角色 × 3 字段 (netbox.url / zabbix.user / glpi.url)：
+// - admin / ops_admin (canManage=true) → 字段可见
+// - ops_user / auditor / readonly / user / 空 (canManage=false) → 字段不可见 (非 canManage 只看 enabled)
+//
+// mutation M1 反证：临时把 url/user 移出 `if canManage` 块 → 5 角色断言失败 (字段"被看见") + admin/ops_admin 仍绿。
+func TestIntegrationStatus_URL与ZabbixUser仅canManage可见(t *testing.T) {
+	cfg := minimalCfgForTest("http://netbox.local", "http://zabbix.local", "http://glpi.local")
+	cfg.Integrations.Zabbix.User = "zbx-admin"
+
+	cases := []struct {
+		role     string
+		canManage bool
+	}{
+		{"admin", true},
+		{"ops_admin", true},
+		{"ops_user", false},
+		{"auditor", false},
+		{"readonly", false},
+		{"user", false},
+		{"", false}, // 未知/空角色 → fail-safe 只读地板
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			r := newIntegrationTestRouterWithRole(cfg, tc.role)
+
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+			require.Equal(t, http.StatusOK, w.Code)
+
+			var resp map[string]interface{}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			data := resp["data"].(map[string]interface{})
+			netbox := data["netbox"].(map[string]interface{})
+			zabbix := data["zabbix"].(map[string]interface{})
+			glpi := data["glpi"].(map[string]interface{})
+
+			// enabled 永远可见（读地板，不含任何凭据/拓扑信息）
+			assert.Contains(t, netbox, "enabled")
+			assert.Contains(t, zabbix, "enabled")
+			assert.Contains(t, glpi, "enabled")
+
+			// url / user 按 canManage 分级
+			_, nbURL := netbox["url"]
+			_, zbxURL := zabbix["url"]
+			_, zbxUser := zabbix["user"]
+			_, glpiURL := glpi["url"]
+			assert.Equal(t, tc.canManage, nbURL, "netbox.url")
+			assert.Equal(t, tc.canManage, zbxURL, "zabbix.url")
+			assert.Equal(t, tc.canManage, zbxUser, "zabbix.user")
+			assert.Equal(t, tc.canManage, glpiURL, "glpi.url")
+		})
+	}
+}
+
+// M86：URL 字面不暴露。即使 key 不在 map 里，也要确认响应 body 不含 URL 字符串本身
+// （防 G-28 同款脱敏绕过：字段名改 / URL 出现在 debug log / 错误回显等非响应键路径）。
+// readonly 角色配置 netbox.url="http://secret-netbox:8000"，断言响应不含该字符串。
+func TestIntegrationStatus_URL与User不可见_不暴露配置拓扑(t *testing.T) {
+	cfg := minimalCfgForTest("http://secret-netbox:8000", "http://secret-zabbix:8080", "http://secret-glpi:80")
+	cfg.Integrations.Zabbix.User = "secret-zbx-user"
+	r := newIntegrationTestRouterWithRole(cfg, "readonly")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/integrations/status", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body := w.Body.String()
+	// readonly 响应里不应含任何 URL 字面或 Zabbix 用户名字面
+	assert.NotContains(t, body, "secret-netbox:8000")
+	assert.NotContains(t, body, "secret-zabbix:8080")
+	assert.NotContains(t, body, "secret-glpi")
+	assert.NotContains(t, body, "secret-zbx-user")
+	// 也不应出现 "url" / "user" 键（canManage=false 时不暴露）
+	assert.NotContains(t, body, `"url"`)
+	assert.NotContains(t, body, `"user"`)
+}
 
 // TestSync_非法Type_返400 — BUG#7
 //

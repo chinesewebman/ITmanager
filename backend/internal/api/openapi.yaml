@@ -1930,11 +1930,10 @@ paths:
       tags: [集成管理]
       summary: 获取集成配置状态
       description: |
-        返回 NetBox / Zabbix / GLPI 的 `enabled` + `url`（Zabbix 另含 `user`）。
-        `has_*` 布尔位**仅 canManage 角色**（admin / ops_admin）可见 —— 它们泄露
-        「凭据是否已配置」，对 readonly / auditor / user 不返回。
-        ⚠️ 回传集成 URL 与 Zabbix 用户名属**已登记的读地板**（TODO.md:59）；
-        本契约只如实描述现状，不改变响应内容。
+        返回 NetBox / Zabbix / GLPI 的 `enabled`（所有已认证角色可见）；
+        `url`（netbox/zabbix/glpi）与 `user`（zabbix）**仅 canManage 角色**（admin / ops_admin）可见（M86 收紧）。
+        `has_*` 布尔位同样**仅 canManage** 可见（P2-1 既有）—— 泄露「凭据是否已配置」对 readonly / auditor / user 不返回。
+        旧版（≤ M85）`url` / `user` 对所有已认证角色可见（TODO.md:60 登记的读地板泄漏），M86 起收口。
       operationId: getIntegrationStatus
       responses:
         '200':
@@ -3789,9 +3788,11 @@ components:
     IntegrationStatus:
       type: object
       description: |
-        集成配置状态。`enabled` = 该项 URL 非空。
-        ⚠️ `has_*` 布尔位**仅 canManage（admin / ops_admin）返回** —— 它们泄露「凭据是否已配置」。
-        回传 url / user 属已登记的读地板（TODO.md:59），本契约只描述现状。
+        集成配置状态。M86 起按能力分级：
+        - `enabled` 对所有已认证角色可见（最小读地板，无凭据/拓扑泄露）
+        - `url`（netbox / zabbix / glpi）与 `user`（zabbix）**仅 canManage（admin / ops_admin）可见**
+        - `has_*` 布尔位（netbox.has_token / zabbix.has_password / glpi.has_app_token / glpi.has_user_token）**仅 canManage 可见**
+        与 P2-1 `has_*` 同款范本：扩展到 url / user。non-admin（ops_user / auditor / readonly / user / 空角色）只看到 `enabled`。
       properties:
         code: { type: integer }
         data:
@@ -3799,27 +3800,27 @@ components:
           properties:
             netbox:
               type: object
-              required: [enabled, url]
+              required: [enabled]
               properties:
                 enabled: { type: boolean }
-                url: { type: string, description: 未配置时为空串 }
-                has_token: { type: boolean, description: 仅 canManage 返回 }
+                url: { type: string, description: 仅 canManage 可见（M86）；未配置时为空串 }
+                has_token: { type: boolean, description: 仅 canManage 可见 }
             zabbix:
               type: object
-              required: [enabled, url, user]
+              required: [enabled]
               properties:
                 enabled: { type: boolean }
-                url: { type: string, description: 未配置时为空串 }
-                user: { type: string, description: 对所有已认证角色可见 }
-                has_password: { type: boolean, description: 仅 canManage 返回 }
+                url: { type: string, description: 仅 canManage 可见（M86）；未配置时为空串 }
+                user: { type: string, description: 仅 canManage 可见（M86） }
+                has_password: { type: boolean, description: 仅 canManage 可见 }
             glpi:
               type: object
-              required: [enabled, url]
+              required: [enabled]
               properties:
                 enabled: { type: boolean }
-                url: { type: string, description: 未配置时为空串 }
-                has_app_token: { type: boolean, description: 仅 canManage 返回 }
-                has_user_token: { type: boolean, description: 仅 canManage 返回 }
+                url: { type: string, description: 仅 canManage 可见（M86）；未配置时为空串 }
+                has_app_token: { type: boolean, description: 仅 canManage 可见 }
+                has_user_token: { type: boolean, description: 仅 canManage 可见 }
 
     IntegrationUpdateResult:
       type: object

@@ -264,7 +264,8 @@ func SetupRouter(cfg *config.Config, integrationSvc *integration.IntegrationServ
 				apiKeys.PUT("/:id/revoke", canIdentity, handlers.RevokeAPIKey)
 			}
 
-			// 集成配置含 token，写/测试一律限 manage（只读状态查询不限）
+			// 集成配置：写/测试一律限 manage；只读 status 也分级 — 仅 canManage 看 url / Zabbix user（M86 收紧），
+			// 其他已认证角色只看到 enabled（足够判断「是否启用」），不暴露内网 URL 拓扑与 Zabbix 用户名。
 			protected.POST("/integrations/sync", canManage, integrationH.Sync)
 			protected.GET("/integrations/status", integrationH.GetIntegrationStatus)
 			// v2.2: 三个集成的运行时配置管理（UI Settings 保存按钮 + 测试连通）

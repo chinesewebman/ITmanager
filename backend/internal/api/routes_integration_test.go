@@ -836,7 +836,7 @@ var ungatedRoutes = map[string]string{
 	"GET /api/dashboard/stats":                 "仪表盘统计",
 	"GET /api/dashboard/kpis":                  "仪表盘 KPI",
 	"GET /api/dashboard/trends":                "仪表盘趋势",
-	"GET /api/integrations/status":             "集成连通状态（只回 URL/用户名，不含 token）",
+	"GET /api/integrations/status":             "集成连通状态（仅 enabled 全可见; url/user 仅 canManage）",
 	"GET /api/metric-snapshots":                "指标快照读",
 	"GET /api/metric-snapshots/latest":         "最新指标快照",
 	"GET /api/oncall/schedules":                "排班读",
