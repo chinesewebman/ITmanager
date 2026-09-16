@@ -384,6 +384,50 @@ M79 D4 flapping 强约束触发器真工作.
 - 回 A: `echo A > ~/.hermes/state/PM_LOOP_MODE` 或 等 flapping 触发自动切回
 - 停: `echo stop > ~/.hermes/state/PM_LOOP_MODE`
 
+
+
+### M81-candidate — G-41 zabbix_truncated 跨语言常量 + 契约测试（OMH ulw-loop 第 12 cycle, 2026-09-16）
+
+**摩擦**: M27/B ship `zabbix_truncated` 这个 0/1 源侧截断标志时就**已经**留下一个跨语言裸字符串约定 —
+后端 `integration/service.go:630` + `integration/handlers/integration_handler.go:88` 各写一遍
+`results["zabbix_truncated"] = trunc` 字面量, 前端 `Settings.tsx:294` 写 `res?.data?.data?.synced?.zabbix_truncated ?? 0`,
+三份独立副本无任何编译/类型关联. 改名/拼写漂移会**静默失效**: 前端读不到 → `?? 0` 兜底 → UI 永远显示
+「未截断」, 运维错过 6000-1=5999 条丢告警的真相. 比 M27/B 修之前更隐蔽 (日志里仍有「超过上限」, 只有 UI 静默).
+
+**改动** (backend + frontend, ≤1h):
+- `intent-M81-candidate.md` 新建 (12KB, 8 节 omh-plan 骨架)
+- `backend/internal/integration/sync_keys.go` 新建 (~30 行, `const KeyZabbixTruncated = "zabbix_truncated"`)
+- `backend/internal/integration/sync_keys_test.go` 新建 (~145 行, 4 契约测试: Value / InOpenAPISync / NoBareStringInCode / CrossLangWithTS)
+- `backend/internal/integration/service.go` SyncAll Zabbix 分支用 `KeyZabbixTruncated` 替换裸字符串
+- `backend/internal/api/handlers/integration_handler.go` case "zabbix" 用 `integration.KeyZabbixTruncated` 替换裸字符串
+- `frontend/src/services/syncKeys.ts` 新建 (~25 行, `export const SYNC_KEY_ZABBIX_TRUNCATED = "zabbix_truncated"`)
+- `frontend/src/services/syncKeys.test.ts` 新建 (~75 行, 3 契约测试: 常量值 / Settings 用常量 / CrossLangWithGo)
+- `frontend/src/pages/Settings.tsx` handleSyncZabbix 用 `[SYNC_KEY_ZABBIX_TRUNCATED]` 替换裸 access
+- `M81-completion-report.md` 新建 (摩擦/决策/改动/verify/派生 TODO/OMH workflow shape/注意事项)
+- `M81-graph-analysis.md` 新建 (双轨 graphify/codegraph + 漂移面对比 + 与 M27/M33/M36/G-57 关系)
+- `CHANGELOG.md` 加本段 (放在 M80 之后, cycle 12)
+- `TODO.md` G-41 标 done + 加 M81 完成条目 (omh-loop 第 12 cycle)
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 新建 (Poison 看 + watchdog 下次 tick 验证)
+
+**verify**:
+- `go test -count=1 ./...` **27 packages 全绿** ✓
+- `vitest run src/services/syncKeys.test.ts src/pages/Settings.test.tsx`: **61/61 PASS** (3 新 + 58 既有不退化) ✓
+- mutation inversion 实证 3 / 3 反证全红 → 还原全绿 ✓:
+  1. M1: Go `KeyZabbixTruncated` 漂离 `_v2` → TestKeyZabbixTruncated_Value + InOpenAPISync + CrossLangWithTS 三红
+  2. M2: 偷偷在 handler 写回裸字符串 → TestKeyZabbixTruncated_NoBareStringInCode 红 (grep guard 钉子)
+  3. M3: 改 OpenAPI spec 漂离 → TestKeyZabbixTruncated_InOpenAPISync 红 (word-boundary regex 防 substring 漏判)
+- **漂移面收口**: 3 副本 → 2 常量 + 4 契约测试. 任一侧漂离 CI 即红.
+- poison-stop-gates-v1 沿用 ✓
+- watchdog 自旋防 + commit age ≥ 10 min 沿用 (M79 D3/D4) ✓
+
+**派生 (留 future)**:
+- **G-57 同族收口**: `glpi_skipped` / `netbox` / `glpi` / `*_field_truncations` 4 个仍是裸字符串,
+  沿用 TODO.md G-57 登记不修. M81 实证的模式 (常量 + grep guard + 跨语言 drift 测试) 可直接复用 —
+  后续 round 沿用此模式低成本收 G-57 同族.
+- **gen:api description 补全 (M33/D-8)**: 沿用 M81 实证的 OpenAPI 真源模式, 补 SyncResult.description
+  4 个新键与「标志 vs 计数」区分, `npm run gen:api` 重生成 `frontend/src/services/api.types.ts`
+  (CI 硬门禁 `.github/workflows/ci.yml:197-198` 守住生成物).
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct

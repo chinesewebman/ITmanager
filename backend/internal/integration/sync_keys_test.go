@@ -30,12 +30,13 @@ func TestKeyZabbixTruncated_InOpenAPISync(t *testing.T) {
 	// 测试运行时 cwd 是 backend/internal/integration/, 所以相对路径走 ../
 	openAPIPath := filepath.Join("..", "api", "openapi.yaml")
 	spec, err := os.ReadFile(openAPIPath)
-	require.NoError(t, err, "读不到 %s — 测试运行环境异常 (期望 backend/ 为 cwd)", openAPIPath)
-
+	require.NoError(t, err, "读不到 %s — 测试运行环境异常", openAPIPath)
 	specStr := string(spec)
-	// SyncResult.description 是手写枚举, 抓包含 KeyZabbixTruncated 值的字符串
-	assert.Contains(t, specStr, KeyZabbixTruncated,
-		"OpenAPI SyncResult description 必须含常量值 %q (data.synced 的键清单真源)", KeyZabbixTruncated)
+	// 用 word-boundary regex, 防止「zabbix_truncated_v2」也算 Contains (那是 substring 不是 exact)
+	pattern := regexp.MustCompile(`\bzabbix_truncated\b`)
+	matches := pattern.FindAllString(specStr, -1)
+	assert.NotEmpty(t, matches,
+		"OpenAPI SyncResult description 必须含常量值 %q (data.synced 的键清单真源, word boundary 匹配防 substring 漏判)", KeyZabbixTruncated)
 
 	// 额外防御: description 必须真的在 SyncResult 段附近 (而不是落在 audit.source 之类无关段)
 	idx := strings.Index(specStr, "SyncResult:")
@@ -49,8 +50,8 @@ func TestKeyZabbixTruncated_InOpenAPISync(t *testing.T) {
 	if endIdx > 0 {
 		section = after[:endIdx+1]
 	}
-	assert.Contains(t, section, KeyZabbixTruncated,
-		"KeyZabbixTruncated %q 必须出现在 OpenAPI SyncResult 段 (不是其它 schema 的 description)", KeyZabbixTruncated)
+	assert.Regexp(t, pattern, section,
+		"KeyZabbixTruncated %q 必须出现在 OpenAPI SyncResult 段 (word boundary, 不是其它 schema 的 description)", KeyZabbixTruncated)
 }
 
 // TestKeyZabbixTruncated_NoBareStringInCode 守住 production 代码无裸字符串字面量。
