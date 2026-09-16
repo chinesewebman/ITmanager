@@ -323,6 +323,21 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M74 — IntentSpec Author Skill 骨架升级（OMH ulw-loop 第 6 cycle, 2026-09-17）
+
+**摩擦**: OMH 没有 `intent-spec-author` skill. 起新 round 时 (e.g. "起 M75 = PII 脱敏")
+要走 omh-plan (8 节通用 planning) 或手动写 intent-M{N}.md. **缺窄入口**:
+PM-direct 决策是一句话, 但 spec 是 8 节 executable, 没有专用 skill route.
+
+**改动** (config-only, ≤2h):
+- 新文件 `~/.omh/skills/planner/intent-spec-author/SKILL.md` (7KB, 9 节)
+- frontmatter: `name: intent-spec-author`, `phase: intent`, `category: planning`,
+  `role: planner`, `quality_tier: acceptance-gated`
+- see_also: `~/.omh/decisions/model-calibration.md` + `omh-plan/SKILL.md`
+- **不改 omh-plan body** (避免 omh install --force 覆盖)
+
+**verify**: YAML frontmatter parse 通过 / 9 节 (Why/Do Not Use/Examples/Completion/Recovery/Workflow/Use When/8-Section/Catalog) / size 7KB
+
 ### M73 — OMH Model Calibration Paragraph（OMH ulw-loop 第 5 cycle, 2026-09-17）
 
 **摩擦**: Poison 默认两个 LLM provider (minimax + deepseek), 工具调用习惯与输出 shape 不同.
