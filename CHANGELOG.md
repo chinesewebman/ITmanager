@@ -323,6 +323,36 @@ v3 §3 R3 状态：「P-4 上千 VM 零纳管」**TODO → DONE**（文档已落
 - 决策点 1 (alert↔rule 匹配)：E1.b（triggerid→rule_id 映射表，新 migration）
 - 决策点 2 (fire 去重)：E2.a（trigger_id + problem_start 60s 窗口）
 
+### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
+
+**摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
+自起 round 需要 Poison 在对话里触发. 起 **autonomous loop watchdog** —— Poison 不主动
+找 PM, PM 主动找 Poison.
+
+**Poison 选 C (A+B 混合)**:
+- **Mode A (默认)**: 每 10 min watchdog tick, 若有 idle slot → 写 `PM_NEXT_ROUND_REPORT.md`,
+  Poison 在 Telegram 看到 → 回 "go M{N}" / "stop" / "auto"
+- **Mode B (auto)**: Poison 在 `PM_LOOP_MODE` 写 "B" → watchdog 自动 dispatch omp 跑下一 round
+
+**改动** (config-only, ≤2h):
+- 替换 `~/.hermes/scripts/pm-loop-watchdog.sh` (6.5KB, 保留原 4 道防线 + 加 idle-slot 检测 + 模式 A/B 分支)
+- 新建 `~/.config/systemd/user/pm-loop-watchdog.service` + `.timer` (every 10min)
+- `systemctl --user enable --now pm-loop-watchdog.timer` 激活
+
+**verify**:
+- `systemctl --user list-timers` 列出 pm-loop-watchdog ✓
+- 手动跑一次 `MIN_GAP_MIN=0 bash watchdog` 生成 `PM_NEXT_ROUND_REPORT.md` ✓
+- 自旋防: NOW_MIN=LAST_MIN 阻止同分钟重复起 ✓
+- Commit age ≥ 10 min 才起下一 round (防 race) ✓
+- Poison stop gates (poison-stop-gates-v1) 沿用 (LOOP_MODE="stop" 即 freeze) ✓
+- 模式 B 自旋防: 同 round dispatch > 1 in 30 min → 切回 Mode A + inbox 标 ✓
+
+**Poison 用法**:
+- 模式 A: 看 `~/.hermes/state/PM_NEXT_ROUND_REPORT.md` → 回 "go M{N}" / "stop"
+- 模式 B: `echo B > ~/.hermes/state/PM_LOOP_MODE` → watchdog 自动 dispatch
+- 回 A: `echo A > ~/.hermes/state/PM_LOOP_MODE`
+- 停: `echo stop > ~/.hermes/state/PM_LOOP_MODE`
+
 ### M77 — G-19 web 容器最小权限 unprivileged nginx（OMH ulw-loop 第 8 cycle, 2026-09-17）
 
 **摩擦**: `web` 容器是**唯一对外入口**, 但当前以 root 运行 + 无最小权限. nginx master
