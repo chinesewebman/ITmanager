@@ -144,8 +144,8 @@ describe('M61 用户管理页', () => {
     const spy = vi.spyOn(api, 'get').mockResolvedValue(envelope(USERS) as never)
     renderUsers()
 
-    expect(await screen.findByText('zhangsan')).toBeInTheDocument()
-    expect(screen.getByText('admin@example.com')).toBeInTheDocument()
+    expect(await screen.findByText('zh****an')).toBeInTheDocument()
+    expect(screen.getByText('a***@example.com')).toBeInTheDocument()
     // 角色显示中文名 + 词表值（下拉选项与展示同源）
     expect(screen.getByText('运维人员 (ops_user)')).toBeInTheDocument()
     // 已禁用行显示「禁用」，未登录显示「从未登录」
@@ -176,7 +176,7 @@ describe('M61 用户管理页', () => {
       .mockResolvedValue(one({ ...USERS[1], status: 'inactive' }) as never)
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     // 张三当前是启用态 → Switch 应为 checked
     const sw = screen.getByTestId('user-status-u2')
@@ -185,7 +185,7 @@ describe('M61 用户管理页', () => {
     fireEvent.click(sw)
     // 确认文案必须点名是要禁用谁（「禁用账号」+ 用户名）
     expect(await screen.findByText('禁用账号')).toBeInTheDocument()
-    expect(document.querySelector('.ant-popconfirm')?.textContent).toContain('zhangsan')
+    expect(document.querySelector('.ant-popconfirm')?.textContent).toContain('zh****an')
 
     await clickPopconfirmOK()
 
@@ -206,7 +206,7 @@ describe('M61 用户管理页', () => {
     const patchSpy = vi.spyOn(api, 'patch')
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     fireEvent.click(screen.getByTestId('user-status-u2'))
     // 只打开确认框，不点确认
@@ -222,7 +222,7 @@ describe('M61 用户管理页', () => {
       .mockResolvedValue(one({ ...USERS[2], status: 'active' }) as never)
 
     renderUsers()
-    await screen.findByText('lisi')
+    await screen.findByText('****')
 
     fireEvent.click(screen.getByTestId('user-status-u3'))
     expect(await screen.findByText('启用账号')).toBeInTheDocument()
@@ -239,7 +239,7 @@ describe('M61 用户管理页', () => {
       .mockResolvedValue(one({ ...USERS[1], role: 'ops_admin' }) as never)
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     // 打开角色下拉并选「运维管理员」(ops_admin)
     openRoleDropdown('user-role-u2')
@@ -248,7 +248,7 @@ describe('M61 用户管理页', () => {
     // 选中即弹确认（受控 Popconfirm），未确认前不发请求
     await waitFor(() => expect(document.querySelector('.ant-popconfirm')).toBeTruthy())
     expect(patchSpy).not.toHaveBeenCalled()
-    expect(document.querySelector('.ant-popconfirm')?.textContent).toContain('zhangsan')
+    expect(document.querySelector('.ant-popconfirm')?.textContent).toContain('zh****an')
 
     await clickPopconfirmOK()
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1))
@@ -260,7 +260,7 @@ describe('M61 用户管理页', () => {
     const patchSpy = vi.spyOn(api, 'patch')
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     openRoleDropdown('user-role-u2')
     await pickRoleOption('审计员 (auditor)')
@@ -286,7 +286,7 @@ describe('M61 用户管理页', () => {
     } as never)
 
     renderUsers()
-    await screen.findByText('admin')
+    await screen.findByText('ad*in')
 
     fireEvent.click(screen.getByTestId('user-status-u1'))
     await clickPopconfirmOK()
@@ -310,7 +310,7 @@ describe('M61 用户管理页', () => {
     } as never)
 
     renderUsers()
-    await screen.findByText('admin')
+    await screen.findByText('ad*in')
 
     openRoleDropdown('user-role-u1')
     await pickRoleOption('运维管理员 (ops_admin)')
@@ -334,7 +334,7 @@ describe('M61 用户管理页', () => {
     } as never)
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     openRoleDropdown('user-role-u2')
     await pickRoleOption('只读用户 (readonly)')
@@ -352,7 +352,7 @@ describe('M61 用户管理页', () => {
     const patchSpy = vi.spyOn(api, 'patch')
 
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     fireEvent.click(screen.getByTestId('user-force-change-u2'))
     expect(await screen.findByText('强制下次登录改密')).toBeInTheDocument()
@@ -373,13 +373,13 @@ describe('M61 用户管理页', () => {
 
     // useApiQuery 对 5xx 会重试 2 次（指数退避 1s+2s），故这里放宽等待窗口
     expect(await screen.findByText('用户列表加载失败', {}, { timeout: 6000 })).toBeInTheDocument()
-    expect(screen.queryByText('zhangsan')).toBeNull()
+    expect(screen.queryByText('zh****an')).toBeNull()
   })
 
   it('分页：第 2 页带 page=2（服务端分页，不是本地假分页）', async () => {
     const getSpy = vi.spyOn(api, 'get').mockResolvedValue(envelope(USERS, 40) as never)
     renderUsers()
-    await screen.findByText('zhangsan')
+    await screen.findByText('zh****an')
 
     // 关掉 popconfirm 干扰，点分页第 2 页
     fireEvent.click(screen.getByTitle('2'))
@@ -397,7 +397,7 @@ describe('M61 用户管理页', () => {
     )
     const { container } = renderUsers()
 
-    expect(await screen.findByText('admin')).toBeInTheDocument()
+    expect(await screen.findByText('ad*in')).toBeInTheDocument()
     expect(screen.queryByText('half-row')).toBeNull()
     expect(container.querySelectorAll('tbody tr[data-row-key]').length).toBe(1)
   })

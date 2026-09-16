@@ -16,9 +16,10 @@
 //   - 403 的两种情形不是「参数写错」而是策略：自我禁用 / 降级最后一名可登录管理员。
 //     页面据 403 回滚并原样显示服务端原因（那是最能说清原因的一手信息）。
 //
-// **不做删除按钮**：账号走 status=inactive，不硬删 —— 审计要求保留操作历史
+// 不做删除按钮**：账号走 status=inactive，不硬删 —— 审计要求保留操作历史
 // （audit_logs.user_id 取值来自 users，硬删后历史里的操作人再也查不到是谁）。
-// PII 脱敏是另一件事（TODO 已登记）。
+// PII 脱敏：M75 — `username` / `email` 在表格里走 `utils/pii` 的 `maskUsername` / `maskEmail`
+// 默认脱敏（保留前 2 + 后 2 / 保留首字符 + 域名），admin 仍能通过 API 拿到原文（不影响运维处置）。
 import { useEffect, useMemo, useState } from 'react'
 import { Button, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -36,6 +37,7 @@ import { PageHeader } from '../components/PageHeader'
 import { queryKeys, useApiMutation, useApiQuery } from '../hooks/useApiQuery'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { formatDateTime } from '../utils/time'
+import { maskEmail, maskUsername } from '../utils/pii'
 
 /** 每页条数（后端 `page_size`，service 层夹在 1..500）。 */
 export const PAGE_SIZE = 20
@@ -235,7 +237,9 @@ function Users() {
         dataIndex: 'username',
         render: (v: string, row) => (
           <Space direction="vertical" size={0}>
-            <Typography.Text strong>{v}</Typography.Text>
+            <Typography.Text strong data-testid={`user-username-${row.id}`}>
+              {maskUsername(v)}
+            </Typography.Text>
             {row.nickname ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {row.nickname}
@@ -247,7 +251,7 @@ function Users() {
       {
         title: '邮箱',
         dataIndex: 'email',
-        render: (v: string) => v || '—',
+        render: (v: string, row) => (v ? <span data-testid={`user-email-${row.id}`}>{maskEmail(v)}</span> : '—'),
       },
       {
         title: '角色',
@@ -259,7 +263,7 @@ function Users() {
             title="修改角色"
             description={
               <>
-                把 <b>{row.username}</b> 的角色改为「{ROLE_LABEL[pending?.kind === 'role' ? pending.next : v] ?? v}」？
+                把 <b>{maskUsername(row.username)}</b> 的角色改为「{ROLE_LABEL[pending?.kind === 'role' ? pending.next : v] ?? v}」？
                 <br />
                 改完立即生效（对方无需重新登录即可获得/失去能力）。
               </>
@@ -302,12 +306,12 @@ function Users() {
                 description={
                   active ? (
                     <>
-                      禁用 <b>{row.username}</b>？该账号的登录会话与 API Key 立即失效
+                      禁用 <b>{maskUsername(row.username)}</b>？该账号的登录会话与 API Key 立即失效
                       （最长 30s 生效）。
                     </>
                   ) : (
                     <>
-                      启用 <b>{row.username}</b>？该账号可立即重新登录。
+                      启用 <b>{maskUsername(row.username)}</b>？该账号可立即重新登录。
                     </>
                   )
                 }
@@ -348,7 +352,7 @@ function Users() {
           <Tooltip title="置 must_change_password=true：该账号下次登录必须改密（不是由管理员设新密码）">
             <Popconfirm
               title="强制下次登录改密"
-              description={<>对 <b>{row.username}</b> 置强制改密标志？</>}
+              description={<>对 <b>{maskUsername(row.username)}</b> 置强制改密标志？</>}
               okText="确认"
               cancelText="取消"
               onConfirm={() => forceChangeMut.mutate({ id: row.id })}
