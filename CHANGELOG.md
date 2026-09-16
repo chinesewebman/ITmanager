@@ -591,6 +591,51 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 - **真 PG 并发 race window 测试** (M85 cycle 15 派生): 仍是 M87+ 候选.
 - **mutation 范本写入 skill**: 「响应字段守卫 mutation inversion 范本 D」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」 + M85 范本 C 「业务并发窗口 mutation」并列), 后续响应字段 round 复用.
 - **既有 URL 断言测试更新范本**: 收紧即收测试角色 (M86 改了 `TestIntegrationStatus_ThreeIntegrationsReturnURL` → admin), 与 P2-1 fix 既有测试不动 (P2-1 是新增分级) 区分 — 这是范本 D 与范本 A/B/C 的设计要点差异, 写进 skill 时要明确.
+### M87-candidate — G-5 已签发 JWT 不查库 主动失效收口 (active invalidation, OMH ulw-loop 第 17 cycle, 2026-09-16)
+
+**摩擦**: PM_QUEUE M87-candidate 来自 TODO.md L62 "G-5 已签发 JWT 不查库 (2026-09-09 新增) — `status=inactive` 对 API Key 立即生效 (`middleware/auth.go:187`), 但对已签发会话 JWT 最长 24h 才生效 (`middleware/auth.go:112-124` 只用 claims; `auth.jwt.expire=86400`)". 这条登记有一个**反转史**: 2026-09-13 M40 (`6172977`) ship 把方向反转为 "JWT 路径加 `lookupUserStatus` + 30s TTL cache (≤30s 全副本生效, cache per-process)"; `middleware/auth_status_cache.go:88-93` 注释当时显式承诺 "保留 hook 位给将来 round"; 2026-09-15 M61 ship 补上 `user_service.Update/UpdateStatus/UpdateRole` 与三个写端点 — **但 M61 没有把 active invalidation 接进 service.Update**, 与 M40 注释里承诺的 hook 还有一步之差. M87 把这步接上.
+
+**决策**: 不接受 "M40 已 ship, G-5 已结案" 的 framing — 因为 (1) M40 ship 时登记的 ≤30s trade-off 是有 T 恤粘住的"已知", 不是"接受"; (2) M40 注释显式承诺 hook, 兑现承诺 = 闭环; (3) handler 层 `TestRoutes_禁用账号后JWT立即失效` (M61 ship) 用**手动** `InvalidateAuthStatusCacheForUser(victim)` 模拟 cache 自然过期 — 这是 M61 ship 时的 workaround, M87 ship 后该手动调用**可以删**, 但本 round **不删** (两个测试并存, M61 测试 = "手动 invalidate 也能验", M87 新测试 = "不手动 invalidate 也验", 互相不替代).
+
+**改动** (backend service + middleware + tests, ≤3h):
+- `intent-M87-candidate.md` 新建 (299 lines, 8 节 omh-plan 骨架, Goal 钉死 "把 M40 预留的 hook 接上 M61 写端点" + "D21 空 updates 不调 invalidate")
+- `backend/internal/service/user_service.go:144-188` `applyUserUpdate` 末尾加 `middleware.InvalidateAuthStatusCacheForUser(id)` (commit 成功后调, 失败路径不调):
+  - Update / UpdateStatus / UpdateRole 三条路径共用 `applyUserUpdate`, 一处加全部覆盖
+  - 「空 updates 不发 UPDATE」分支 (`user_service.go:122-124`) **不**调 invalidate — 没改东西就不必清 cache (D21 强约束)
+  - 注释: "M87 active invalidation — 写成功后立即清鉴权 cache, 让 victim 的下一请求必读 DB 拿到最新 status (该副本 ≈0s 生效). `invalidate` 是纯 map 操作, 不会失败也不 panic — 兜底仍是 30s TTL."
+- `backend/internal/middleware/auth_status_cache.go:88-105` 文档翻新:
+  - `InvalidateAuthStatusCacheForUser` 从 "生产代码不应调用此函数" 改为 "**生产路径 hook** (M87 起 `user_service.applyUserUpdate`); 多副本部署下只对处理 update 请求的副本生效, 其他副本仍走 30s TTL (M40 trade-off). 仍可被测试用"
+  - 新增 `SetAuthStatusCacheForTest(userID, status)` / `GetAuthStatusCacheForTest(userID) (string, bool)` — 跨包测试 helper, 「生产代码不应调用」注释明示
+  - `lookupUserStatus` 注释补 "30s TTL 是 fallback; 写路径由 user_service.applyUserUpdate 主动 invalidate"
+- `backend/internal/service/user_service_test.go` 加 2 测试 + middleware import:
+  - `TestUserService_Update_成功后清鉴权statusCache` — sqlite, 预 `SetAuthStatusCacheForTest(id, "active")` → 调 `svc.UpdateStatus(inactive)` → 断言 `GetAuthStatusCacheForTest(id) == false` (AC-M87-1)
+  - `TestUserService_Update_空输入不调invalidate` — sqlite, 预 `Set("active")` → 调 `svc.Update(ctx, id, UpdateUserInput{}, ...)` (零字段) → 断言 cache 仍 "active" (D21 钉死)
+- `backend/internal/api/routes_integration_test.go:2121-2168` 加 1 测试:
+  - `TestRoutes_主动清鉴权statusCache_下次JWT立即401` — 端到端, **不**依赖手动 invalidate (与 M61 `TestRoutes_禁用账号后JWT立即失效` 用手动 invalidate 区分)
+- `docs/FIX-PLAN-AUTHZ-CLOSURE.md:201-207` §6 第 3 条加注: 「2026-09-13 M40 + 2026-09-16 M87 联合 ship, 此条结案」+ 解释方向反转 + 主动失效 hook 落地 + 登记 **G-5-2 followup** (Redis pub/sub 广播 invalidation, 跨副本全局近 0s)
+- `M87-candidate-completion-report.md` 新建 (见另文件, 9.7KB)
+- `M87-candidate-graph-analysis.md` 新建 (见另文件, 13.5KB, 含 service ↔ middleware cache 节点图 + M40 ↔ M87 时序对比 + M86 ↔ M87 范本对比 + 多副本 trade-off 节点图 + codegraph 双轨 wiring 验证)
+- `TODO.md` L62 `- [ ]` → `- [x]` + 描述更新 (M40 ship + M87 ship + 行号引用 `middleware/auth.go:130-140` + G-5-2 followup)
+- `CHANGELOG.md` 加本段 (放在 M86 之后, cycle 17)
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 写 M87 closeout (Poison 看 + watchdog 下次 tick 验证)
+- `~/.hermes/state/PM_QUEUE.json` M87-candidate.status: `candidate` → **`shipped`** + append `shipped[]` registry (D10 实证)
+
+**verify**:
+- `grep -n 'middleware\.InvalidateAuthStatusCacheForUser' backend/internal/service/`: 仅 1 callsite, 在 `applyUserUpdate` 末尾 (L185) ✓
+- `cd backend && go test -race -count=1 ./internal/service/ ./internal/middleware/ ./internal/api/`: **全绿** (含 3 M87 新测试 + 既有所有测试) ✓
+- `cd backend && go test -race -count=1 -timeout=180s ./...`: **27 packages ok** ✓ (0 退化, race detector 0 误报)
+- mutation inversion 实证 1 / 1 反证全红 → 还原全绿 ✓:
+  - M1: Python 脚本把 `applyUserUpdate` 末尾 `middleware.InvalidateAuthStatusCacheForUser(id)` 这一行注释掉 (`_ = id // MUTATION M1`) → `TestRoutes_主动清鉴权statusCache_下次JWT立即401` 红 (期望 victim 下一请求 401, 实得 200 — cache 仍 active, 没被主动清) → `mv user_service.go.m87bak user_service.go` 还原 → 全绿
+- mutation 临时文件实证完**全部 mv 还原 + bak 文件 rm**, `git status --short` 仅 commit 2 (impl + tests + comments) + commit 3 (docs) 才算闭环 (D9 实证: 临时文件不入 commit)
+
+**派生 (留 future)**:
+- **G-5-2 followup**: 多副本部署下其他副本仍 ≤30s TTL. 真要全局近 0s 需 Redis pub/sub 广播 invalidation. 触发条件: 多副本部署上线 (运维动作, 非代码). 当前 ≤30s 已够运维封禁场景 (≤30s 全副本生效), 属「可接受」状态.
+- **`TestDBSmoke_M87_ActiveInvalidation` 真 PG 5 场景**: 范本在 `intent-M87-candidate.md` §Acceptance. M87 因为 handler test 已 PASS-FAIL-PASS 反证, 暂未加; M88+ 跑 db_smoke.sh 时顺带落地 (S1 预热 / S2 空 cache / S3 50ms 短窗 / S4 翻回 active / S5 role 不动 status), 与 M86 同款范本「mutation inversion 在真 PG 反证」.
+- **「空 updates 走 Get 分支不副作用 cache」**: D21 强约束, M87 测试已钉死 (`TestUserService_Update_空输入不调invalidate`).
+- **`TestRoutes_禁用账号后JWT立即失效` (M61 ship) 的手动 invalidate 是否删**: 不删. 两个测试并存, 等价但**不互替**. M61 测试 = 「手动 invalidate 也能验」; M87 测试 = 「不手动 invalidate 也验」. 删任何一个都会丢失一面.
+- **mutation 范本 E 写入 skill**: 「服务层 → cache 失效联动 mutation inversion 范本 E」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」 + M85 范本 C 「业务并发窗口 mutation」 + M86 范本 D 「响应字段守卫 mutation」并列). E 与 A 同形 (都是业务代码 mutation) 但守卫对象不同: A 守业务逻辑正确性, E 守**跨层副作用** (service 操作触发 middleware 状态变更). 后续跨层副作用 round 复用.
+- **`Role` JWT claims 签发时快照**: 即使 M87 让 status cache 主动失效, **role 字段**仍受 JWT 本身语义约束 (claims 是签发时快照). 改 role 必须重发 token (D12), 属独立特性. M87 不动 JWT 续签 / 强制重发逻辑.
+- **`StatusCacheInvalidator` 接口注入解耦**: 既有 service 层已经 import middleware (`user_service.go:8`), 不引入新 import. 真要解耦可后续注入 `StatusCacheInvalidator` 接口 (M98+ 候选).
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
