@@ -114,7 +114,7 @@ services:
         # （container_name 不注册 DNS，服务名才是 `api`）。不要删。
         aliases: [backend]
 
-  # 前端
+  # 前端（G-19 / M77：unprivileged + 容器级硬化）
   web:
     <<: *default-logging
     build:
@@ -123,11 +123,23 @@ services:
     container_name: nmp-web
     restart: unless-stopped
     ports:
-      # 只绑环回：本容器提供的是**明文 HTTP**（nginx.conf 是 listen 80），
-      # 绑 0.0.0.0 等于把未加密的登录入口暴露到局域网（与 PCI DSS 的 TLS 1.2+ 要求冲突）。
-      # 对外提供必须前置 TLS 终结：宿主机反代/LB 指向 127.0.0.1:3000，
-      # 或改绑 0.0.0.0 并挂载 frontend/nginx-tls.conf.example（见 08-部署运维.md §8.2.2）。
-      - "127.0.0.1:3000:80"
+      # G-19：unprivileged nginx 默认 8080（不能绑 < 1024），对外提供的是明文 HTTP，
+      # 仍只绑环回 —— TLS 终结放宿主反代/LB（127.0.0.1:3000 → web:8080），
+      # 或改绑 0.0.0.0 + 套 nginx-tls.conf.example（见 08-部署运维.md §8.2.2；
+      # TLS 模板用 root 镜像，挂载时切回 nginx:1.27-alpine）。
+      - "127.0.0.1:3000:8080"
+    # G-19：容器级硬化。read_only + tmpfs 让 nginx 仍能写 cache/pid/temp，
+    # 但进程内即便被攻陷也写不进镜像层；cap_drop ALL 砍掉不需要的特权；
+    # no-new-privileges 防 setuid 二进制提权。
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=32m
+      - /var/run:size=16m
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # G-7: 固定 IP，供 api 的 NMP_SERVER_TRUSTED_PROXIES 精确指向（只信任这一个容器，
     # 不信任整个子网 —— 同网段还有 postgres/redis/netbox，任一被攻陷即可伪造 XFF）。
     networks:
