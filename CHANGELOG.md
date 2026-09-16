@@ -472,6 +472,7 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 
 ### M83-candidate — CI 升级实证闭环 (OMH ulw-loop 第 14 cycle, 2026-09-16)
 
+
 **摩擦**: PM_QUEUE M83-candidate 来自 TODO.md L193 "`CI 升级`: 加 `go test -race` + frontend vitest 步骤", **物理 CI 步骤早由 M41 (`182f621`, 2026-09-13) + B1-3 (`3725f40`, 2026-07-01) 两轮 ship 完成** (`.github/workflows/ci.yml` L53 `go test -race ./...` + L205 `npx vitest run` 已在位). 但 PM_QUEUE 状态从未切到 `shipped`, TODO.md L193 仍 `- [ ]`, mutation inversion 实证从未做过 — watchdog 派工时无 round 实测守门.
 
 **决策**: 不新增 CI step (M41 + B1-3 已 ship), 走 **mutation inversion 实证既有 step 真在守门**模式 — 沿用 M82 cycle 13 closeout 范本.
@@ -501,7 +502,51 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 - **G-CI-2 coverage 阈值门禁 (TODO.md L194)**: 沿用 PM_QUEUE 登记不修, M84+ candidate 候选. 沿用 M82 「既有 helper + 加契约测试」模式 + M83 「CI 守门 mutation inversion」模式组合 (加 coverage 阈值命令 + 加契约测试验阈值命令真生效). **先调研项目当前 coverage 状态再起 round**.
 - **「CI 守门 mutation inversion」范本写入 skill**: 本 round 新增范本 B (M82 范本 A = 业务代码, M83 范本 B = CI 守门) 可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的 mutation inversion 范本库, 后续 CI 升级 round 复用.
 - **CI 失败时给 PR 评论 (chatops)**: 派生 follow-up, 不在本 round scope.
+### M85-candidate — `cmd/set-role` 并发窗口收口 (broad lock + SELECT FOR UPDATE 串行化, OMH ulw-loop 第 15 cycle, 2026-09-16)
 
+**摩擦**: PM_QUEUE M85-candidate 来自 TODO.md L59 "`cmd/set-role` 并发窗口 — 防自锁检查与写入已同事务，但两个并发进程仍可能各自通过（TOCTOU）；该命令是人工运维操作，**暂不修**". watchdog M84 自举派工第 1 例 (`pm-loop-derive-candidates.py` M84 ship), 2026-09-16T16:06:58 Mode B 自动 dispatch.
+
+**诊断**: `cmd/set-role/main.go:84-105` 的事务只读目标用户 row 一次 (事务外 L73)，事务内 count "其他 admin" (`WHERE role='admin' AND id<>?`) **不加锁**。两个并发进程:
+  - Tx A (demote A): 看到 B 是 admin → count others=1 → 通过 → 改 A
+  - Tx B (demote B): 看到 A 是 admin → count others=1 → 通过 → 改 B
+  - 结果: 0 admin, 系统自锁, 只能 SQL 直连救. 「排除目标」让两个并发事务**锁不到共同行**, 是「读-判-写」TOCTOU 的典型反模式.
+
+**决策**: 不接受 "暂不修" framing (TODO 描述承认有 bug; 修复路径已存在: `internal/service/user_service.go:144-178` ship 了 SELECT FOR UPDATE 范本, 沿用即可, 成本 ≤ 3h). 走 omh-plan 8 节骨架, **实证 + 修复** 一次完成.
+
+**改动** (backend cmd/set-role, ≤3h):
+- `intent-M85-candidate.md` 新建 (16KB, 8 节 omh-plan 骨架, Goal 钉死「实证 + 修复」与「不接受暂不修 framing」)
+- `backend/cmd/set-role/main.go:82-107` 改 count query:
+  - 加 `Clauses(clause.Locking{Strength: "UPDATE"})` — 锁**全部** admin 行 (不排除目标)
+  - 移除 `AND id <> ?` 排除目标 (锁集合必须相交, 否则重新打开 TOCTOU)
+  - 语义由 `otherAdmins == 0` 改为 `totalAdmins <= 1` (目标自身算 1)
+- `backend/cmd/set-role/main.go:125-140` 提取 `countAdminUnderLock` helper (暴露给白盒契约测试)
+- `backend/cmd/set-role/main_test.go` 加 4 测试:
+  - `TestRunWithDeps_并发窗口锁SQL契约_PG` — PG dialector + DryRun 抓 SQL, 断言含 `FOR UPDATE` + 不含 `AND id` / `id <>` (M85 收口核心)
+  - `TestRunWithDeps_并发窗口锁SQL契约_sqlite对照` — sqlite dialector DryRun, 断言**不**含 `FOR UPDATE` (证 sqlite 不渲染锁, 接受已知边界)
+  - `TestRunWithDeps_并发窗口mutation_inversion_M1` — 反证: mutation 剥 clause.Locking → SQL 不带锁 → 红 → 还原绿
+  - `TestRunWithDeps_并发窗口_GORM并发等价` — sqlite sequential 模拟 4 个场景 (broad lock 行为正确)
+- `M85-candidate-completion-report.md` 新建 (17KB, 摩擦/决策/改动/mutation 实证/verify/派生 TODO/OMH workflow shape/注意事项)
+- `M85-candidate-graph-analysis.md` 新建 (11KB, cmd/set-role 节点图 + countAdminUnderLock SQL 形态 + M1/M2 mutation 调用链 + M82↔M83↔M85 范本对比 + HTTP 路径同款问题地图)
+- `CHANGELOG.md` 加本段 (放在 M83 之后, cycle 15)
+- `TODO.md` L59 `- [ ]` → `- [x]`, 标 "已 ship M85-candidate (broad lock + SQL 契约测试), 见 `M85-candidate-completion-report.md`"
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 写 M85 closeout (Poison 看 + watchdog 下次 tick 验证)
+- `~/.hermes/state/PM_QUEUE.json` M85-candidate.status: `candidate` → **`shipped`** + append `shipped[]` registry (D10 实证)
+
+**verify**:
+- `grep -n "Clauses(clause.Locking" backend/cmd/set-role/main.go`: L102 锁子句在位 ✓
+- `grep -n "AND id\|id <>" backend/cmd/set-role/main.go`: 无 (排除目标已移除) ✓
+- `cd backend && go test -race -count=1 ./cmd/set-role/`: **17 PASS / 0 FAIL** (13 既有 + 4 M85 新) ✓
+- `cd backend && go test -race -count=1 -timeout=180s ./...`: **21 packages ok** ✓ (0 退化, race detector 0 误报)
+- mutation inversion 实证 2 / 2 反证全红 → 还原全绿 ✓:
+  - M1: 临时剥 `Clauses(clause.Locking{Strength: "UPDATE"})` → `TestRunWithDeps_并发窗口锁SQL契约_PG` + `mutation_inversion_M1` 双红 (`"FOR UPDATE" does not contain`) → `mv main.go.m85bak main.go` 还原 → 双绿
+  - M2: 临时还原 `AND id <> ?` (broad lock 还在但排除目标) → `TestRunWithDeps_并发窗口锁SQL契约_PG` + `mutation_inversion_M1` 双红 (`"AND id" should not contain`) → 还原 → 双绿
+- 两个 mutation 临时 edit 实证完**全部 mv 还原 + bak 文件 rm**, `git status --short` 仅 `intent-M85-candidate.md` + `M85-candidate-completion-report.md` + `M85-candidate-graph-analysis.md` (D9 实证: 临时文件不入 commit)
+
+**派生 (留 future)**:
+- **HTTP 路径同样的 TOCTOU 风险** (`internal/service/user_service.go:215-228` `checkUserUpdateGuards` 的最后一名 admin 守卫): 与 cmd/set-role 同款 — 当前已有 `clause.Locking{Strength: "UPDATE"}` 锁 target user row (L150-156), 但 count other admins **不**加锁, 是同样的 broad-lock-vs-exclude-target 设计错误. 修复范本沿用本 round: 改 count query 锁**全部** active admin 行. **M86+ candidate 候选**, scope = mixed (需 HTTP 路径测试 + 真 PG e2e 测试).
+- **真 PG 并发 race window 测试**: M85 单测基于 sqlite `:memory:` sequential 模拟, 抓不到真并发 race (sqlite 单连接天然串行). 真 PG 上跑 `pg_try_advisory_lock` + 2 个独立 `*sql.DB` 实例并发 demote-admin 才是「真并发实证」. **M86+ 候选**, 加 `db_smoke` 真 PG 测试.
+- **mutation 范本写入 skill**: 「业务并发窗口 mutation inversion 范本 C」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」并列), 后续业务并发 round 复用.
+- **`db_smoke` 加并发窗口 PG 测试**: 沿用 M82 派生 TODO 模式, 加真 PG e2e 测试覆盖 cmd/set-role 并发窗口.
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
