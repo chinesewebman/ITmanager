@@ -21,6 +21,11 @@ database:
   name: "network_monitor"
   # F1: release 模式建议 require 或 verify-full
   sslmode: "disable"
+  # M88 / G-14: 是否启动时自动跑迁移. true (默认, 单副本 / 开发场景).
+  # 多副本部署设 NMP_DATABASE_AUTOMIGRATE=false, 由独立的 one-shot `migrate`
+  # 服务跑迁移, api 副本不抢 advisory lock. 详见 docker-compose.yml 的
+  # `migrate` 服务 + TODO.md L70 + docs/FIX-PLAN-COMPOSE-RUNTIME.md D-C (M88 加注).
+  automigrate: true
 
 redis:
   host: "localhost"

@@ -38,7 +38,7 @@ func main() {
 
 	// 3. 初始化数据库
 	database.SetGormLogLevel(cfg.Log.Level)
-	db, err := database.Init(&cfg.Database)
+	db, err := database.InitWithAutoMigrate(&cfg.Database, cfg.Database.AutoMigrate) // M88 / G-14: 多副本部署 cfg.Database.AutoMigrate=false, 单副本默认 true 保持 back-compat
 	if err != nil {
 		logger.Fatal("数据库初始化失败: %v", err)
 	}

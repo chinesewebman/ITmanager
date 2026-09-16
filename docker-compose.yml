@@ -93,6 +93,11 @@ services:
       - NMP_DATABASE_PASSWORD=${NMP_DATABASE_PASSWORD:?必须在 .env 里设置}
       - NMP_DATABASE_NAME=network_monitor
       - NMP_DATABASE_SSLMODE=disable
+      # M88 / G-14: 多副本部署契约. 默认 false: api 副本跳过 migrate.Up,
+      # 由下方独立的 one-shot `migrate` 服务跑迁移. 多副本冷启动 = 副本们各
+      # 自连接 DB 不抢 advisory lock (详见 TODO.md L70 + D-C rev2 + intent-M88).
+      # 单副本回滚路径: .env 覆盖 NMP_DATABASE_AUTOMIGRATE=true + 关掉 migrate 服务.
+      - NMP_DATABASE_AUTOMIGRATE=${NMP_DATABASE_AUTOMIGRATE:-false}
       - NMP_REDIS_HOST=redis
       - NMP_INTEGRATIONS_NETBOX_URL=http://netbox:8000
       - NMP_INTEGRATIONS_ZABBIX_URL=http://zabbix:8080
@@ -101,20 +106,56 @@ services:
       - NMP_AUTH_API_KEY_PEPPER=${NMP_AUTH_API_KEY_PEPPER:?必须在 .env 里设置（openssl rand -hex 32）}
       # G-7: 只信任前端容器（下方 web 的静态 IP）。缺了它 ClientIP() 取直连对端
       # （即 nginx 容器 IP）→ 登录限流退化为全站单桶、审计 IP 失真、
-      # IP 白名单 API Key 一律 403。见 docs/FIX-PLAN-TRUSTED-PROXY.md。
-      # 可被 .env 覆盖：scripts/smoke-compose.sh 的负例就靠覆盖它验证
-      # 「配错 → ClientIP() 退化为直连对端（nginx 容器 IP）」。
-      - NMP_SERVER_TRUSTED_PROXIES=${NMP_SERVER_TRUSTED_PROXIES:-172.28.0.10}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # M88 / G-14: 多副本部署契约. api 必须等 migrate one-shot 服务跑完再起,
+      # 否则 api 副本 `database.automigrate=false` 起来后看到 schema_migrations 表不存在.
+      migrate:
+        condition: service_completed_successfully
     networks:
       default:
         # 别名只为兼容 frontend/nginx.conf 的 `proxy_pass http://backend:8080/api/`
         # （container_name 不注册 DNS，服务名才是 `api`）。不要删。
-        aliases: [backend]
+  # 一次性迁移服务 (M88 / G-14): 多副本部署前把迁移从 api 启动路径剥离.
+  # 注意:
+  #  1) cmd/migrate 走 config.LoadWithoutValidate (M88 加), 不需要 jwt/pepper/integrations
+  #     token —— 本服务 env 故意**不**含 NMP_AUTH_* / NMP_INTEGRATIONS_*.
+  #  2) restart: "no" — 一次跑完即退, 失败也不自愈 (让运维立即看到, 不静默起 api).
+  #  3) 默认 profile (无 profiles: [...]): `docker compose up -d` 自动跑.
+  #     关闭: `docker compose stop migrate` 或 `docker compose up -d --scale migrate=0`.
+  #  4) service_completed_successfully (上方 api 的 depends_on) 要求容器 exit 0;
+  #     migrate 跑完正常返 0, 任何迁移失败 exit 非 0 → compose 阻断 api 启动.
+  # 详见 TODO.md L70 + docs/FIX-PLAN-COMPOSE-RUNTIME.md D-C (M88 加注) + intent-M88-candidate.md.
+  # 多副本部署: `docker compose up -d --scale api=N` —— api 副本们各
+  # 自连接 DB 不抢 advisory lock, 仅当 N=1 时 migrate 也能跟 api 同 pod 跑 (但不推荐).
+  migrate:
+    <<: *default-logging
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nmp-migrate
+    restart: "no"
+    command: ["./migrate", "up"]
+    environment:
+      # server.mode = debug: migrate 不走 release 校验 (略过 integrations 校验分支).
+      - NMP_SERVER_HOST=0.0.0.0
+      - NMP_SERVER_MODE=debug
+      - NMP_DATABASE_HOST=postgres
+      - NMP_DATABASE_PORT=5432
+      - NMP_DATABASE_USER=nmp
+      - NMP_DATABASE_PASSWORD=${NMP_DATABASE_PASSWORD:?必须在 .env 里设置}
+      - NMP_DATABASE_NAME=network_monitor
+      - NMP_DATABASE_SSLMODE=disable
+      # LoadWithoutValidate 不强制 NMP_AUTH_*, 但 server 启动仍会读 trusted_proxies.
+      # 默认空 = 不信任任何来源 (与 G-7 一致); 本服务只跑 migrate, 不接 HTTP, 安全无差.
+      - NMP_SERVER_TRUSTED_PROXIES=
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 
   # 前端（G-19 / M77：unprivileged + 容器级硬化）
   web:

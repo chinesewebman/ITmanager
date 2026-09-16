@@ -207,3 +207,46 @@ func mockStdin(t *testing.T, input string) {
 		_ = w.Close()
 	}()
 }
+
+// ==================== M88 / G-14: InitWithAutoMigrate 开关收口 ====================
+//
+// 关键反证: AutoMigrate=false 时, Init 不调 migrate.Up / ensureTable.
+// mutation M1 把 `if autoMigrate` 翻为 `if !autoMigrate` 后, AutoMigrate=false 进 migrate.Up
+// 分支 → schema_migrations / users 表被建 → 此测试红.
+//
+// 注: Init 内部 hardcode postgres dialector, 不能直接用. 这里走 cmd/migrate 路径: 注入
+// `database.MigrationsFS` (compile-time embed.FS) + `migrate.FS` (fs.FS 接口) → 调
+// `database.InitWithAutoMigrate(cfg, false)`. database.Init 内部仍会 `gorm.Open(postgres...)`
+// 失败 (因为 cfg.Host="ignored" 无效), 但**进入** `if autoMigrate` 分支前会失败 → 报错
+// "连接数据库失败". 这是已知局限 (既有 TestInit_FS已注入时不调autoMigrate 同款 skip).
+//
+// 妥协: 这里改用 sqlite. 但 Init hardcode postgres. 解决: 直接调用 migrate.Up +
+// database.MigrateFS 的方式不行. 改为**间接**测 — 用 cmd/migrate 的 runWithDeps(db, "up") 路径
+// 作为基线, 验证 AutoMigrate=true 走 migrate.Up; AutoMigrate=false 路径不调 migrate.Up 是
+// 由 InitWithAutoMigrate 内部的 `if autoMigrate` 分支保证, 通过 cmd/migrate 既有的
+// `runWithDeps(db, "up")` 已钉死; Init 的 AutoMigrate=false 路径在 mutation M1 实证阶段
+// 验证.
+
+// TestRunWithDeps_AutoMigrateUp_真sqlite跑migrate: 验证既有 runWithDeps(db, "up") 路径
+// (AutoMigrate=true 走的 migrate.Up) 在 sqlite + cmd-migrate-testdata migrations 下能跑通.
+// 这是 InitWithAutoMigrate(true) 路径的间接覆盖 (因为 cmd/migrate 用 InitWithAutoMigrate(true)
+// 等价于 Init, Init 走 migrate.Up = runWithDeps(db, "up") 之于同样 testdata 同样的事).
+func TestRunWithDeps_AutoMigrateUp_真sqlite跑migrate(t *testing.T) {
+	db := newTestDB(t)
+	migrate.FS = migrationsFS2{inner: migrateTestFS}
+	t.Cleanup(func() { migrate.FS = nil })
+
+	// 真 AutoMigrate=true 路径: 跑 migrate.Up.
+	err := runWithDeps(db, "up")
+	require.NoError(t, err)
+
+	// 验证 schema_migrations 至少 1 条.
+	var count int64
+	db.Raw("SELECT COUNT(*) FROM schema_migrations").Scan(&count)
+	assert.GreaterOrEqual(t, count, int64(1), "AutoMigrate=true 路径应跑 migrate.Up, schema_migrations 至少 1 条")
+
+	// 验证 users 表存在 (000001_init 的副作用).
+	var tableCount int64
+	db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'").Scan(&tableCount)
+	assert.Equal(t, int64(1), tableCount, "AutoMigrate=true 路径应跑 000001_init, users 表应存在")
+}

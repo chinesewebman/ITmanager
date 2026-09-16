@@ -42,6 +42,12 @@ type DatabaseConfig struct {
 	Password string `mapstructure:"password"`
 	Name     string `mapstructure:"name"`
 	SSLMode  string `mapstructure:"sslmode"`
+	// AutoMigrate M88 / G-14: 启动时是否执行数据库迁移。
+	//  - true (默认, back-compat): 单副本 / 开发场景, api 启动时跑 migrate.Up.
+	//  - false: 多副本部署场景, 由独立的 one-shot `migrate` 服务跑迁移,
+	//    api 副本设 NMP_DATABASE_AUTOMIGRATE=false 后不抢 advisory lock.
+	// 详见 TODO.md L70 + docs/FIX-PLAN-COMPOSE-RUNTIME.md D-C (M88 加注).
+	AutoMigrate bool `mapstructure:"automigrate"`
 }
 
 func (d DatabaseConfig) DSN() string {
@@ -138,8 +144,34 @@ type EmailConfig struct {
 
 var cfg *Config
 
-// Load 加载配置（env var 优先覆盖 yaml）
+// Load 加载配置（env var 优先覆盖 yaml），并 fail-fast 校验弱 secret。
+// 服务侧使用 (server / admin-bootstrap / seed / set-role 等需要 JWT/API Key 的进程).
 func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	// F3: 启动 fail-fast 校验弱 secret
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+	return cfg, nil
+}
+
+// LoadWithoutValidate 加载配置 (env var 优先覆盖 yaml)，**不**调 Validate。
+// 仅供不需要认证凭据的迁移 / 一次性 CLI 使用（如 cmd/migrate）—— migrate 不
+// 走 JWT 路径, 不需要 auth.jwt.secret / auth.api_key_pepper / integrations tokens,
+// 但仍需要 database.* (DSN). 走 Load 会因为缺 jwt secret 拒启, 走本函数能启动.
+//
+// M88 / G-14：这是攻破 D-C rev2 B-3 ("migrate 需全量 secret") 的关键. compose one-shot
+// `migrate` 服务只需注入 NMP_DATABASE_PASSWORD, 不再被 jwt/pepper gate 阻断.
+func LoadWithoutValidate(path string) (*Config, error) {
+	return load(path)
+}
+
+// load 是 Load / LoadWithoutValidate 共用的私有加载器 (SetDefault + ReadInConfig + Unmarshal).
+// 不调 Validate — 调用方按需校验.
+func load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 	viper.SetConfigType("yaml")
 
@@ -162,6 +194,11 @@ func Load(path string) (*Config, error) {
 	// 自定义/旧的 config.yaml —— 那种文件没有这个键，只有 SetDefault 才能让 env 生效。
 	viper.SetDefault("auth.api_key_pepper", "")
 	viper.SetDefault("database.port", 5432)
+	// M88 / G-14：默认 true 保持 back-compat (单副本 / 开发场景 api 启动时跑迁移).
+	// 多副本部署设 NMP_DATABASE_AUTOMIGRATE=false, 由 one-shot `migrate` 服务跑迁移,
+	// api 副本不抢 advisory lock. SetDefault 同时保证旧 config.yaml 缺该键时 env 仍生效
+	// (G-13 范本: viper 只对 AllKeys 里的键做 env 覆盖).
+	viper.SetDefault("database.automigrate", true)
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("auth.jwt.expire", 86400)
 	// G-16：缺这个键时 cfg.Log.Level 为空串，两条日志路径（pkg/logger 与 gorm）都会
@@ -176,11 +213,6 @@ func Load(path string) (*Config, error) {
 	cfg = &Config{}
 	if err := viper.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
-	}
-
-	// F3: 启动 fail-fast 校验弱 secret
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("配置校验失败: %w", err)
 	}
 
 	log.Printf("✅ 配置加载成功 (env: %s)", cfg.Server.Mode)

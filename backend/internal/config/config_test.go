@@ -835,3 +835,157 @@ auth:
 	require.NoError(t, err)
 	assert.Equal(t, "info", cfg.Log.Level, "无 env 时必须落到默认 info，不能是空串")
 }
+
+// ==================== M88 / G-14: database.automigrate 开关 + LoadWithoutValidate ====================
+
+// M88 / G-14: 旧 config.yaml 缺 database.automigrate 键时, env 也必须生效
+// (viper 只对 AllKeys 里的键做 env 覆盖, 同 trusted_proxies / api_key_pepper / log.level 范本).
+// 钉死 viper.SetDefault("database.automigrate", true) 路径.
+func TestLoad_AutomigrateDefault_YAML无键时仍生效(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+  # 故意缺 automigrate: true 占位, 模拟升级场景旧 config.yaml 无该键
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+  api_key_pepper: "` + validPepper + `"
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	// 无 env 时: 走 SetDefault 默认值 true
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Database.AutoMigrate, "旧 config.yaml 缺 automigrate 键时, 应走 SetDefault 默认值 true (单副本 / 开发场景 back-compat)")
+
+	// 设 env=false: 必须能覆盖 SetDefault 默认值
+	t.Setenv("NMP_DATABASE_AUTOMIGRATE", "false")
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.False(t, cfg.Database.AutoMigrate, "NMP_DATABASE_AUTOMIGRATE=false 必须能覆盖 SetDefault 默认 true (多副本部署契约)")
+}
+
+// M88 / G-14: env 覆盖 yaml (yaml 已显式设 automigrate: true, env=false 必须覆盖).
+// 与 trusted_proxies 同款: viper 的优先级是 env > yaml > SetDefault.
+func TestLoad_AutomigrateEnvOverride(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+  automigrate: true
+auth:
+  jwt:
+    secret: "` + validSecret + `"
+    expire: 86400
+  api_key_pepper: "` + validPepper + `"
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Database.AutoMigrate, "无 env 时, yaml true 应生效")
+
+	t.Setenv("NMP_DATABASE_AUTOMIGRATE", "false")
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.False(t, cfg.Database.AutoMigrate, "env=false 必须覆盖 yaml true")
+}
+
+// M88 / G-14: LoadWithoutValidate 攻破 D-C rev2 B-3 ("migrate 需全量 secret").
+// cmd/migrate 不走 JWT, 不需要 auth.jwt.secret / auth.api_key_pepper / integrations tokens.
+// Load 路径会因缺 jwt secret 拒启; LoadWithoutValidate 跳过 Validate 必须能起.
+func TestLoadWithoutValidate_NoJWTSecret无报错(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: real-password
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	// 不设 NMP_AUTH_JWT_SECRET / NMP_AUTH_API_KEY_PEPPER —— 模拟 compose migrate 服务
+	cfg, err := LoadWithoutValidate(path)
+	require.NoError(t, err, "LoadWithoutValidate 必须能跳过 Validate, 不因缺 jwt/pepper 拒启 (D-C rev2 B-3 攻破)")
+	assert.NotNil(t, cfg)
+	assert.Equal(t, "real-password", cfg.Database.Password)
+
+	// 对照: 同样的缺 secret 场景, Load 应该失败
+	_, err = Load(path)
+	assert.Error(t, err, "对照: Load 路径缺 jwt/pepper 应拒启 (fail-fast)")
+}
+
+// M88 / G-14: LoadWithoutValidate 仍能正确读出 database.* DSN 字段.
+// migrate 容器需要 DSN 才能连库跑迁移; LoadWithoutValidate 不能跳过 DSN 读.
+func TestLoadWithoutValidate_DatabaseDSNLoaded(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  host: db.example.com
+  port: 5433
+  user: alice
+  password: real-password
+  name: prod_monitor
+  sslmode: require
+  automigrate: true
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	cfg, err := LoadWithoutValidate(path)
+	require.NoError(t, err)
+	assert.Equal(t, "db.example.com", cfg.Database.Host)
+	assert.Equal(t, 5433, cfg.Database.Port)
+	assert.Equal(t, "alice", cfg.Database.User)
+	assert.Equal(t, "real-password", cfg.Database.Password)
+	assert.Equal(t, "prod_monitor", cfg.Database.Name)
+	assert.Equal(t, "require", cfg.Database.SSLMode)
+	assert.True(t, cfg.Database.AutoMigrate)
+
+	// DSN 验证: 与既有的 TestDatabaseConfig_DSN_FormatCorrect 同款范本
+	assert.Equal(t, "host=db.example.com port=5433 user=alice password=real-password dbname=prod_monitor sslmode=require", cfg.Database.DSN())
+}
+
+// M88 / G-14: LoadWithoutValidate 也走 SetDefault + Unmarshal 链, env override 仍生效.
+// 这保证 compose migrate 服务可以靠 NMP_DATABASE_PASSWORD env 覆盖 yaml 占位.
+func TestLoadWithoutValidate_EnvOverride仍生效(t *testing.T) {
+	yaml := `server:
+  mode: debug
+database:
+  password: ""
+  automigrate: true
+log:
+  level: info
+  format: json
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	t.Setenv("NMP_DATABASE_PASSWORD", "env-override-password")
+	t.Setenv("NMP_DATABASE_AUTOMIGRATE", "false")
+
+	cfg, err := LoadWithoutValidate(path)
+	require.NoError(t, err)
+	assert.Equal(t, "env-override-password", cfg.Database.Password, "env 必须能覆盖 yaml password 空占位")
+	assert.False(t, cfg.Database.AutoMigrate, "env automigrate=false 必须能覆盖 yaml true")
+}

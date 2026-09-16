@@ -27,7 +27,7 @@ func main() {
 
 	database.SetMigrationsFS(network_monitor_platform.MigrationsFS)
 
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.LoadWithoutValidate("config.yaml") // M88 / G-14: migrate 不需要 jwt/pepper, 仅需 DSN
 	if err != nil {
 		log.Fatalf("配置加载失败: %v", err)
 	}
