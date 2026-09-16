@@ -49,8 +49,8 @@ beforeEach(() => {
 
 describe('M61 侧边栏用户管理入口（能力门禁）', () => {
   it('buildMenuItems：无 identity 能力 → 没有 /users；有 → 有，且其余菜单项一个不少', () => {
-    const without = keysOf(buildMenuItems(false))
-    const withIdentity = keysOf(buildMenuItems(true))
+    const without = keysOf(buildMenuItems(false, false))
+    const withIdentity = keysOf(buildMenuItems(true, false))
 
     expect(without).not.toContain('/users')
     expect(withIdentity).toContain('/users')
@@ -91,5 +91,54 @@ describe('M61 侧边栏用户管理入口（能力门禁）', () => {
     renderAppLayout('read,identity')
     expect(await screen.findByText('系统设置')).toBeInTheDocument()
     expect(screen.queryByText('用户管理')).toBeNull()
+  })
+})
+
+// M71 — 侧边栏「审计日志」入口（audit 能力门禁）。
+// 与 M61 同模式，但 audit 能力是 admin/ops_admin/auditor 三个角色共享，
+// 所以「应该出现」的判定比 M61 宽：除了「完全没有 audit 能力」之外都应该有。
+describe('M71 侧边栏审计日志入口（audit 能力门禁）', () => {
+  it('buildMenuItems：无 audit 能力 → 没有 /audit；有 → 有，且其余菜单项一个不少', () => {
+    const without = keysOf(buildMenuItems(false, false))
+    const withAudit = keysOf(buildMenuItems(false, true))
+
+    expect(without).not.toContain('/audit')
+    expect(withAudit).toContain('/audit')
+    // 只多这一项（防「条件渲染」顺手把别的菜单项吞掉）
+    expect(withAudit.filter((k) => !without.includes(k))).toEqual(['/audit'])
+    // 顺序：审计日志在系统设置之前，与 buildMenuItems 字面顺序一致
+    expect(withAudit.indexOf('/audit')).toBeLessThan(withAudit.indexOf('/settings'))
+  })
+
+  it('admin（capabilities 含 audit）→ 侧边栏出现「审计日志」', async () => {
+    renderAppLayout(['read', 'write', 'manage', 'audit', 'identity'])
+    expect(await screen.findByText('审计日志')).toBeInTheDocument()
+  })
+
+  it('ops_admin / readonly（无 audit 能力）→ 侧边栏不出现「审计日志」（点进去只会 403）', async () => {
+    renderAppLayout(['read', 'write', 'manage']) // 没有 audit
+    expect(await screen.findByText('系统设置')).toBeInTheDocument()
+    expect(screen.queryByText('审计日志')).toBeNull()
+  })
+
+  it('/auth/me 失败 → fail-closed，审计日志入口不显示', async () => {
+    vi.spyOn(api, 'get').mockRejectedValue(new Error('network down') as never)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/404']}>
+          <AppLayout />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('系统设置')).toBeInTheDocument()
+    expect(screen.queryByText('审计日志')).toBeNull()
+  })
+
+  it('capabilities 形状异常 → fail-closed，审计日志入口不显示', async () => {
+    // 与 M61 同口径：capabilities 字段是 string 而不是数组时，Array.isArray 兜底返空
+    renderAppLayout('read,audit')
+    expect(await screen.findByText('系统设置')).toBeInTheDocument()
+    expect(screen.queryByText('审计日志')).toBeNull()
   })
 })

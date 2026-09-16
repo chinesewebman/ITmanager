@@ -24,6 +24,7 @@ import {
   BookOutlined,
   LineChartOutlined,
   TeamOutlined, // M61: 用户管理入口
+  AuditOutlined, // M71: 审计日志入口
 } from "@ant-design/icons";
 import {
   BrowserRouter,
@@ -79,7 +80,7 @@ interface UserInfo {
 //
 // 抽成导出的纯函数是为了让它可被单测钉住（同 buildTheme 的做法）：条件渲染写错的表现是
 // 「入口不显示」或「显示了但点进去 403」，两种都不容易被人工发现。
-export function buildMenuItems(hasIdentity: boolean): MenuProps["items"] {
+export function buildMenuItems(hasIdentity: boolean, hasAudit: boolean): MenuProps["items"] {
   return [
     { key: "/", icon: <DashboardOutlined />, label: "仪表盘" },
     { key: "/assets", icon: <DesktopOutlined />, label: "资产管理" },
@@ -101,6 +102,13 @@ export function buildMenuItems(hasIdentity: boolean): MenuProps["items"] {
     ...(hasIdentity
       ? [{ key: "/users", icon: <TeamOutlined />, label: "用户管理" }]
       : []),
+    // M71：审计日志是 audit 能力（admin/ops_admin/auditor 三种角色都有）。
+    // 复制 M61 模式：入口按 capabilities 显示，不复制 role 矩阵。
+    // 路由 /audit 已存在 (M49)，且 backend middleware.CapAudit 门禁到位 —— 没有
+    // audit 能力的用户点进去会 403，因此 fail-closed 隐藏入口是正确选择。
+    ...(hasAudit
+      ? [{ key: "/audit", icon: <AuditOutlined />, label: "审计日志" }]
+      : []),
     { key: "/settings", icon: <SettingOutlined />, label: "系统设置" },
   ];
 }
@@ -113,6 +121,9 @@ export function AppLayout() {
   // M61：能力集来自后端 /auth/me（不复制角色矩阵）。取不到 = 无 identity 能力
   // （fail-closed：少个入口只是少个链接，误显示会让人点进 403）。
   const [hasIdentity, setHasIdentity] = useState(false);
+  // M71：audit 能力（admin/ops_admin/auditor）。fail-closed 与 hasIdentity 同口径：
+  // 取不到 capabilities = 默认无 audit 能力 = 不显示入口。
+  const [hasAudit, setHasAudit] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const {
@@ -137,9 +148,17 @@ export function AppLayout() {
       try {
         const res = (await authApi.me()) as { data?: { data?: { capabilities?: unknown } } }
         const caps = res?.data?.data?.capabilities
-        if (alive) setHasIdentity(Array.isArray(caps) && caps.includes("identity"))
+        if (alive) {
+          const capSet = Array.isArray(caps) ? caps : []
+          setHasIdentity(capSet.includes("identity"))
+          // M71：audit 能力（admin/ops_admin/auditor 三角色都有，按 capRoles 后端矩阵）。
+          setHasAudit(capSet.includes("audit"))
+        }
       } catch {
-        if (alive) setHasIdentity(false)
+        if (alive) {
+          setHasIdentity(false)
+          setHasAudit(false)
+        }
       }
     })()
     return () => {
@@ -162,7 +181,7 @@ export function AppLayout() {
     return () => window.removeEventListener(AUTH_LOGOUT_EVENT, handler)
   }, [navigate, location.pathname])
 
-  const menuItems = buildMenuItems(hasIdentity);
+  const menuItems = buildMenuItems(hasIdentity, hasAudit);
 
   const handleMenuClick = (e: { key: string }) => {
     navigate(e.key);
