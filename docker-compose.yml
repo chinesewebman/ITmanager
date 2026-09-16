@@ -100,8 +100,9 @@ services:
       - NMP_DATABASE_AUTOMIGRATE=${NMP_DATABASE_AUTOMIGRATE:-false}
       - NMP_REDIS_HOST=redis
       - NMP_INTEGRATIONS_NETBOX_URL=http://netbox:8000
-      - NMP_INTEGRATIONS_ZABBIX_URL=http://zabbix:8080
-      - NMP_INTEGRATIONS_GLPI_URL=http://glpi:80
+      - NMP_INTEGRATIONS_ZABBIX_URL=http://zabbix-web:8080
+      # M89 / G-17: 指向 zabbix-web (新增服务, 钉 zabbix-web-nginx-pgsql:7.0.13-alpine),
+      # 原 zabbix-server 是 server 进程无 Web/API.
       - NMP_AUTH_JWT_SECRET=${NMP_AUTH_JWT_SECRET:?必须在 .env 里设置（openssl rand -hex 32）}
       - NMP_AUTH_API_KEY_PEPPER=${NMP_AUTH_API_KEY_PEPPER:?必须在 .env 里设置（openssl rand -hex 32）}
       # G-7: 只信任前端容器（下方 web 的静态 IP）。缺了它 ClientIP() 取直连对端
@@ -193,11 +194,18 @@ services:
         condition: service_healthy
 
   # ---------------- 以下为 aux profile（docker compose --profile aux up -d）----------------
+  #
+  # G-17 / M89 ship 后的 aux 收紧契约 (4 条致命缺陷 + 网络隔离):
+  #   ① image tag 全部钉精确次版本 + 补丁号 (`:latest` / `:6.0` / `:7` 移除)
+  #   ② 占位值 (SECRET_KEY / GRAYLOG_PASSWORD_SECRET / ...) 全部 `${VAR:?...}` fail-closed
+  #   ③ elasticsearch `xpack.security.enabled=true` 默认开
+  #   ④ 与主链 default 网络 (`172.28.0.0/24`) 隔离 → 新增 `aux_net` (`172.29.0.0/24`)
+  # 详见 TODO.md L73 + intent-M89-candidate.md.
 
-  # NetBox (资产管理)
+  # NetBox (资产管理) — G-17/M89: 钉死补丁号 + SECRET_KEY 强制注入 fail-closed
   netbox:
     <<: *default-logging
-    image: netboxcommunity/netbox:v4.0
+    image: netboxcommunity/netbox:v4.0.3
     container_name: nmp-netbox
     profiles: ["aux"]
     ports:
@@ -208,29 +216,28 @@ services:
       - DB_USER=nmp
       - DB_PASSWORD=${NMP_DATABASE_PASSWORD:?}
       - REDIS_HOST=redis
-      - SECRET_KEY=your-secret-key-here-change-in-production
+      # G-17 / M89: 占位值字面 "your-secret-key-here-change-in-production" 改 ${VAR:?...} 强制注入.
+      # 缺值 compose 直接报错退出, 拒绝起任何 aux 服务 (fail-closed).
+      - SECRET_KEY=${NMP_AUX_NETBOX_SECRET_KEY:?必须在 .env.aux 里设置（openssl rand -hex 32）}
     healthcheck:
       test: ["CMD", "curl", "-f", "-s", "http://localhost:8000/api/"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 120s
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # G-17 / M89: 留 default 网络 (api 集成通过 http://netbox:8000 DNS 访问).
+    # aux_net 仅 graylog / elasticsearch / mongoDB 三个用 (G-17 第③层 graylog 栈隔离).
 
-  # Zabbix (监控)
-  # 注意：这是 zabbix-server 进程，没有 Web/API；api 侧的 ZABBIX_URL 需要
-  # zabbix-web-nginx-pgsql（见 08-部署运维.md §8.3）。
+  # Zabbix Server (trapper 10051) — G-17/M89: 钉死补丁号
   zabbix:
     <<: *default-logging
-    image: zabbix/zabbix-server-pgsql:latest
+    image: zabbix/zabbix-server-pgsql:7.0.13-alpine
     container_name: nmp-zabbix
     profiles: ["aux"]
-    ports:
-      - "127.0.0.1:8081:8080"
     environment:
       - DB_SERVER_HOST=postgres
       - POSTGRES_USER=nmp
@@ -239,17 +246,43 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 10051 || exit 1"]
       interval: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # G-17 / M89: 留 default 网络 (zabbix-web 反代连它).
+  # Zabbix Web/API 前端 (nginx + php-fpm) — G-17/M89: 这是 api 侧 NMP_INTEGRATIONS_ZABBIX_URL
+  # 真正应该指向的服务 (原 zabbix image 是 server 进程无 Web/API, 集成目标不对).
+  # 与 zabbix-server 必须同主版本号 (当前同钉 7.0.13-alpine).
+  zabbix-web:
+    <<: *default-logging
+    image: zabbix/zabbix-web-nginx-pgsql:7.0.13-alpine
+    container_name: nmp-zabbix-web
+    profiles: ["aux"]
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      - ZBX_SERVER_HOST=zabbix
+      - ZBX_SERVER_PORT=10051
+      - DB_SERVER_HOST=postgres
+      - POSTGRES_USER=nmp
+      - POSTGRES_PASSWORD=${NMP_DATABASE_PASSWORD:?}
+      - POSTGRES_DB=zabbix
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ -o /dev/null || exit 1"]
+      interval: 30s
       timeout: 10s
       retries: 10
       start_period: 180s
     depends_on:
-      postgres:
+      zabbix:
         condition: service_healthy
+    # G-17 / M89: 留 default 网络 (api 集成通过 http://zabbix-web:8080 DNS 访问).
 
-  # GLPI (工单)
+
+  # GLPI (工单) — G-17/M89: 钉死补丁号
   glpi:
     <<: *default-logging
-    image: linuxserver/glpi:latest
+    image: linuxserver/glpi:3.0.11
     container_name: nmp-glpi
     profiles: ["aux"]
     ports:
@@ -269,11 +302,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # G-17 / M89: 留 default 网络 (api 集成通过 http://glpi:80 DNS 访问).
 
-  # Graylog (日志)
+
+  # Graylog (日志) — G-17/M89: 钉死次版本+补丁号 + 三个 secret 占位值全 fail-closed
   graylog:
     <<: *default-logging
-    image: graylog/graylog:6.0
+    image: graylog/graylog:6.0.3-1
     container_name: nmp-graylog
     profiles: ["aux"]
     ports:
@@ -282,10 +317,16 @@ services:
       - "127.0.0.1:5140:5140"
       - "127.0.0.1:5555:5555"
     environment:
-      - GRAYLOG_PASSWORD_SECRET=your-password-secret-here
-      - GRAYLOG_ROOT_PASSWORD_SHA2=your-hashed-password
+      # G-17 / M89: 占位字面 "your-password-secret-here" 改 ${VAR:?...} 强制注入.
+      - GRAYLOG_PASSWORD_SECRET=${NMP_AUX_GRAYLOG_PASSWORD_SECRET:?必须在 .env.aux 里设置（openssl rand -hex 32）}
+      # G-17 / M89: 占位字面 "your-hashed-password" (graylog 启动期 SHA2 校验会发现非法) 改 ${VAR:?...}.
+      # SHA2 = echo -n "$NMP_AUX_GRAYLOG_ROOT_PASSWORD" | sha256sum | cut -d' ' -f1 (见 .env.example).
+      - GRAYLOG_ROOT_PASSWORD_SHA2=${NMP_AUX_GRAYLOG_ROOT_PASSWORD_SHA2:?必须 sha256sum <root_password> 得出}
+      # G-17 / M89: 原状缺此 secret (graylog 6.x 必须), 加 ${VAR:?...} 强制注入.
+      - GRAYLOG_ROOT_PASSWORD=${NMP_AUX_GRAYLOG_ROOT_PASSWORD:?必须在 .env.aux 里设置（首次登录用）}
       - GRAYLOG_HTTP_EXTERNAL_URI=http://localhost:9000
-      - GRAYLOG_ELASTICSEARCH_HOSTS=elasticsearch:9200
+      # G-17 / M89: xpack on 后必须带 user:pass (graylog ↔ es 都在 aux_net 内, 内网认证即可).
+      - GRAYLOG_ELASTICSEARCH_HOSTS=http://nmp:${NMP_AUX_ELASTICSEARCH_PASSWORD:?必须在 .env.aux 里设置}@elasticsearch:9200
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9000/api/system/liveness || exit 1"]
       interval: 30s
@@ -297,30 +338,42 @@ services:
         condition: service_healthy
       mongoDB:
         condition: service_healthy
+    networks:
+      # G-17 / M89: graylog 仅接 aux_net (与 default 隔离), 端口仍 publish 给宿主调试.
+      # aux_net 在网络级 internal=true (见 networks.aux_net.internal) → es/mongoDB 仅 graylog 可达.
+      - aux_net
 
-  # Elasticsearch (Graylog 依赖)
+
+  # Elasticsearch (Graylog 依赖) — G-17/M89: 钉死补丁号 + xpack.security 默认开
   elasticsearch:
     <<: *default-logging
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.4
     container_name: nmp-elasticsearch
     profiles: ["aux"]
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      # G-17 / M89: 默认开 (原 false 是占位不安全默认值, ES 8.x 必须显式声明).
+      - xpack.security.enabled=true
+      # G-17 / M89: 加 ELASTIC_PASSWORD ${VAR:?...} 强制注入.
+      - ELASTIC_PASSWORD=${NMP_AUX_ELASTICSEARCH_PASSWORD:?必须在 .env.aux 里设置（openssl rand -hex 32）}
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=10s || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -u nmp:${NMP_AUX_ELASTICSEARCH_PASSWORD:?必须在 .env.aux 里设置} http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=10s || exit 1"]
       interval: 20s
       timeout: 15s
-      retries: 10
-      start_period: 60s
+    networks:
+      # G-17 / M89: graylog 栈全部在 aux_net (与主链 default 隔离).
+      # graylog ↔ es ↔ mongoDB 通过 aux_net 互连; es + mongoDB 在网络级标 internal
+      # (见下方 networks.aux_net.internal: true) → 阻断外部入口.
+      - aux_net
 
-  # MongoDB (Graylog 依赖)
+  # MongoDB (Graylog 依赖) — G-17/M89: 钉死补丁号
+
   mongoDB:
     <<: *default-logging
-    image: mongo:7
+    image: mongo:7.0.14
     container_name: nmp-mongodb
     profiles: ["aux"]
     volumes:
@@ -331,6 +384,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      # G-17 / M89: graylog 栈全部在 aux_net (与主链 default 隔离).
+      # graylog ↔ es ↔ mongoDB 通过 aux_net 互连; aux_net 在网络级标 internal (见下方)
+      # → 阻断外部入口 (graylog 是唯一入口).
+      - aux_net
 
 networks:
   # G-7: 固定子网，让 web 容器拿到可预期的静态 IP（172.28.0.10）。
@@ -338,11 +396,20 @@ networks:
   # 注意：① 若该网络已存在且未带 ipam 配置，需先 `docker compose down` 再起；
   # ② 宿主机若已有其它网络占用 172.28.0.0/24（`docker network ls` 自查），
   #    会以「Pool overlaps」直接起不来，换一个冷门网段即可；
-  # ③ 静态 IP 与 `--scale web=2` 互斥（第二个副本地址冲突）。
   default:
     ipam:
       config:
         - subnet: 172.28.0.0/24
+  # G-17 / M89: aux profile 网络隔离 (与主链 default 完全独立).
+  # 子网 172.29.0.0/24 避开 172.28.0.0/24 (主链, G-7) 与 172.31.0.0/16 (AWS VPC).
+  # internal=true 阻断外部入口 (es / mongoDB 仅 graylog 可达).
+  aux_net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
 
 volumes:
   postgres_data:
