@@ -634,9 +634,34 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 - **「空 updates 走 Get 分支不副作用 cache」**: D21 强约束, M87 测试已钉死 (`TestUserService_Update_空输入不调invalidate`).
 - **`TestRoutes_禁用账号后JWT立即失效` (M61 ship) 的手动 invalidate 是否删**: 不删. 两个测试并存, 等价但**不互替**. M61 测试 = 「手动 invalidate 也能验」; M87 测试 = 「不手动 invalidate 也验」. 删任何一个都会丢失一面.
 - **mutation 范本 E 写入 skill**: 「服务层 → cache 失效联动 mutation inversion 范本 E」可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的范本库 (与 M82 范本 A 「业务代码 mutation」 + M83 范本 B 「CI 守门 mutation」 + M85 范本 C 「业务并发窗口 mutation」 + M86 范本 D 「响应字段守卫 mutation」并列). E 与 A 同形 (都是业务代码 mutation) 但守卫对象不同: A 守业务逻辑正确性, E 守**跨层副作用** (service 操作触发 middleware 状态变更). 后续跨层副作用 round 复用.
-- **`Role` JWT claims 签发时快照**: 即使 M87 让 status cache 主动失效, **role 字段**仍受 JWT 本身语义约束 (claims 是签发时快照). 改 role 必须重发 token (D12), 属独立特性. M87 不动 JWT 续签 / 强制重发逻辑.
 - **`StatusCacheInvalidator` 接口注入解耦**: 既有 service 层已经 import middleware (`user_service.go:8`), 不引入新 import. 真要解耦可后续注入 `StatusCacheInvalidator` 接口 (M98+ 候选).
+
+### M88-candidate — G-14 迁移与运行时解耦（多副本部署前置）(OMH ulw-loop 第 18 cycle, 2026-09-16)
+
+PM_QUEUE M88-candidate = **G-14 迁移与运行时解耦（多副本部署前置）**（TODO.md L70 登记原状: `database.Init` 无条件 `migrate.Up`, 迁移锁非阻塞 `pg_try_advisory_lock`, 多副本冷启动抢不到锁的副本会启动失败并反复重启). D-C rev2 (2026-09-09) 当时因「超本轮 + 新配置键」砍掉独立 migrate 服务. M88 把 **B-2 + B-3 两条一一攻破**:
+
+1. **加 `database.automigrate` 开关攻破 B-2** — `backend/internal/config/config.go:42` 加 `DatabaseConfig.AutoMigrate bool \`mapstructure:"automigrate"\`` + `viper.SetDefault("database.automigrate", true)` (G-13 范本: 防旧 yaml 缺键 env 被静默忽略) + `backend/config.yaml:24` `database: automigrate: true` 占位 + 注释 (多副本部署设 `NMP_DATABASE_AUTOMIGRATE=false`); `backend/internal/database/database.go` 新增 `InitWithAutoMigrate(cfg, autoMigrate bool)` + `Init` 改写为 `InitWithAutoMigrate(cfg, true)` (back-compat 保持既有 4 个 caller 行为不变); 又抽 `applyMigrations(db, autoMigrate, overrideFS)` 与 `initDBForTest(dialector, autoMigrate, overrideFS)` 内部 helper 让测试可注入 sqlite + SubFS (`testdata/` → `migrations/`) 验证真路径; `cmd/server/main.go:41` 改用 `InitWithAutoMigrate(&cfg.Database, cfg.Database.AutoMigrate)` 让 `NMP_DATABASE_AUTOMIGRATE=false` 真正传到 Init. **多副本冷启动 = 副本们各自连接 DB, 信任 migrate one-shot 服务已先跑过, 锁竞争 = 0**.
+2. **加 `config.LoadWithoutValidate` 攻破 B-3** — `backend/internal/config/config.go:198` 新增 `LoadWithoutValidate(path string)` — 与 `Load` 共用 SetDefault + ReadInConfig + Unmarshal, **不**调 Validate. `cmd/migrate/main.go:32` 改用 `LoadWithoutValidate("config.yaml")`. migrate 容器只需注入 `NMP_DATABASE_PASSWORD`, **不**再要求 jwt/pepper secret (docker-compose.yml `migrate` 服务 env 验证: 只有 DB 6 个字段, 0 个 NMP_AUTH_* / NMP_INTEGRATIONS_*).
+3. **compose one-shot `migrate` 服务** + `api depends_on: migrate: { condition: service_completed_successfully }` (`docker-compose.yml:99-122` + `:135`) + `api` env `NMP_DATABASE_AUTOMIGRATE=false` 默认多副本契约. `--scale api=N` 副本们各自连接 DB 不抢 advisory lock.
+4. **mutation inversion 范本 E 实证 PASS-FAIL-PASS**: sqlite 真路径白盒反证 schema_migrations 表**不**存在 (AutoMigrate=false 时 Init 跳过 migrate.Up). 临时把 `applyMigrations` 里 `if !autoMigrate {` 极性翻为 `if autoMigrate {` (剥守门) → `TestInitWithAutoMigrate_开关false跳过migrateUp` 红 (schema_migrations 表本应不存在, 翻转后却存在, 红了) → 还原 → 绿.
+5. **新增 9 测试**: `TestLoad_AutomigrateDefault_YAML无键时仍生效` + `TestLoad_AutomigrateEnvOverride` + `TestLoadWithoutValidate_NoJWTSecret无报错` + `TestLoadWithoutValidate_DatabaseDSNLoaded` + `TestLoadWithoutValidate_EnvOverride仍生效` (config) + `TestInitWithAutoMigrate_默认true不破现有行为` + `TestInitWithAutoMigrate_开关false跳过migrateUp` (mutation M1 锚点, sqlite 真路径白盒) + `TestInitWithAutoMigrate_开关false不抢advisoryLock` (database) + `TestRunWithDeps_AutoMigrateUp_真sqlite跑migrate` (cmd/migrate). 既有 27 packages 全绿不退化 + `vet`/`gofmt` 干净.
+6. **2 commits** + 全 push `origin/main`. branch_main 推到新 HEAD (具体 commit hash 见 `M88-candidate-completion-report.md` §关联 commits).
+
+关键设计要点:
+- **`applyMigrations` 抽出的理由**: 让生产 `InitWithAutoMigrate` 与测试 `initDBForTest` 共享同一段「按 autoMigrate 决定是否跑迁移」的逻辑, 测试可换 `gorm.Dialector` (postgres → sqlite) + 换 `fs.FS` (production embed.FS → `fs.Sub(testMigrationsFS, "testdata")`) 而**不污染生产代码依赖**. `migrate.go` 内置 sqlite 分支 (ensureTable 用 DATETIME/CURRENT_TIMESTAMP, acquireLock 跳过 sqlite), 所以同代码路径既测 schema_migrations 表存在又测不存在的契约.
+- **`database.Init` 兼容旧 caller**: `Init = InitWithAutoMigrate(cfg, true)`. 既有 4 个 caller (admin-bootstrap / seed / set-role / migrate) 不动, 行为不变. 只有 `cmd/server/main.go` 改用 `InitWithAutoMigrate(&cfg.Database, cfg.Database.AutoMigrate)`.
+- **`LoadWithoutValidate` 与 `Load` 共用 SetDefault + ReadInConfig + Unmarshal**: 唯一区别就是**不**调 `Validate()`. 测试 `TestLoadWithoutValidate_NoJWTSecret无报错` 钉死「无 jwt/pepper secret 时不报错」(migrate 容器用例).
+
+文档翻新:
+- `TODO.md:70` `[ ]` → `[x]` + 描述更新 (M88 ship 联合结案 G-14).
+- `docs/FIX-PLAN-COMPOSE-RUNTIME.md:151-202` (D-C 段) 加注 "M88 ship 后此条结案: automigrate 开关攻破 B-2 + LoadWithoutValidate 攻破 B-3, 重新引入 one-shot migrate 服务, api 副本 automigrate=false 不抢锁".
+- `M88-candidate-completion-report.md` (9.x KB) + `M88-candidate-graph-analysis.md` (13.x KB) 写完.
+
+见 `M88-candidate-completion-report.md` + `M88-candidate-graph-analysis.md`. PM_LAST_DISPATCH_RESULT.md 写 M88 closeout (Poison ≤4h 授权, watchdog 下次 tick 验证 status=shipped).
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
+
+
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct
 自起 round 需要 Poison 在对话里触发. 起 **autonomous loop watchdog** —— Poison 不主动

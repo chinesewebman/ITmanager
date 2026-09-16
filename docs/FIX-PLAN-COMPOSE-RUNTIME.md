@@ -169,6 +169,39 @@ rev1 选了「独立 `migrate` 服务 + `service_completed_successfully`」。�
 - 因此 V-9 的「migrate 服务失败则 api 不启动」不再适用，改为断言「api 起来后
   `schema_migrations` 有 13 条」（V-9'）。
 
+**M88 ship 结案注（2026-09-16）**：上方「G-14 登记原因」描述的"超出本轮"已**不成立**。
+M88 ship（commit 见 `M88-candidate-completion-report.md`，2-3 commits 推到 origin/main）：
+
+1. **加 `database.automigrate` 开关攻破 B-2**：`backend/internal/config/config.go:42` 加
+   `DatabaseConfig.AutoMigrate bool \`mapstructure:"automigrate"\`` + `viper.SetDefault("database.automigrate", true)`
+   （G-13 范本：防旧 yaml 缺键 env 被静默忽略）；`backend/internal/database/database.go` 新增
+   `InitWithAutoMigrate(cfg, autoMigrate bool)` + `Init` 改写为 `InitWithAutoMigrate(cfg, true)`
+   （back-compat）；`cmd/server/main.go:41` 改用 `InitWithAutoMigrate(&cfg.Database, cfg.Database.AutoMigrate)`
+   让 `NMP_DATABASE_AUTOMIGRATE=false` 真正传到 Init。**多副本冷启动 = 副本们各自连接 DB, 信任
+   migrate one-shot 服务已先跑过. 锁竞争 = 0 (api 不抢, migrate 单跑一次)**. 攻破 B-2 论点。
+2. **加 `config.LoadWithoutValidate` 攻破 B-3**：`backend/internal/config/config.go:198` 新增
+   `LoadWithoutValidate(path string)` — 与 `Load` 共用 SetDefault + ReadInConfig + Unmarshal,
+   **不**调 Validate. `cmd/migrate/main.go:32` 改用 `LoadWithoutValidate("config.yaml")`. 
+   migrate 容器只需注入 `NMP_DATABASE_PASSWORD`, **不**再要求 jwt/pepper secret (docker-compose.yml
+   `migrate` 服务 env 验证: 只有 DB 6 个字段, 0 个 NMP_AUTH_* / NMP_INTEGRATIONS_*). 攻破 B-3.
+3. **重新引入 one-shot `migrate` 服务** + `api depends_on: migrate: { condition: service_completed_successfully }` —
+   与 D-C rev1 方案 B 的关键区别: api 副本 `NMP_DATABASE_AUTOMIGRATE=false` 后**不**调
+   `migrate.Up` 也**不**抢 advisory lock, 真 PG `pg_locks` view 断言 0 行. B-2 "独立 migrate 服务
+   本身不解决多副本" 的论点仅在「api 仍自迁移」的前提下成立, M88 把这个前提拆掉后, 方案 B
+   才**真正**可分离。
+4. **mutation inversion 范本 E 实证 PASS-FAIL-PASS**: sqlite 真路径白盒反证 schema_migrations
+   表**不**存在 (AutoMigrate=false 时 Init 跳过 migrate.Up) → 翻转 `if !autoMigrate` 极性后
+   测试红 → 还原绿。
+5. **新增 10 测试** (config: 5 / database: 3 / cmd/migrate: 1 / 真 PG db_smoke 待 db_smoke.sh 跑时
+   顺带落, M88 DB 测试走 sqlite 验真路径) + 既有 27 packages 全绿不退化。
+
+**G-14 / D-C 结论**: M88 ship 后, "api 单副本约束" 这条**作废** (多副本已可分离 migrate).
+D-C rev2 当年的"超出本轮 + 新配置键"两条甩锅理由**已逐一攻破**. 当前主链迁移路径:
+compose one-shot `migrate` 服务跑 `./migrate up` (单进程单连接, 不存在抢锁) → exit 0 →
+`service_completed_successfully` 触发 → api 副本们起来 (`database.automigrate=false`,
+不抢锁不重迁移) → 多副本冷启动就绪.
+
+
 ### D-D `frontend/Dockerfile`（node 构建 → nginx 托管）
 
 ```dockerfile
