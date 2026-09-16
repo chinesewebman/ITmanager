@@ -427,6 +427,48 @@ M79 D4 flapping 强约束触发器真工作.
 - **gen:api description 补全 (M33/D-8)**: 沿用 M81 实证的 OpenAPI 真源模式, 补 SyncResult.description
   4 个新键与「标志 vs 计数」区分, `npm run gen:api` 重生成 `frontend/src/services/api.types.ts`
   (CI 硬门禁 `.github/workflows/ci.yml:197-198` 守住生成物).
+### M82-candidate — G-39 AlertRule.NotifyChannels 真读 (tickOnce 路径收口, OMH ulw-loop 第 13 cycle, 2026-09-16)
+
+**摩擦**: G-39 (`TODO.md:311`, 2026-09-09 M3 正确性审计观察项) 自挂账起就一直开放 — `AlertRule.NotifyChannels` 字段只被 `cmd/seed` 写入, 全仓无任何读取点: `worker.handleAlertEvent` 取的是「所有 `is_enabled=true` 的渠道」, 与规则上的选择无关. 管理员在规则里勾掉的渠道照样收告警.
+
+M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish, commit `ff1bced`) 修了**两条 bus 路径** — worker.handleAlertEvent 按 `AlertEventPayload.NotifyChannelIDs` 过滤推送渠道. 但 `service.alertService.writeNotificationTrigger` (`backend/internal/service/alert_service.go:489`) 走的是**另一条路径** — `Acknowledge` + `Resolve` 调它往 `notification_logs` 写 pending log, 由 worker `tickOnce` 异步消费. 这个 sink **完全无视** alert 关联的 AlertRule.NotifyChannels — 直接查所有 enabled channel 落库. 是 M37-A/M38-B 留下的盲点.
+
+**后果**:
+- **Acknowledge**: tickOnce 路径是**唯一**出口 (bus 没 topic `alert.acknowledged`). 管理员把某 channel 在规则里勾掉, ack 一条该规则的告警 → 该 channel 仍收到 ack 通知.
+- **Resolve**: bus 路径 + tickOnce 路径**两条都发**. bus 路径按规则过滤 (M37-A 已修), tickOnce 路径仍全发 → 同一 resolved 告警, 被规则勾掉的 channel 收到**重复**通知 (1 条 bus 不该收到的 + 1 条 tickOnce 不该收到的).
+
+**改动** (backend service package only, ≤2h):
+- `intent-M82-candidate.md` 新建 (12KB, 8 节 omh-plan 骨架, Goal 钉死「剩余 tickOnce 路径收口」与「bus 路径不退化」)
+- `backend/internal/service/alert_service.go:498` `writeNotificationTrigger` 签名改 `(ctx, alert *models.Alert, ...)` (调用方 Acknowledge/Resolve 已有 alert, 不引入额外 DB 读, 不动 AlertService interface); 在加载 enabled channels 后插入 rule filter 块 (与 bus 路径 `worker.go:161-173` 语义完全对齐): 若 `alert.AlertRuleID != nil` → 调 `loadRuleNotifyChannelIDs` (M37-A ship helper, 4 类返回值 nil / []string{} / nil / []string{...} 契约) → `filterNotificationChannelsByIDs` 过滤. fallback 链 (alert 无 rule → 全启用 / rule 加载失败 → 全启用 / rule 空数组 → 推 0 次) 与 bus 路径完全对齐.
+- `backend/internal/service/alert_service.go:327` `Acknowledge` 调用点: `s.writeNotificationTrigger(ctx, alert, "acknowledged", userID)`
+- `backend/internal/service/alert_service.go:381` `Resolve` 调用点: `s.writeNotificationTrigger(ctx, alert, "resolved", userID)`
+- `backend/internal/service/alert_service.go:548-564` 新增本地 `filterNotificationChannelsByIDs` helper (~17 行, 与 `notification.filterChannelsByIDs` 语义对齐, channels 顺序保留 + 空 want 返 nil + UUID 字符串比对; service 包不依赖 notification 包的分层隔离)
+- `backend/internal/service/alert_notification_trigger_test.go` 既有 3 测试签名更新 (alert.AlertRuleID 默认 nil 触发 fallback, 逻辑不变) + 7 新测试:
+  - 4 sqlmock 契约: `TestWriteNotificationTrigger_RuleEmpty_NoLogs` (序列精确匹配: rule SELECT → no channels filter → no INSERT) / `RuleWithChannels_WritesOnlyListed` / `RuleNotFound_FallbackAllEnabled` / `NoRule_FallbackAllEnabled`
+  - 1 真 sqlite 反向断言守卫: `TestWriteNotificationTrigger_RuleEmpty_NoLogsSQLite` (真 sqlite in-memory 4 表 DDL, 实跑 writeNotificationTrigger, 直查 notification_logs count 必须 0; sqlmock 抓不到「INSERT 不应发生」反向断言, 必须用真 DB)
+  - 2 helper 白盒: `FilterNotificationChannelsByIDs_FiltersToListed` / `PreservesChannelsOrder`
+- `M82-completion-report.md` 新建 (12KB, 摩擦/决策/改动/verify/派生 TODO/OMH workflow shape/注意事项)
+- `M82-graph-analysis.md` 新建 (7KB, 双轨 graphify/codegraph + 与 M37-A/M38-B 三轮收口图关系 + G-57 关系)
+- `CHANGELOG.md` 加本段 (放在 M81 之后, cycle 13)
+- `TODO.md` G-39 标 done (三轮收口实证 M37-A + M38-B + M82-candidate) + 加 M82-candidate 高层完成条目
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 新建 (Poison 看 + watchdog 下次 tick 验证)
+
+**verify**:
+- `go build ./...`: 0 错 ✓
+- `go test -count=1 ./internal/service/...`: **ok 0.449s** ✓ (含 10 M82 测试: 4 sqlmock + 1 sqlite + 2 helper + 3 既有签名更新)
+- `go test -count=1 ./internal/notification/...`: **ok 0.693s** ✓ (bus 路径 M37-A/M38-B 测试不退化)
+- `go test -count=1 ./...`: **24 packages ok** ✓ (0 退化)
+- mutation inversion 实证 3 / 3 反证全红 → 还原全绿 ✓:
+  1. M1: bypass rule filter (删 `if alert.AlertRuleID != nil { ... }` 整段) → `RuleEmpty_NoLogs` + `RuleWithChannels_WritesOnlyListed` + `RuleNotFound_FallbackAllEnabled` 三红 (序列断言破: 期望 rule SELECT 发生, 实际被 bypass 跳过)
+  2. M2: bypass helper filter (改 `if _, ok := wantSet[ch.ID.String()]; ok` 为无条件 `out = append(out, *ch)`) → `FilterNotificationChannelsByIDs_FiltersToListed` + `PreservesChannelsOrder` 两红 (期望 2 个, 实际 3 个)
+  3. M3: 改 `notifyIDs != nil` 为 `len(notifyIDs) > 0` (丢「明确空」语义) → `RuleEmpty_NoLogsSQLite` 红 (真 sqlite count, 期望 0, 实际 3)
+- **关键设计要点**: M3 mutation 是**反向断言** (期望 INSERT **不**发生), sqlmock 默认对 extra queries 不报错 — 必须用真 sqlite in-memory 直接 count 表. 这与 M81 的 substring vs word-boundary 同款教训: 「写是写了, 写错了列/写错了行」正是 sqlmock 手写期望盖不住的缺陷.
+- poison-stop-gates-v1 沿用 ✓
+- watchdog 自旋防 + commit age ≥ 10 min 沿用 (M79 D3/D4) ✓
+
+**派生 (留 future)**:
+- **G-39 同形残留 `config.DingtalkConfig` 无人使用** (`internal/config/config.go:120`): 与 G-39 正交 (config 加载路径 vs notification 路径), 沿用 TODO 登记不修, 是 M83+ candidate 候选. 复用 M82 实证的「既有 helper + 加契约测试」模式可低成本收口.
+- **db_smoke 真 PG 测试覆盖 tickOnce 路径**: M82 没写真 PG db_smoke 测试 — sqlmock 序列 + 真 sqlite in-memory 覆盖了单元边界, 但真 PG 的并发 / 事务边界没测. M37-A 既有 `TestDBSmoke_M37A_AlertRuleNotifyChannelsWorkerFilter` 沿用 (bus 路径 e2e), 后续 round 可加 tickOnce 路径的真 PG 测试.
 
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
