@@ -65,6 +65,13 @@ const IPV6_BODIES = [
   `${HEX_GROUP}:(?::${HEX_GROUP}){1,6}`, // 左 1 组 + :: + 右 N 组
   `:(?::${HEX_GROUP}){1,7}`, // 左 0 组：::1 / ::1:2
   '::', // 全压缩
+  // M72：IPv4-mapped IPv6 dotted-quad 形式（RFC 4291 §2.5.5.2）。backend `net.ParseIP`
+  // 收这种（To4() 非 nil, 落 v4 分流）。hex-hex 形式（`::ffff:0:0` / `::ffff:ffff:ffff`）
+  // 已被现有第 9 条 `:(?::HEX){1,7}` 意外覆盖（M72 测试用 mutation 反证：
+  // 删这两条后 hex-hex 用例仍绿，证明它们走的是旧分支 —— 但 M72 仍要写进 IPV6_BODIES，
+  // 因为未来若收紧"左 0 组"那条就要靠这条显式锚）。与前端口径必须对齐，
+  // 否则表单填 ::ffff:1.2.3.4 会前端红 → 后端通 的假阳性。
+  `::ffff:${IPV4_BODY}`,
 ]
 const IPV6_BODY = `(?:${IPV6_BODIES.join('|')})`
 

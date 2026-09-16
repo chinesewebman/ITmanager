@@ -99,6 +99,42 @@ describe('M62 IP_PATTERN 同时收 v4 与 v6', () => {
   )
 })
 
+// M72：IPv4-mapped IPv6（RFC 4291 §2.5.5.2）。backend `net.ParseIP` 收：
+//   ::ffff:1.2.3.4 —— dotted-quad 形式（**本 round 唯一真新增**的 regex 分支）。
+//   ::ffff:0:0 / ::ffff:ffff:ffff —— hex-hex 形式，**已被现有第 9 条 `:(?::HEX){1,7}`
+//   意外覆盖**（mutation 反证：删新增后这两条仍 PASS）。但这两条用例仍保留，
+//   因为若未来收紧"左 0 组"那条，新分支要显式锚这些。
+//
+// 业务：双栈 socket bind / IN6_IS_ADDR_V4MAPPED 检查 / `ip -6 addr` 都产 dotted-quad
+// 格式。表单填 ::ffff:1.2.3.4 必须放行 —— 之前 IPV6_PATTERN 把它当非法 → 用户填
+// 完红 → 提交 backend 通 = 假阳性，用户怀疑 validator 坏掉。
+//
+// 边界：
+//   ::ffff:1.2.3.4.5 / ::ffff:1.2.3 / ::ffff:1.2.3.x —— 5 段 / 3 段 / 非数字 = backend nil
+//   fe80::1%eth0 —— zone id 仍拒（backend net.ParseIP 也不收；与 M62 一致）
+describe('M72 IPv4-mapped IPv6（与 backend net.ParseIP 对齐）', () => {
+  it.each([
+    '::ffff:1.2.3.4', // 点分十进制（最常见，业务首选）
+    '::ffff:0:0', // hex-hex 最小
+    '::ffff:ffff:ffff', // hex-hex 最大
+  ])('IPV6_PATTERN 接受 %s', (ip) => {
+    expect(IPV6_PATTERN.test(ip)).toBe(true)
+  })
+
+  it.each([
+    '::ffff:1.2.3.4.5', // 5 段（dotted-quad 是 4 段）
+    '::ffff:1.2.3', // 3 段
+    '::ffff:1.2.3.x', // 非数字
+    '::ffff:12345', // 5 位 16 进制（HEX 限 1-4 位）
+  ])('IPV6_PATTERN 拒绝 %s', (ip) => {
+    expect(IPV6_PATTERN.test(ip)).toBe(false)
+  })
+
+  it('IP_PATTERN（v4|v6）也接受 ::ffff:1.2.3.4', () => {
+    expect(IP_PATTERN.test('::ffff:1.2.3.4')).toBe(true)
+  })
+})
+
 describe('M62 ipRules', () => {
   it('必填文案与格式文案各一条，顺序是 required 在前', () => {
     expect(ipRules).toHaveLength(2)
