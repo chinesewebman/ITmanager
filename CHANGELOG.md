@@ -470,6 +470,38 @@ M37-A (ResolveAlert publish, commit `b9baeaf`) + M38-B (Zabbix fire path publish
 - **G-39 同形残留 `config.DingtalkConfig` 无人使用** (`internal/config/config.go:120`): 与 G-39 正交 (config 加载路径 vs notification 路径), 沿用 TODO 登记不修, 是 M83+ candidate 候选. 复用 M82 实证的「既有 helper + 加契约测试」模式可低成本收口.
 - **db_smoke 真 PG 测试覆盖 tickOnce 路径**: M82 没写真 PG db_smoke 测试 — sqlmock 序列 + 真 sqlite in-memory 覆盖了单元边界, 但真 PG 的并发 / 事务边界没测. M37-A 既有 `TestDBSmoke_M37A_AlertRuleNotifyChannelsWorkerFilter` 沿用 (bus 路径 e2e), 后续 round 可加 tickOnce 路径的真 PG 测试.
 
+### M83-candidate — CI 升级实证闭环 (OMH ulw-loop 第 14 cycle, 2026-09-16)
+
+**摩擦**: PM_QUEUE M83-candidate 来自 TODO.md L193 "`CI 升级`: 加 `go test -race` + frontend vitest 步骤", **物理 CI 步骤早由 M41 (`182f621`, 2026-09-13) + B1-3 (`3725f40`, 2026-07-01) 两轮 ship 完成** (`.github/workflows/ci.yml` L53 `go test -race ./...` + L205 `npx vitest run` 已在位). 但 PM_QUEUE 状态从未切到 `shipped`, TODO.md L193 仍 `- [ ]`, mutation inversion 实证从未做过 — watchdog 派工时无 round 实测守门.
+
+**决策**: 不新增 CI step (M41 + B1-3 已 ship), 走 **mutation inversion 实证既有 step 真在守门**模式 — 沿用 M82 cycle 13 closeout 范本.
+
+**改动** (CI verify + docs, ≤2h):
+- `intent-M83-candidate.md` 新建 (11KB, 8 节 omh-plan 骨架, Goal 钉死「实证闭环」与「不动既有 step」)
+- **mutation inversion 2 反证** (CI 守门实证, 与 M82 业务代码 mutation 同形不同物):
+  - **M1**: 写 `backend/internal/eventbus/m83_race_test.go` (故意 race, 2 goroutine × 1000 iter 共享 int 不带 mutex) → `go test -race -run TestM83_DeliberateRace ./internal/eventbus/` 红 (`WARNING: DATA RACE` × 多 stack trace, exit 1) → rm 文件 → `go test -race ./internal/eventbus/` 还原绿 (control, 既有 eventbus 测试 1.124s 全绿)
+  - **M2**: 写 `frontend/src/m83_failing.test.ts` (`expect(1+1).toBe(3)` 故意 fail) → `npx vitest run src/m83_failing.test.ts` 红 (1.07s 内报 assertion error, exit 1) → rm 文件 → 沿用既有 49 test files
+- 两个 mutation 文件**全部 rm**, `git status --short` 仅 `intent-M83-candidate.md` (D9 实证: 临时文件不入 commit)
+- `M83-candidate-completion-report.md` 新建 (12KB, 摩擦/决策/改动/mutation 实证/verify/派生 TODO/OMH workflow shape/注意事项)
+- `M83-candidate-graph-analysis.md` 新建 (7KB, CI workflow 节点图 + M1/M2 mutation 调用链 + M82↔M83 范本对比)
+- `CHANGELOG.md` 加本段 (放在 M82 之后, cycle 14)
+- `TODO.md` L193 `- [ ]` → `- [x]`, 标 "已 ship M41 `182f621` + B1-3 `3725f40`, M83-candidate 实证闭环 — mutation inversion 见 `M83-candidate-completion-report.md`"
+- `~/.hermes/state/PM_LAST_DISPATCH_RESULT.md` 写 M83 closeout (Poison 看 + watchdog 下次 tick 验证)
+- `~/.hermes/state/PM_QUEUE.json` M83-candidate.status: `candidate` → **`shipped`** + append `shipped[]` registry (D10 实证)
+
+**verify**:
+- `grep -n "go test -race\|npx vitest run" .github/workflows/ci.yml`: L53 + L205 双双在位 ✓
+- `cd backend && go test -race -count=1 -timeout=180s ./...`: **28 packages ok** ✓ (0 退化, race detector 0 误报)
+- `cd backend && go test -race -count=1 ./internal/eventbus/` (control, 无 M1 mutation): **ok 1.124s** ✓
+- `npx vitest run src/m83_failing.test.ts` (M2 mutation): **红**, exit 1, 1.07s ✓
+- `npx vitest run src/pages/Assets.test.tsx` (control, 26 tests): **EXIT=0** ✓
+- mutation inversion 实证 2 / 2 反证全红 → 还原全绿 ✓ (CI 守门真工作)
+
+**派生 (留 future)**:
+- **G-CI-2 coverage 阈值门禁 (TODO.md L194)**: 沿用 PM_QUEUE 登记不修, M84+ candidate 候选. 沿用 M82 「既有 helper + 加契约测试」模式 + M83 「CI 守门 mutation inversion」模式组合 (加 coverage 阈值命令 + 加契约测试验阈值命令真生效). **先调研项目当前 coverage 状态再起 round**.
+- **「CI 守门 mutation inversion」范本写入 skill**: 本 round 新增范本 B (M82 范本 A = 业务代码, M83 范本 B = CI 守门) 可写进 `~/.omh/skills/planner/intent-spec-author/SKILL.md` 8 节 Verification 段的 mutation inversion 范本库, 后续 CI 升级 round 复用.
+- **CI 失败时给 PR 评论 (chatops)**: 派生 follow-up, 不在本 round scope.
+
 ### M79 — PM-direct Autonomous Loop（Poison C: A+B 混合, OMH ulw-loop 第 9 cycle, 2026-09-17）
 
 **摩擦**: Poison 2026-09-17 verbatim "最好还是有个循环，而不是在对话里等待". 当前 PM-direct

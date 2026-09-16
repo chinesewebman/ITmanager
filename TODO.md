@@ -190,7 +190,7 @@
 - [x] **TESTING.md** (4.7K)：测试现状 + 21 bug 清单 + 覆盖率表
 - [x] **Swagger UI** + CI validate
 - [x] **TODO.md / tasks.md / 12-优化建议.md / 开发计划.md** 状态同步 (2026-06-16)
-- [ ] **CI 升级**：加 `go test -race` + frontend vitest 步骤
+- [x] **CI 升级**：加 `go test -race` + frontend vitest 步骤（已 ship M41 `182f621` + B1-3 `3725f40`, M83-candidate 实证闭环 — mutation inversion 见 `M83-candidate-completion-report.md`）
 - [ ] **CI 升级**：加 coverage 阈值门禁 (目前仅 generate)
 - [ ] **覆盖盲区**：`internal/database` 0% (依赖 PG) / `internal/middleware` 36.5% (跟 api 共享) / `internal/integration` 39.5%
 - [ ] **type-safe 推进**：10/13 服务方法仍 `data: any`
