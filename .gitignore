@@ -24,6 +24,10 @@ bin/
 .env.*.local
 *.local
 
+# Test environment files (PM-direct round 跑测试时落盘, 不入仓)
+.env.test*
+.env.aux.test*
+
 # Logs
 *.log
 npm-debug.log*
