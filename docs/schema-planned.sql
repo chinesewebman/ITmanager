@@ -8,6 +8,14 @@
 -- ⚠️ 本文件**不是可执行建库脚本**：其中多张表通过外键引用 schema.sql 中的
 --    已实现表，单独执行会因缺少被引用表而失败。仅作设计归档。
 --
+-- ⚠️ **冻结声明 — 2026-09-18**：本文件自 v3 R5 落地起进入归档冻结状态。
+--    - 禁止在 main 分支引用本文件中任何表（schema.sql + migrations/ 是建库唯一途径）
+--    - 禁止将本文件中任何表重新建模为 GORM 模型（即便先 AutoMigrate 也属违例）
+--    - 如确有需求启用某张归档表，必须先写 ADR 复评（参考 v4-候选清单.md，
+--      2026-09-18 立）并经 master 决策
+--    - CI 防呆：`scripts/db_smoke.sh` 应校验 `pg_class` 不包含本清单以外的
+--      schema.sql 表新增；本声明作为 schema 锁的事实依据（具体代码约束另立 round）
+--
 -- 清单（39）:
 --   role_permissions, user_sessions, line_types, lines, line_changes, line_monitors, asset_history, asset_hardware, asset_software, collect_tasks, collectors, discovery_tasks, discovery_results, snmp_credential_compliance, snmp_devices, alert_notifications, ticket_steps, step_progress_history, ticket_progress, ticket_templates, ticket_workflows, ticket_approvals, ticket_sla, ticket_segments, ticket_handoffs, topology_links, vmware_connections, vmware_hosts, vmware_vms, vmware_sync_history, migration_tasks, migration_node_status, migration_history, llm_providers, kb_documents, ai_conversations, ai_messages, system_config, scheduled_tasks
 -- ============================================================================
